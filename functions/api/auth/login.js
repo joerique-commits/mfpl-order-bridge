@@ -36,7 +36,22 @@ export async function onRequestPost({ request, env }) {
     return errorJson('email and password are required', 400);
   }
 
-  const user = await authenticate(env.AUTH, email, password);
+  // TEMPORARY DIAGNOSTIC WRAP (2026-10-15): a real login attempt against this
+  // endpoint has been crashing with EdgeOne's platform-level HTTP 545
+  // ("Error return from script"), i.e. an uncaught exception somewhere in
+  // authenticate() -> verifyPassword() -> the Web Crypto PBKDF2 calls. The
+  // uncaught exception means nothing - no message, no stack - reaches the
+  // client or any log panel we have access to. This try/catch exists only to
+  // surface that error's real message/stack in the JSON response so we can
+  // see it directly, instead of groping in the dark. Remove this try/catch
+  // (restore the plain `const user = await authenticate(...)` call below)
+  // once the underlying bug is identified and fixed.
+  let user;
+  try {
+    user = await authenticate(env.AUTH, email, password);
+  } catch (e) {
+    return errorJson(`DIAGNOSTIC: authenticate() threw: ${e && e.message} | stack: ${e && e.stack}`, 500);
+  }
   if (!user) {
     // Deliberately generic - don't reveal whether the email exists.
     return errorJson('Invalid email or password', 401);
