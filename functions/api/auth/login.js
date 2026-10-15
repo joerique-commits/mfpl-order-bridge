@@ -1,6 +1,17 @@
 // POST /api/auth/login  { email, password } -> { token, expiresAt, user }
 //
-// env.AUTH is the ob_auth KV namespace binding (see mfpl-edgeone-kv-schema.md).
+// AUTH is the ob_auth KV namespace binding (see mfpl-edgeone-kv-schema.md).
+// IMPORTANT: on EdgeOne Pages/Makers Functions, a bound KV namespace is
+// injected as a bare global matching its configured "Variable name" (here
+// literally the identifier `AUTH`) - it is NOT exposed via the handler's
+// `env` argument the way Cloudflare Pages Functions do it. `env` here is
+// EdgeOne's own build/runtime environment object (NPM_CONFIG_YES,
+// EDGEONE_PROJECT_ID, etc.) and has nothing to do with KV bindings. This was
+// confirmed by dumping Object.keys(env) in production and cross-checking
+// against EdgeOne's own docs (edgeone.ai/document/162227803822321664) - see
+// mfpl-edgeone-kv-schema.md for the full writeup. Every route file that
+// touches KV was fixed the same way: reference the bound variable name
+// directly (`AUTH`, `APP_DATA`, `ERP_MIRROR`), never `env.<name>`.
 //
 // onRequestOptions below handles the browser's CORS preflight. A
 // functions/_middleware.js attempt at this (wrapping every route) landed
@@ -23,7 +34,7 @@ export function onRequestOptions() {
   return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
-export async function onRequestPost({ request, env }) {
+export async function onRequestPost({ request }) {
   let body;
   try {
     body = await readJsonBody(request);
@@ -36,32 +47,13 @@ export async function onRequestPost({ request, env }) {
     return errorJson('email and password are required', 400);
   }
 
-  // TEMPORARY DIAGNOSTIC WRAP (2026-10-15): a real login attempt against this
-  // endpoint has been crashing with EdgeOne's platform-level HTTP 545
-  // ("Error return from script"), i.e. an uncaught exception somewhere in
-  // authenticate() -> verifyPassword() -> the Web Crypto PBKDF2 calls. The
-  // uncaught exception means nothing - no message, no stack - reaches the
-  // client or any log panel we have access to. This try/catch exists only to
-  // surface that error's real message/stack in the JSON response so we can
-  // see it directly, instead of groping in the dark. Remove this try/catch
-  // (restore the plain `const user = await authenticate(...)` call below)
-  // once the underlying bug is identified and fixed.
-  let user;
-  try {
-    const envKeys = env && typeof env === 'object' ? Object.keys(env).join(',') : String(env);
-    if (!env || !env.AUTH) {
-      return errorJson(`DIAGNOSTIC: env.AUTH missing. typeof env=${typeof env} envKeys=[${envKeys}] typeof env.AUTH=${env && typeof env.AUTH}`, 500);
-    }
-    user = await authenticate(env.AUTH, email, password);
-  } catch (e) {
-    return errorJson(`DIAGNOSTIC: authenticate() threw: ${e && e.message} | stack: ${e && e.stack}`, 500);
-  }
+  const user = await authenticate(AUTH, email, password);
   if (!user) {
     // Deliberately generic - don't reveal whether the email exists.
     return errorJson('Invalid email or password', 401);
   }
 
-  const { token, expiresAt } = await createSession(env.AUTH, user);
+  const { token, expiresAt } = await createSession(AUTH, user);
   return json({
     token,
     expiresAt,
