@@ -6,18 +6,18 @@ import { getDataset, listDatasetMeta } from '../../_lib/erp-mirror.js';
 import { json, errorJson, bearerToken } from '../../_lib/http.js';
 
 export async function onRequestGet({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), null);
+  const auth = await requireRole(AUTH, bearerToken(request), null);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   const url = new URL(request.url);
   const key = url.searchParams.get('key');
 
   if (!key) {
-    const datasets = await listDatasetMeta(env.ERP_MIRROR);
+    const datasets = await listDatasetMeta(ERP_MIRROR);
     return json({ datasets });
   }
 
-  const dataset = await getDataset(env.ERP_MIRROR, key);
+  const dataset = await getDataset(ERP_MIRROR, key);
   if (!dataset) return errorJson(`Dataset '${key}' has not been uploaded yet`, 404);
   return json(dataset);
 }
