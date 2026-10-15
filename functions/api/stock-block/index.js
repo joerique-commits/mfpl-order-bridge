@@ -27,7 +27,7 @@ const ROLE_FOR_ACTION = {
 };
 
 export async function onRequestGet({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), null);
+  const auth = await requireRole(AUTH, bearerToken(request), null);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   const url = new URL(request.url);
@@ -37,15 +37,15 @@ export async function onRequestGet({ request, env }) {
 
   try {
     if (article && warehouse) {
-      const position = await getStockPosition(env.ERP_MIRROR, env.APP_DATA, article, warehouse);
+      const position = await getStockPosition(ERP_MIRROR, APP_DATA, article, warehouse);
       return json({ position });
     }
     if (warehouse) {
-      const blocked = await listBlockedByWarehouse(env.APP_DATA, warehouse);
+      const blocked = await listBlockedByWarehouse(APP_DATA, warehouse);
       return json({ blocked });
     }
     if (so) {
-      const requests = await listRequestsForSo(env.APP_DATA, so);
+      const requests = await listRequestsForSo(APP_DATA, so);
       return json({ requests });
     }
     return errorJson('so, warehouse, or article and warehouse, is required', 400);
@@ -66,17 +66,17 @@ export async function onRequestPost({ request, env }) {
   const allowedRoles = ROLE_FOR_ACTION[action];
   if (!allowedRoles) return errorJson(`Unknown action '${action}'`, 400);
 
-  const auth = await requireRole(env.AUTH, bearerToken(request), allowedRoles);
+  const auth = await requireRole(AUTH, bearerToken(request), allowedRoles);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   try {
     switch (action) {
       case 'create':
-        return json({ request: await createRequest(env.APP_DATA, body, auth.user) }, 201);
+        return json({ request: await createRequest(APP_DATA, body, auth.user) }, 201);
       case 'decide':
-        return json({ request: await decide(env.APP_DATA, body.id, body.decision, body.reason, auth.user) });
+        return json({ request: await decide(APP_DATA, body.id, body.decision, body.reason, auth.user) });
       case 'release':
-        return json({ request: await release(env.APP_DATA, body.id, auth.user) });
+        return json({ request: await release(APP_DATA, body.id, auth.user) });
       default:
         return errorJson(`Unknown action '${action}'`, 400);
     }
