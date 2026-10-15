@@ -48,6 +48,10 @@ export async function onRequestPost({ request, env }) {
   // once the underlying bug is identified and fixed.
   let user;
   try {
+    const envKeys = env && typeof env === 'object' ? Object.keys(env).join(',') : String(env);
+    if (!env || !env.AUTH) {
+      return errorJson(`DIAGNOSTIC: env.AUTH missing. typeof env=${typeof env} envKeys=[${envKeys}] typeof env.AUTH=${env && typeof env.AUTH}`, 500);
+    }
     user = await authenticate(env.AUTH, email, password);
   } catch (e) {
     return errorJson(`DIAGNOSTIC: authenticate() threw: ${e && e.message} | stack: ${e && e.stack}`, 500);
