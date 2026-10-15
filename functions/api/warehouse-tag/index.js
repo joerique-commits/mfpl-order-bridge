@@ -8,7 +8,7 @@ import { json, errorJson, readJsonBody, bearerToken } from '../../_lib/http.js';
 
 const WRITE_ROLES = ['supply', 'production', 'admin'];
 
-export async function onRequestGet({ request }) {
+export async function onRequestGet({ request, env }) {
   const auth = await requireRole(AUTH, bearerToken(request), null);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
@@ -32,7 +32,7 @@ export async function onRequestGet({ request }) {
   return json({ tags });
 }
 
-export async function onRequestPost({ request }) {
+export async function onRequestPost({ request, env }) {
   const auth = await requireRole(AUTH, bearerToken(request), WRITE_ROLES);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
