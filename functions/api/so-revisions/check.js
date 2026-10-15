@@ -15,14 +15,16 @@ export async function onRequestPost({ request, env }) {
   const { id, area, note } = body || {};
   if (!id || !area) return errorJson('id and area are required', 400);
 
+  // The role allowed to check an area matches the area itself (supply checks
+  // 'supply', accounts checks 'accounts') - admin can do either as a fallback.
   const allowedRole = area === 'supply' ? 'supply' : area === 'accounts' ? 'accounts' : null;
   if (!allowedRole) return errorJson("area must be 'supply' or 'accounts'", 400);
 
-  const auth = await requireRole(env.AUTH, bearerToken(request), [allowedRole, 'admin']);
+  const auth = await requireRole(AUTH, bearerToken(request), [allowedRole, 'admin']);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   try {
-    const result = await checkSoRevision(env.APP_DATA, { id, area, note }, auth.user);
+    const result = await checkSoRevision(APP_DATA, { id, area, note }, auth.user);
     return json({ request: result });
   } catch (e) {
     return errorJson(e.message, 409);
