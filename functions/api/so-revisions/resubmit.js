@@ -6,7 +6,7 @@ import { resubmitSoRevision } from '../../_lib/so-revisions.js';
 import { json, errorJson, readJsonBody, bearerToken } from '../../_lib/http.js';
 
 export async function onRequestPost({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), ['sales']);
+  const auth = await requireRole(AUTH, bearerToken(request), ['sales']);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   let body;
@@ -20,7 +20,7 @@ export async function onRequestPost({ request, env }) {
   if (!id) return errorJson('id is required', 400);
 
   try {
-    const result = await resubmitSoRevision(env.APP_DATA, id, input, auth.user);
+    const result = await resubmitSoRevision(APP_DATA, id, input, auth.user);
     return json({ request: result });
   } catch (e) {
     return errorJson(e.message, 409);
