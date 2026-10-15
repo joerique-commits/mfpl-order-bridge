@@ -5,7 +5,7 @@ import { createChallan } from '../../_lib/furnishings-tag.js';
 import { json, errorJson, readJsonBody, bearerToken } from '../../_lib/http.js';
 
 export async function onRequestPost({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), ['supply', 'production', 'admin']);
+  const auth = await requireRole(AUTH, bearerToken(request), ['supply', 'production', 'admin']);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   let body;
@@ -16,7 +16,7 @@ export async function onRequestPost({ request, env }) {
   }
 
   try {
-    const challan = await createChallan(env.APP_DATA, body, auth.user);
+    const challan = await createChallan(APP_DATA, body, auth.user);
     return json({ challan }, 201);
   } catch (e) {
     return errorJson(e.message, 409);
