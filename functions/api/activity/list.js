@@ -7,13 +7,13 @@ import { requireRole } from '../../_lib/session.js';
 import { listByRole, listByParticipant } from '../../_lib/activity.js';
 import { json, errorJson, bearerToken } from '../../_lib/http.js';
 
-export async function onRequestGet({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), null);
+export async function onRequestGet({ request }) {
+  const auth = await requireRole(AUTH, bearerToken(request), null);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   const [inYourArea, yourActivity] = await Promise.all([
-    listByRole(env.APP_DATA, auth.user.role),
-    listByParticipant(env.APP_DATA, auth.user.uid),
+    listByRole(APP_DATA, auth.user.role),
+    listByParticipant(APP_DATA, auth.user.uid),
   ]);
 
   return json({ yourActivity, inYourArea });
