@@ -84,6 +84,30 @@ export async function onRequestGet() {
       ['deriveBits']
     );
     results.importKey_stringAlgo = { ok: true };
+
+    try {
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const derived = await crypto.subtle.deriveBits(
+        { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
+        keyMaterial2,
+        256
+      );
+      results.deriveBits_withStringImport_stringHash = { ok: true, byteLength: derived.byteLength };
+    } catch (e7) {
+      results.deriveBits_withStringImport_stringHash = { ok: false, name: e7 && e7.name, message: e7 && e7.message };
+    }
+
+    try {
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const derived = await crypto.subtle.deriveBits(
+        { name: 'PBKDF2', salt, iterations: 100000, hash: { name: 'SHA-256' } },
+        keyMaterial2,
+        256
+      );
+      results.deriveBits_withStringImport_objectHash = { ok: true, byteLength: derived.byteLength };
+    } catch (e8) {
+      results.deriveBits_withStringImport_objectHash = { ok: false, name: e8 && e8.name, message: e8 && e8.message };
+    }
   } catch (e6) {
     results.importKey_stringAlgo = { ok: false, name: e6 && e6.name, message: e6 && e6.message };
   }
