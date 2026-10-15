@@ -24,10 +24,19 @@ function fromHex(hex) {
 
 async function pbkdf2(password, saltBytes, iterations, keyBytes) {
   const enc = new TextEncoder();
+  // IMPORTANT: EdgeOne's edge Web Crypto implementation throws a generic
+  // "Error: Param Invalid" if importKey's algorithm identifier is passed as
+  // an object ({ name: 'PBKDF2' }) - confirmed via a standalone diagnostic
+  // endpoint (functions/api/diag/crypto.js, since removed) that isolated
+  // every call in this function. It only accepts the bare string form.
+  // deriveBits below is fine with its algorithm as an object, as long as
+  // *its* nested `hash` field is also a bare string ('SHA-256'), not
+  // { name: 'SHA-256' } - that combination is what's used below. See
+  // mfpl-edgeone-kv-schema.md for the full writeup.
   const keyMaterial = await crypto.subtle.importKey(
     'raw',
     enc.encode(password),
-    { name: 'PBKDF2' },
+    'PBKDF2',
     false,
     ['deriveBits']
   );
