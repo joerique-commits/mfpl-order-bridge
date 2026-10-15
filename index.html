@@ -3481,6 +3481,52 @@ const USERS = [
   { id:'U-4', name:'Meera Kapoor', email:'admin@magari.in', password:'1234', role:'admin' },
   { id:'U-5', name:'Divya Nair', email:'accounts@magari.in', password:'1234', role:'accounts' },
 ];
+// NOTE (15 Oct): USERS above is pre-login-wiring demo data — login itself no longer
+// reads from it (see wireLoginEvents' apiFetch('/api/auth/login') call). Only
+// joe@magari.in exists as a real account in the live ob_auth KV store right now; JK
+// provisions the rest through User Permissions > Add user once this is live, which
+// should go through POST /api/admin/users rather than this array. Left in place
+// because the User Permissions screen below still reads/writes it directly — that
+// screen is its own, not-yet-wired module (same mock-data status as every other
+// module besides auth), tracked as a separate follow-up, not silently fixed here.
+
+// ---------------------------------------------------------------------
+// Live API helpers, wired 15 Oct. Every call is same-origin (relative /api/... path,
+// no CORS) against the EdgeOne Pages Functions backend in this same repo's functions/
+// directory. The session token is a plain bearer token (see functions/_lib/session.js),
+// persisted in localStorage so a page reload doesn't force a re-login.
+// ---------------------------------------------------------------------
+const AUTH_TOKEN_KEY = 'ob_auth_token';
+function getAuthToken(){ try { return localStorage.getItem(AUTH_TOKEN_KEY); } catch(e) { return null; } }
+function saveAuthToken(token){ try { localStorage.setItem(AUTH_TOKEN_KEY, token); } catch(e) {} }
+function clearAuthToken(){ try { localStorage.removeItem(AUTH_TOKEN_KEY); } catch(e) {} }
+async function apiFetch(path, opts={}){
+  const headers = Object.assign({}, opts.headers || {});
+  let body = opts.body;
+  if (body && typeof body !== 'string' && !(body instanceof FormData)){
+    headers['Content-Type'] = 'application/json';
+    body = JSON.stringify(body);
+  }
+  const token = getAuthToken();
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  let res;
+  try {
+    res = await fetch(path, Object.assign({}, opts, { headers, body }));
+  } catch (networkErr) {
+    const err = new Error('Network error — check your connection and try again.');
+    err.status = 0;
+    throw err;
+  }
+  let data = null;
+  try { data = await res.json(); } catch(e) { /* empty/non-JSON body */ }
+  if (!res.ok){
+    const err = new Error((data && data.error) || `Request failed (HTTP ${res.status})`);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
 
 const ROLES = {
   sales:      { label:'Sales',        name:'Priya Menon',  emphasis:'Complete every SKU’s detail so its PO can be raised, then respond to any clarification production sends back.' },
@@ -3612,7 +3658,7 @@ let state = {
     visibility: JSON.parse(JSON.stringify(DEFAULT_NAV_VISIBILITY)),
     editAccess: JSON.parse(JSON.stringify(DEFAULT_NAV_EDIT_ACCESS)),
   },
-  currentUser:null, loginEmail:'', loginPassword:'', loginError:'',
+  currentUser:null, loginEmail:'', loginPassword:'', loginError:'', loginBusy:false,
 };
 
 function daysOut(dateStr){ return Math.round((new Date(dateStr) - TODAY)/86400000); }
@@ -3790,40 +3836,51 @@ function renderLoginScreen(){
         <div><div class="name">Order Bridge</div><div class="sub">MFPL Lifecycle</div></div>
       </div>
       <h2>Sign in</h2>
-      <div class="field"><label>Email</label><input id="li_email" type="email" placeholder="name@magari.in" value="${state.loginEmail}" autocomplete="username"></div>
-      <div class="field"><label>Password</label><input id="li_password" type="password" placeholder="••••" autocomplete="current-password"></div>
+      <div class="field"><label>Email</label><input id="li_email" type="email" placeholder="name@magari.in" value="${state.loginEmail}" autocomplete="username" ${state.loginBusy?'disabled':''}></div>
+      <div class="field"><label>Password</label><input id="li_password" type="password" placeholder="••••" autocomplete="current-password" ${state.loginBusy?'disabled':''}></div>
       ${state.loginError ? `<div class="login-error">${state.loginError}</div>` : ''}
-      <button class="btn btn-primary" id="loginSubmit" style="width:100%;">Sign in</button>
-      <div class="login-hint">Password for every account is <span class="mono">1234</span> — email is the username.</div>
+      <button class="btn btn-primary" id="loginSubmit" style="width:100%;" ${state.loginBusy?'disabled':''}>${state.loginBusy?'Signing in…':'Sign in'}</button>
     </div>
   `;
   wireLoginEvents();
 }
+// Live auth, wired 15 Oct: POST /api/auth/login against the real EdgeOne-KV backend
+// (see apiFetch above). Only joe@magari.in exists as a real account right now — JK
+// provisions the rest himself via User Permissions > Add user once this is live.
 function wireLoginEvents(){
   const emailInput = document.getElementById('li_email');
   const passwordInput = document.getElementById('li_password');
   if (emailInput) emailInput.addEventListener('input', (e) => { state.loginEmail = e.target.value; });
   if (passwordInput) passwordInput.addEventListener('input', (e) => { state.loginPassword = e.target.value; });
-  const tryLogin = () => {
+  const tryLogin = async () => {
+    if (state.loginBusy) return;
     const email = ((emailInput && emailInput.value) || '').trim().toLowerCase();
     const password = (passwordInput && passwordInput.value) || '';
-    const user = USERS.find(u => u.email.toLowerCase() === email && u.password === password);
-    if (!user){
-      state.loginError = 'Incorrect email or password.';
+    if (!email || !password) return;
+    state.loginBusy = true; state.loginError = '';
+    renderLoginScreen();
+    try {
+      const data = await apiFetch('/api/auth/login', { method:'POST', body:{ email, password } });
+      saveAuthToken(data.token);
+      state.currentUser = data.user;
+      state.role = data.user.role;
+      state.loginEmail = ''; state.loginPassword = ''; state.loginError = ''; state.loginBusy = false;
+      boot();
+    } catch (e) {
+      state.loginBusy = false;
+      state.loginError = (e.status === 401) ? 'Incorrect email or password.' : 'Could not sign in — check your connection and try again.';
       state.loginPassword = '';
       renderLoginScreen();
-      return;
     }
-    state.currentUser = user;
-    state.role = user.role;
-    state.loginEmail = ''; state.loginPassword = ''; state.loginError = '';
-    boot();
   };
   const submitBtn = document.getElementById('loginSubmit');
   if (submitBtn) submitBtn.addEventListener('click', tryLogin);
   [emailInput, passwordInput].forEach(inp => { if (inp) inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') tryLogin(); }); });
 }
 function logout(){
+  const token = getAuthToken();
+  clearAuthToken();
+  if (token) { fetch('/api/auth/logout', { method:'POST', headers:{ 'Authorization': 'Bearer ' + token } }).catch(()=>{}); }
   state.currentUser = null;
   state.role = 'sales';
   state.module = 'dashboard'; state.openOrderId = null;
@@ -7398,7 +7455,24 @@ function wireContentEvents(){
   }));
 }
 
+// Session restore, wired 15 Oct: a stored token gets one GET /api/auth/me check on
+// initial load only (boot() itself stays synchronous — it's also called directly
+// after login/logout elsewhere in this file, where there's nothing left to restore).
+async function restoreSessionAndBoot(){
+  const token = getAuthToken();
+  if (token){
+    try {
+      const data = await apiFetch('/api/auth/me');
+      state.currentUser = data.user;
+      state.role = data.user.role;
+    } catch (e) {
+      clearAuthToken();
+    }
+  }
+  boot();
+}
+
 const _publicOrderId = publicDeliveryFormOrderId();
 if (_publicOrderId) renderPublicDeliveryPage(_publicOrderId);
-else boot();
+else restoreSessionAndBoot();
 </script>
