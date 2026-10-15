@@ -55,12 +55,12 @@ const ROLE_FOR_ACTION = {
 };
 
 export async function onRequestGet({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), null);
+  const auth = await requireRole(AUTH, bearerToken(request), null);
   if (!auth.ok) return errorJson(auth.error, auth.status);
   const url = new URL(request.url);
   const bookingId = url.searchParams.get('bookingId');
   if (!bookingId) return errorJson('bookingId is required', 400);
-  const record = await getRecord(env.APP_DATA, bookingId);
+  const record = await getRecord(APP_DATA, bookingId);
   if (!record) return json({ record: null });
   return json({ record, gate: isReadyToDispatch(record) });
 }
@@ -77,39 +77,39 @@ export async function onRequestPost({ request, env }) {
   const allowedRoles = ROLE_FOR_ACTION[action];
   if (!allowedRoles) return errorJson(`Unknown action '${action}'`, 400);
 
-  const auth = await requireRole(env.AUTH, bearerToken(request), allowedRoles);
+  const auth = await requireRole(AUTH, bearerToken(request), allowedRoles);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   try {
     switch (action) {
       case 'start':
-        return json({ record: await startRecord(env.APP_DATA, env.ERP_MIRROR, { so: body.so, bookingId }, auth.user) }, 201);
+        return json({ record: await startRecord(APP_DATA, ERP_MIRROR, { so: body.so, bookingId }, auth.user) }, 201);
       case 'add_payment':
-        return json({ payment: await addPayment(env.APP_DATA, bookingId, body, auth.user) }, 201);
+        return json({ payment: await addPayment(APP_DATA, bookingId, body, auth.user) }, 201);
       case 'remove_payment':
-        return json({ record: await removePayment(env.APP_DATA, bookingId, body.paymentId, auth.user) });
+        return json({ record: await removePayment(APP_DATA, bookingId, body.paymentId, auth.user) });
       case 'submit_payments':
-        return json({ record: await submitPayments(env.APP_DATA, bookingId, auth.user) });
+        return json({ record: await submitPayments(APP_DATA, bookingId, auth.user) });
       case 'reopen_payment':
-        return json({ record: await reopenPayment(env.APP_DATA, bookingId, body.paymentId, auth.user) });
+        return json({ record: await reopenPayment(APP_DATA, bookingId, body.paymentId, auth.user) });
       case 'confirm_payment':
-        return json({ record: await confirmPaymentReceipt(env.APP_DATA, bookingId, body.paymentId, auth.user) });
+        return json({ record: await confirmPaymentReceipt(APP_DATA, bookingId, body.paymentId, auth.user) });
       case 'send_payment_back':
-        return json({ record: await sendPaymentBack(env.APP_DATA, bookingId, body.paymentId, body.reason, auth.user) });
+        return json({ record: await sendPaymentBack(APP_DATA, bookingId, body.paymentId, body.reason, auth.user) });
       case 'create_approval':
-        return json({ approval: await createApprovalLink(env.APP_DATA, bookingId, body.reason, auth.user) }, 201);
+        return json({ approval: await createApprovalLink(APP_DATA, bookingId, body.reason, auth.user) }, 201);
       case 'withdraw_approval':
-        return json({ record: await withdrawApprovalLink(env.APP_DATA, bookingId, auth.user) });
+        return json({ record: await withdrawApprovalLink(APP_DATA, bookingId, auth.user) });
       case 'decide_approval':
-        return json({ record: await decideApproval(env.APP_DATA, bookingId, body.token, body.decision, body.comment, auth.user) });
+        return json({ record: await decideApproval(APP_DATA, bookingId, body.token, body.decision, body.comment, auth.user) });
       case 'validate_approval':
-        return json({ record: await validateApproval(env.APP_DATA, bookingId, auth.user) });
+        return json({ record: await validateApproval(APP_DATA, bookingId, auth.user) });
       case 'enter_erp':
-        return json({ record: await enterErpNumbers(env.APP_DATA, bookingId, body, auth.user) });
+        return json({ record: await enterErpNumbers(APP_DATA, bookingId, body, auth.user) });
       case 'enter_invoice_eway':
-        return json({ record: await enterInvoiceEway(env.APP_DATA, bookingId, body, auth.user) });
+        return json({ record: await enterInvoiceEway(APP_DATA, bookingId, body, auth.user) });
       case 'override':
-        return json({ record: await overrideGate(env.APP_DATA, bookingId, body.reason, auth.user) });
+        return json({ record: await overrideGate(APP_DATA, bookingId, body.reason, auth.user) });
       default:
         return errorJson(`Unknown action '${action}'`, 400);
     }
