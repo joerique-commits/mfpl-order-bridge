@@ -16,8 +16,8 @@ import { json, errorJson, readJsonBody, bearerToken } from '../../_lib/http.js';
 // other role, just gated to the /api/so-revisions/decide endpoint.
 const VALID_ROLES = ['sales', 'supply', 'production', 'admin', 'accounts', 'approver'];
 
-export async function onRequestGet({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), ['admin']);
+export async function onRequestGet({ request }) {
+  const auth = await requireRole(AUTH, bearerToken(request), ['admin']);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   // No secondary index of "all users" exists yet (see schema doc - this is
@@ -26,17 +26,17 @@ export async function onRequestGet({ request, env }) {
   // namespace's own prefix-scoped list() is sufficient and avoids building
   // an index for a handful of records; revisit if the account list grows
   // large enough that list()'s 256-key page size becomes a real limit.
-  const page = await env.AUTH.list({ prefix: 'user:' });
+  const page = await AUTH.list({ prefix: 'user:' });
   const users = [];
   for (const entry of page.keys) {
-    const u = await getJSON(env.AUTH, entry.name);
+    const u = await getJSON(AUTH, entry.name);
     if (u) users.push({ uid: u.uid, email: u.email, name: u.name, role: u.role, title: u.title || null, active: u.active, createdAt: u.createdAt });
   }
   return json({ users });
 }
 
-export async function onRequestPost({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), ['admin']);
+export async function onRequestPost({ request }) {
+  const auth = await requireRole(AUTH, bearerToken(request), ['admin']);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   let body;
@@ -61,7 +61,7 @@ export async function onRequestPost({ request, env }) {
     // title is only meaningful for role='approver' (shown on the approval
     // card, e.g. "COO" / "Director") but there's no reason to reject it for
     // other roles - createUser just stores whatever is passed.
-    const user = await createUser(env.AUTH, { email, name, role, password, title: title || null });
+    const user = await createUser(AUTH, { email, name, role, password, title: title || null });
     return json({ user: { uid: user.uid, email: user.email, name: user.name, role: user.role, title: user.title } }, 201);
   } catch (e) {
     return errorJson(e.message, 409);
