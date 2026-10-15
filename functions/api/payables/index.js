@@ -9,7 +9,7 @@ import { buildLineId } from '../../_lib/po-progress.js';
 import { json, errorJson, bearerToken } from '../../_lib/http.js';
 
 export async function onRequestGet({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), null);
+  const auth = await requireRole(AUTH, bearerToken(request), null);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   const url = new URL(request.url);
@@ -17,6 +17,6 @@ export async function onRequestGet({ request, env }) {
   const to = url.searchParams.get('to') || undefined;
   const cutoffDate = url.searchParams.get('cutoff') || DEFAULT_CUTOFF_DATE;
 
-  const view = await buildPayablesView(env.APP_DATA, env.ERP_MIRROR, { buildLineId, cutoffDate, from, to });
+  const view = await buildPayablesView(APP_DATA, ERP_MIRROR, { buildLineId, cutoffDate, from, to });
   return json({ view });
 }
