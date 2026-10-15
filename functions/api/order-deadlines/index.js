@@ -43,7 +43,7 @@ const ROLE_FOR_ACTION = {
 };
 
 export async function onRequestGet({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), null);
+  const auth = await requireRole(AUTH, bearerToken(request), null);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   const url = new URL(request.url);
@@ -51,13 +51,13 @@ export async function onRequestGet({ request, env }) {
   const po = url.searchParams.get('po');
 
   if (po && !lineId) {
-    const outerLimit = await getPoOuterLimit(env.APP_DATA, po);
+    const outerLimit = await getPoOuterLimit(APP_DATA, po);
     return json({ outerLimit });
   }
   if (!lineId) return errorJson('lineId or po is required', 400);
 
-  const existing = await getOrCreateNegotiation(env.APP_DATA, { lineId, po, so: null, sku: null, poDate: null, clientDate: null });
-  const negotiation = await applyAutoAcceptIfDue(env.APP_DATA, existing);
+  const existing = await getOrCreateNegotiation(APP_DATA, { lineId, po, so: null, sku: null, poDate: null, clientDate: null });
+  const negotiation = await applyAutoAcceptIfDue(APP_DATA, existing);
   return json({ negotiation });
 }
 
@@ -72,52 +72,52 @@ export async function onRequestPost({ request, env }) {
   if (!action) return errorJson('action is required', 400);
 
   if (action === 'get_or_create') {
-    const auth = await requireRole(env.AUTH, bearerToken(request), null);
+    const auth = await requireRole(AUTH, bearerToken(request), null);
     if (!auth.ok) return errorJson(auth.error, auth.status);
     if (!lineId) return errorJson('lineId is required', 400);
     const { po, so, sku, poDate, clientDate } = body;
     if (!po || !poDate) return errorJson('po and poDate are required to create a negotiation record', 400);
-    const negotiation = await getOrCreateNegotiation(env.APP_DATA, { lineId, po, so, sku, poDate, clientDate });
+    const negotiation = await getOrCreateNegotiation(APP_DATA, { lineId, po, so, sku, poDate, clientDate });
     return json({ negotiation }, 201);
   }
 
   const allowedRoles = ROLE_FOR_ACTION[action];
   if (!allowedRoles && action !== 'withdraw') return errorJson(`Unknown action '${action}'`, 400);
 
-  const auth = await requireRole(env.AUTH, bearerToken(request), allowedRoles || null);
+  const auth = await requireRole(AUTH, bearerToken(request), allowedRoles || null);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   try {
     let outerLimit = null;
     if (['factory_propose', 'factory_respond'].includes(action) && body.po) {
-      outerLimit = await getPoOuterLimit(env.APP_DATA, body.po);
+      outerLimit = await getPoOuterLimit(APP_DATA, body.po);
     }
 
     let negotiation;
     switch (action) {
       case 'factory_propose':
-        negotiation = await factoryPropose(env.APP_DATA, { lineId, date: body.date, reason: body.reason }, auth.user, outerLimit);
+        negotiation = await factoryPropose(APP_DATA, { lineId, date: body.date, reason: body.reason }, auth.user, outerLimit);
         break;
       case 'sales_respond':
-        negotiation = await salesRespond(env.APP_DATA, { lineId, accept: !!body.accept, counterDate: body.counterDate }, auth.user);
+        negotiation = await salesRespond(APP_DATA, { lineId, accept: !!body.accept, counterDate: body.counterDate }, auth.user);
         break;
       case 'factory_respond':
-        negotiation = await factoryRespond(env.APP_DATA, { lineId, accept: !!body.accept, counterDate: body.counterDate, reason: body.reason }, auth.user, outerLimit);
+        negotiation = await factoryRespond(APP_DATA, { lineId, accept: !!body.accept, counterDate: body.counterDate, reason: body.reason }, auth.user, outerLimit);
         break;
       case 'sales_final':
-        negotiation = await salesSetFinal(env.APP_DATA, { lineId, date: body.date }, auth.user);
+        negotiation = await salesSetFinal(APP_DATA, { lineId, date: body.date }, auth.user);
         break;
       case 'factory_agree_client_date':
-        negotiation = await factoryAgreeToClientDate(env.APP_DATA, lineId, auth.user);
+        negotiation = await factoryAgreeToClientDate(APP_DATA, lineId, auth.user);
         break;
       case 'withdraw':
-        negotiation = await withdrawProposal(env.APP_DATA, lineId, auth.user);
+        negotiation = await withdrawProposal(APP_DATA, lineId, auth.user);
         break;
       case 'set_client_date':
-        negotiation = await setClientDate(env.APP_DATA, lineId, body.date, auth.user);
+        negotiation = await setClientDate(APP_DATA, lineId, body.date, auth.user);
         break;
       case 'set_po_outer_limit':
-        return json({ outerLimit: await setPoOuterLimit(env.APP_DATA, body.po, body.outerDate, auth.user) });
+        return json({ outerLimit: await setPoOuterLimit(APP_DATA, body.po, body.outerDate, auth.user) });
       default:
         return errorJson(`Unknown action '${action}'`, 400);
     }
