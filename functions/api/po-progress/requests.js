@@ -8,18 +8,18 @@ import { requireRole } from '../../_lib/session.js';
 import { createRequest, markRaised, listRequests } from '../../_lib/po-progress.js';
 import { json, errorJson, readJsonBody, bearerToken } from '../../_lib/http.js';
 
-export async function onRequestGet({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), null);
+export async function onRequestGet({ request }) {
+  const auth = await requireRole(AUTH, bearerToken(request), null);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   const url = new URL(request.url);
   const status = url.searchParams.get('status') || undefined;
   const so = url.searchParams.get('so') || undefined;
-  const requests = await listRequests(env.APP_DATA, { status, so });
+  const requests = await listRequests(APP_DATA, { status, so });
   return json({ requests });
 }
 
-export async function onRequestPost({ request, env }) {
+export async function onRequestPost({ request }) {
   let body;
   try {
     body = await readJsonBody(request);
@@ -31,16 +31,16 @@ export async function onRequestPost({ request, env }) {
 
   try {
     if (action === 'create') {
-      const auth = await requireRole(env.AUTH, bearerToken(request), ['sales', 'admin']);
+      const auth = await requireRole(AUTH, bearerToken(request), ['sales', 'admin']);
       if (!auth.ok) return errorJson(auth.error, auth.status);
-      const req = await createRequest(env.APP_DATA, body, auth.user);
+      const req = await createRequest(APP_DATA, body, auth.user);
       return json({ request: req }, 201);
     }
     if (action === 'mark_raised') {
-      const auth = await requireRole(env.AUTH, bearerToken(request), ['supply', 'admin']);
+      const auth = await requireRole(AUTH, bearerToken(request), ['supply', 'admin']);
       if (!auth.ok) return errorJson(auth.error, auth.status);
       if (!body.id) return errorJson('id is required', 400);
-      const req = await markRaised(env.APP_DATA, body.id, auth.user);
+      const req = await markRaised(APP_DATA, body.id, auth.user);
       return json({ request: req });
     }
     return errorJson(`Unknown action '${action}'`, 400);
