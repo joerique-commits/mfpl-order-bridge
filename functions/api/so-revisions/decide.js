@@ -5,7 +5,7 @@ import { decideSoRevision } from '../../_lib/so-revisions.js';
 import { json, errorJson, readJsonBody, bearerToken } from '../../_lib/http.js';
 
 export async function onRequestPost({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), ['approver']);
+  const auth = await requireRole(AUTH, bearerToken(request), ['approver']);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   let body;
@@ -22,7 +22,7 @@ export async function onRequestPost({ request, env }) {
   }
 
   try {
-    const result = await decideSoRevision(env.APP_DATA, { id, token, decision, comments }, auth.user);
+    const result = await decideSoRevision(APP_DATA, { id, token, decision, comments }, auth.user);
     return json({ request: result });
   } catch (e) {
     return errorJson(e.message, 409);
