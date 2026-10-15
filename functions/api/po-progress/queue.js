@@ -11,11 +11,11 @@ import { getUnmatchedQueue } from '../../_lib/po-progress.js';
 import { getSetting } from '../../_lib/settings.js';
 import { json, errorJson, bearerToken } from '../../_lib/http.js';
 
-export async function onRequestGet({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), ['supply', 'admin']);
+export async function onRequestGet({ request }) {
+  const auth = await requireRole(AUTH, bearerToken(request), ['supply', 'admin']);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
-  const golive = await getSetting(env.APP_DATA, 'golive_date');
-  const queue = await getUnmatchedQueue(env.APP_DATA, env.ERP_MIRROR, golive ? golive.value : null);
+  const golive = await getSetting(APP_DATA, 'golive_date');
+  const queue = await getUnmatchedQueue(APP_DATA, ERP_MIRROR, golive ? golive.value : null);
   return json({ queue });
 }
