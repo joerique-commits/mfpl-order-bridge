@@ -54,7 +54,7 @@ const ROLE_FOR_ACTION = {
 };
 
 export async function onRequestGet({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), null);
+  const auth = await requireRole(AUTH, bearerToken(request), null);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   const url = new URL(request.url);
@@ -64,11 +64,11 @@ export async function onRequestGet({ request, env }) {
 
   try {
     if (so) {
-      const bookings = await listBookingsForSo(env.APP_DATA, so);
+      const bookings = await listBookingsForSo(APP_DATA, so);
       return json({ bookings });
     }
     if (from && to) {
-      const bookings = await listBookingsInRange(env.APP_DATA, from, to);
+      const bookings = await listBookingsInRange(APP_DATA, from, to);
       return json({ bookings });
     }
     return errorJson('so, or from and to, is required', 400);
@@ -89,43 +89,47 @@ export async function onRequestPost({ request, env }) {
   const allowedRoles = ROLE_FOR_ACTION[action];
   if (!allowedRoles) return errorJson(`Unknown action '${action}'`, 400);
 
-  const auth = await requireRole(env.AUTH, bearerToken(request), allowedRoles);
+  const auth = await requireRole(AUTH, bearerToken(request), allowedRoles);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   try {
     switch (action) {
       case 'request_dispatch': {
-        const booking = await requestDispatchBooking(env.APP_DATA, body, auth.user, { clientDate: body.clientDate });
+        const booking = await requestDispatchBooking(APP_DATA, body, auth.user, { clientDate: body.clientDate });
         return json({ booking }, 201);
       }
       case 'approve_dispatch':
-        return json({ booking: await approveDispatchBooking(env.APP_DATA, body.id, body, auth.user) });
+        return json({ booking: await approveDispatchBooking(APP_DATA, body.id, body, auth.user) });
       case 'decline_dispatch':
-        return json({ booking: await declineDispatchBooking(env.APP_DATA, body.id, auth.user, body.reason) });
+        return json({ booking: await declineDispatchBooking(APP_DATA, body.id, auth.user, body.reason) });
       case 'cancel_dispatch':
-        return json({ booking: await cancelDispatchBooking(env.APP_DATA, body.id, auth.user, body.reason) });
+        return json({ booking: await cancelDispatchBooking(APP_DATA, body.id, auth.user, body.reason) });
       case 'mark_dispatched': {
-        const ddRecord = await getDispatchDayRecord(env.APP_DATA, body.id);
+        // Hard block, enforced server-side too (not just the client's
+        // disabled button) - per spec, admin's override is the only bypass,
+        // and that override must already be on file in the Dispatch Day
+        // record before this call, not granted by this endpoint.
+        const ddRecord = await getDispatchDayRecord(APP_DATA, body.id);
         const gate = ddRecord ? isReadyToDispatch(ddRecord) : { ready: false, reason: 'no Dispatch Day record exists for this booking yet' };
         if (!gate.ready) return errorJson(`Dispatch Day checks pending: ${gate.reason}`, 409);
-        return json({ booking: await markDispatched(env.APP_DATA, body.id, auth.user) });
+        return json({ booking: await markDispatched(APP_DATA, body.id, auth.user) });
       }
       case 'record_pod':
-        return json({ booking: await recordPod(env.APP_DATA, body.id, body.pod, auth.user, { hasFlaggedInstallation: !!body.hasFlaggedInstallation }) });
+        return json({ booking: await recordPod(APP_DATA, body.id, body.pod, auth.user, { hasFlaggedInstallation: !!body.hasFlaggedInstallation }) });
       case 'mark_installed_same_visit':
-        return json({ booking: await markInstalledOnSameVisit(env.APP_DATA, body.id, auth.user) });
+        return json({ booking: await markInstalledOnSameVisit(APP_DATA, body.id, auth.user) });
       case 'request_installation': {
-        const booking = await requestInstallationVisit(env.APP_DATA, body, auth.user);
+        const booking = await requestInstallationVisit(APP_DATA, body, auth.user);
         return json({ booking }, 201);
       }
       case 'approve_installation':
-        return json({ booking: await approveInstallationVisit(env.APP_DATA, body.id, auth.user) });
+        return json({ booking: await approveInstallationVisit(APP_DATA, body.id, auth.user) });
       case 'decline_installation':
-        return json({ booking: await declineInstallationVisit(env.APP_DATA, body.id, auth.user, body.reason) });
+        return json({ booking: await declineInstallationVisit(APP_DATA, body.id, auth.user, body.reason) });
       case 'cancel_installation':
-        return json({ booking: await cancelInstallationVisit(env.APP_DATA, body.id, auth.user, body.reason) });
+        return json({ booking: await cancelInstallationVisit(APP_DATA, body.id, auth.user, body.reason) });
       case 'mark_installed':
-        return json({ booking: await markInstalled(env.APP_DATA, body.id, auth.user) });
+        return json({ booking: await markInstalled(APP_DATA, body.id, auth.user) });
       default:
         return errorJson(`Unknown action '${action}'`, 400);
     }
