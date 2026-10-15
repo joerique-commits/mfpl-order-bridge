@@ -4,8 +4,8 @@
 import { destroySession } from '../../_lib/session.js';
 import { json, bearerToken } from '../../_lib/http.js';
 
-export async function onRequestPost({ request, env }) {
+export async function onRequestPost({ request }) {
   const token = bearerToken(request);
-  await destroySession(env.AUTH, token);
+  await destroySession(AUTH, token);
   return json({ ok: true });
 }
