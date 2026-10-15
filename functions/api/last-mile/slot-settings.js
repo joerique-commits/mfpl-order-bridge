@@ -8,14 +8,14 @@ import { getSlotSettings, setSlotSettings } from '../../_lib/last-mile.js';
 import { json, errorJson, readJsonBody, bearerToken } from '../../_lib/http.js';
 
 export async function onRequestGet({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), null);
+  const auth = await requireRole(AUTH, bearerToken(request), null);
   if (!auth.ok) return errorJson(auth.error, auth.status);
-  const settings = await getSlotSettings(env.APP_DATA);
+  const settings = await getSlotSettings(APP_DATA);
   return json({ settings });
 }
 
 export async function onRequestPost({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), ['admin']);
+  const auth = await requireRole(AUTH, bearerToken(request), ['admin']);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   let body;
@@ -24,6 +24,6 @@ export async function onRequestPost({ request, env }) {
   } catch (e) {
     return errorJson(e.message, 400);
   }
-  const settings = await setSlotSettings(env.APP_DATA, body, auth.user);
+  const settings = await setSlotSettings(APP_DATA, body, auth.user);
   return json({ settings });
 }
