@@ -6,11 +6,11 @@ import { getCapacityForDate } from '../../_lib/last-mile.js';
 import { json, errorJson, bearerToken } from '../../_lib/http.js';
 
 export async function onRequestGet({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), null);
+  const auth = await requireRole(AUTH, bearerToken(request), null);
   if (!auth.ok) return errorJson(auth.error, auth.status);
   const url = new URL(request.url);
   const date = url.searchParams.get('date');
   if (!date) return errorJson('date is required', 400);
-  const capacity = await getCapacityForDate(env.APP_DATA, date);
+  const capacity = await getCapacityForDate(APP_DATA, date);
   return json({ capacity });
 }
