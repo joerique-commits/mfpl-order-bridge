@@ -47,13 +47,29 @@ export async function onRequestPost({ request }) {
     return errorJson('email and password are required', 400);
   }
 
-  const user = await authenticate(AUTH, email, password);
+  // TEMPORARY DIAGNOSTIC WRAP #2 (2026-10-15): the env.AUTH -> bare AUTH fix
+  // deployed (commit 561b2e5) but a real login attempt still crashes with the
+  // same platform-level 545 "Error return from script" - no message reaches
+  // the client. This surfaces the real exception so we're not guessing again.
+  // Remove once identified (restore the plain two-line call below).
+  let user;
+  try {
+    user = await authenticate(AUTH, email, password);
+  } catch (e) {
+    return errorJson(`DIAGNOSTIC2: authenticate() threw: ${e && e.name}: ${e && e.message} | typeof AUTH=${typeof AUTH} | stack: ${e && e.stack}`, 500);
+  }
   if (!user) {
     // Deliberately generic - don't reveal whether the email exists.
     return errorJson('Invalid email or password', 401);
   }
 
-  const { token, expiresAt } = await createSession(AUTH, user);
+  let sessionResult;
+  try {
+    sessionResult = await createSession(AUTH, user);
+  } catch (e) {
+    return errorJson(`DIAGNOSTIC2: createSession() threw: ${e && e.name}: ${e && e.message} | stack: ${e && e.stack}`, 500);
+  }
+  const { token, expiresAt } = sessionResult;
   return json({
     token,
     expiresAt,
