@@ -7,7 +7,7 @@ import { uploadDataset } from '../../_lib/erp-mirror.js';
 import { json, errorJson, readJsonBody, bearerToken } from '../../_lib/http.js';
 
 export async function onRequestPost({ request, env }) {
-  const auth = await requireRole(env.AUTH, bearerToken(request), ['admin']);
+  const auth = await requireRole(AUTH, bearerToken(request), ['admin']);
   if (!auth.ok) return errorJson(auth.error, auth.status);
 
   let body;
@@ -21,7 +21,7 @@ export async function onRequestPost({ request, env }) {
   if (!datasetKey || !rows) return errorJson('datasetKey and rows are required', 400);
 
   try {
-    const meta = await uploadDataset(env.ERP_MIRROR, { datasetKey, originalName, rows }, auth.user);
+    const meta = await uploadDataset(ERP_MIRROR, { datasetKey, originalName, rows }, auth.user);
     return json({ meta });
   } catch (e) {
     return errorJson(e.message, 400);
