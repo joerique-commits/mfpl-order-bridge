@@ -26,10 +26,18 @@ export async function onRequestGet({ request }) {
   // namespace's own prefix-scoped list() is sufficient and avoids building
   // an index for a handful of records; revisit if the account list grows
   // large enough that list()'s 256-key page size becomes a real limit.
-  const page = await AUTH.list({ prefix: 'user:' });
+  // EdgeOne list() returns { keys:[{ key }], complete, cursor } (max 256 per page).
+  const names = [];
+  let cursor;
+  for (let guard = 0; guard < 50; guard++) {
+    const page = await AUTH.list(cursor ? { prefix: 'user:', limit: 256, cursor } : { prefix: 'user:', limit: 256 });
+    (page.keys || []).forEach(e => names.push(e.key || e.name));
+    if (page.complete || !page.cursor) break;
+    cursor = page.cursor;
+  }
   const users = [];
-  for (const entry of page.keys) {
-    const u = await getJSON(AUTH, entry.name);
+  for (const name of names) {
+    const u = await getJSON(AUTH, name);
     if (u) users.push({ uid: u.uid, email: u.email, name: u.name, role: u.role, title: u.title || null, active: u.active, createdAt: u.createdAt });
   }
   return json({ users });
