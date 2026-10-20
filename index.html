@@ -7153,7 +7153,7 @@ function wireContentEvents(){
     const o = ORDERS.find(x=>x.id===state.openOrderId);
     const g = id => document.getElementById(id)?.value ?? '';
     if (!o || o.lifecycle!=='draft') return;
-    o.detail = { fabricSku:g('f_fabricSku'), fabricName:g('f_fabricName'), placement:g('f_placement'), finish:g('f_finish'), stoneType:g('f_stone'), design:g('f_design'), siteReq:g('f_siteReq'), siteMap:g('f_siteMap'), notes:g('f_notes') };
+    o.detail = o.detail || {}; [['f_stone','stoneType'],['f_design','design'],['f_siteReq','siteReq'],['f_siteMap','siteMap'],['f_notes','notes']].forEach(([id, k]) => { const el = document.getElementById(id); if (el) o.detail[k] = el.value; });   // online fix 21 Oct: keep fabric/finish entries
     if (!detailComplete(o)) return;
     o.lifecycle='submitted'; o.submittedAt=nowIso(); o.submittedBy=actingUserName();
     renderAll();
@@ -8641,7 +8641,7 @@ lifecyclePill = o => o.lifecycle === 'po_raised' ? `<span class="pill warn"><spa
 // order line detail: committed-date picker, furniture-only details, supply marks "PO raised in ERP" (the number comes from PO Summary)
 const _rodSrc = renderOrderDetail;
 renderOrderDetail = function(orderId){
-  const html = _rodSrc(orderId); const o = ORDERS.find(x => x.id === orderId) || ORDER_BY_ID[orderId]; if (!o) return html;
+  const html = (window.__obRodBase || _rodSrc)(orderId); const o = ORDERS.find(x => x.id === orderId) || ORDER_BY_ID[orderId]; if (!o) return html;
   const t = document.createElement('template'); t.innerHTML = html;
   const secs = [...t.content.querySelectorAll('.form-section')]; const sec = n => secs.find(s => (s.querySelector('.fs-num') || {}).textContent === String(n));
   const canSales = ['sales','admin'].includes(state.role) && canEditSection('confirmations', state.role);
@@ -13121,7 +13121,8 @@ function stoneSelectHtml(o, canEdit){
 
 // Full override of renderOrderDetail — identical to the template except sections 1 & 2,
 // which now render the catalog-driven, repeatable fabric/finish fields and the stone dropdown.
-renderOrderDetail = function(orderId){
+// Online fix 21 Oct: registered as the base of the committed-date wrapper above instead of replacing it.
+window.__obRodBase = function(orderId){
   const o = ORDERS.find(x=>x.id===orderId);
   ensureDetailShape(o);
   const editableSection = canEditSection('confirmations', state.role);
