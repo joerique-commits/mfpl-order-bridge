@@ -1010,6 +1010,25 @@ OB.uploadData = async function(file, redraw){
   } catch(e){ OB.dataUpload = { busy:false, kind:'error', msg:'Upload failed: ' + (e.message || e) }; }
   redraw();
 };
+// Admin Uploads > Backup: the whole shared store (as stored, with record versions) + accounts list, as one JSON file.
+OB.downloadBackup = async function(redraw){
+  OB.backup = { busy:true }; redraw();
+  try {
+    if (OB.sync) await OB.flush();
+    var store = await api('/api/store', { cache:'no-store' });
+    var users = []; try { users = ((await api('/api/admin/users', { cache:'no-store' })) || {}).users || []; } catch(e){}
+    var meta = null; try { meta = ((await api('/api/data/meta', { cache:'no-store' })) || {}).meta || null; } catch(e){}
+    delete store.linkKey;
+    var nrec = 0; Object.keys(store.b || {}).forEach(function(k){ nrec += Object.keys((store.b[k] || {}).recs || {}).length; });
+    var file = { kind:'order-bridge-backup', version:1, createdAt:new Date().toISOString(), createdBy:OB.user && OB.user.email, site:location.host, dataFile:meta, users:users, store:store };
+    var text = JSON.stringify(file);
+    var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type:'application/json' }));
+    a.download = 'order-bridge-backup-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.json';
+    document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+    OB.backup = { ok:true, msg:'Downloaded ' + a.download + ' (' + nrec + ' saved records, ' + Math.round(text.length / 1024) + ' KB).' };
+  } catch(e){ OB.backup = { ok:false, msg:'Backup failed: ' + (e.message || e) }; }
+  redraw();
+};
 OB.addUser = async function(u){ var r = await api('/api/admin/users', { body:u }); return r.user; };
 OB.changePassword = async function(current, next){ return api('/api/auth/password', { body:{ current:current, next:next } }); };
 
@@ -4420,6 +4439,7 @@ function boot(){
     const u = window.__OB.user;
     state.currentUser = { id:u.uid, name:u.name, email:u.email, role:u.role, title:u.title || null };
     state.role = u.role;
+    if (!ROLES[u.role]) ROLES[u.role] = { label:u.role, name:u.name, emphasis:'' };   // 'approver' is only added by the later script; avoids a first-render error
     // Online: admin acting as another role is recorded as "<admin name> (as <role>)" instead of the old demo names.
     if (u.role === 'admin') Object.keys(ROLES).forEach(k => { ROLES[k].name = k === 'admin' ? u.name : u.name + ' (as ' + ROLES[k].label + ')'; });
   }
@@ -10998,6 +11018,12 @@ renderAdminUploads = function(){
       <button class="btn btn-primary" id="obDataTrigger" style="margin-top:10px;" ${du && du.busy ? 'disabled' : ''}>${du && du.busy ? 'Uploading…' : 'Upload data file'}</button>
       ${du && du.msg ? `<div class="${du.kind === 'error' ? 'scan-error' : 'cell-sub'}" style="margin-top:10px;">${xe(du.msg)}${du.kind === 'ok' ? ' <button class="btn-text" id="obDataReload">Reload now</button>' : ''}</div>` : ''}
     </div>
+    <div class="card action-card" id="obBackupCard">
+      <div class="ac-title">Backup of saved work</div>
+      <div class="ac-sub">Downloads everything people have entered in Order Bridge (requests, dates, links, bookings, tags, job cards, Dispatch Day, site forms, activity log, settings) plus the user list, as one file. The business data file is not included; you already have it from build_from_folder.py. Keep the file somewhere safe; a restore can be done from it.</div>
+      <button class="btn btn-primary" id="obBackupBtn" style="margin-top:10px;" ${window.__OB.backup && window.__OB.backup.busy ? 'disabled' : ''}>${window.__OB.backup && window.__OB.backup.busy ? 'Preparing…' : 'Download backup'}</button>
+      ${window.__OB.backup && window.__OB.backup.msg ? `<div class="${window.__OB.backup.ok ? 'cell-sub' : 'scan-error'}" style="margin-top:10px;">${xe(window.__OB.backup.msg)}</div>` : ''}
+    </div>
     <div class="preview-banner dashed">${icon('upload')} <div><strong>Everything below is shell only — nothing is parsed yet.</strong> Each menu section gets its own upload slot. For now this just records what file was uploaded and when; the source-file format and how it feeds that section will be decided later. "Expected source file(s)" is what we found reviewing the real RFT Cloud Suite exports — ${gapCount} section(s) below have no matching extract in that folder at all. Payables &amp; Flushout's source files are pre-recorded here from the local data build — picking a replacement file below still only records a name, it doesn't re-run the build.</div></div>
     <div class="card table-wrap"><table class="grid-table">
       <thead><tr><th>Menu section</th><th>Expected source file(s)</th><th>Uploaded file(s)</th><th></th></tr></thead>
@@ -13418,6 +13444,7 @@ extraWiring.push(() => {
   const t = document.getElementById('obDataTrigger'), inp = document.getElementById('obDataInput');
   if (t && inp){ t.addEventListener('click', () => inp.click()); inp.addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) window.__OB.uploadData(f, () => renderAll()); }); }
   const rl = document.getElementById('obDataReload'); if (rl) rl.addEventListener('click', () => location.reload());
+  const bk = document.getElementById('obBackupBtn'); if (bk) bk.addEventListener('click', () => window.__OB.downloadBackup(() => renderAll()));
 });
 
 if (!routePublic() && state.currentUser) renderAll();
