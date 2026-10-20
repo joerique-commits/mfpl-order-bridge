@@ -3,16 +3,15 @@
 // See functions/_lib/store.js. Bare KV globals (APP_DATA), never env.APP_DATA.
 import { getSessionUser } from '../../_lib/session.js';
 import { json, errorJson, bearerToken, readJsonBody } from '../../_lib/http.js';
-import { loadAllRaw, applyChanges, userKey, getLinkKey, STORE_RE } from '../../_lib/store.js';
+import { loadAllRaw, applyChanges, userKey, getLinkKey, STORE_RE, maybeGzip } from '../../_lib/store.js';
 import { putJSON } from '../../_lib/kv.js';
 
 export async function onRequestGet({ request }) {
   const s = await getSessionUser(AUTH, bearerToken(request));
   if (!s) return errorJson('Not signed in or session expired', 401);
-  const raw = await loadAllRaw(APP_DATA, s.user.uid);
-  const linkKey = await getLinkKey(APP_DATA);
+  const [raw, linkKey] = await Promise.all([loadAllRaw(APP_DATA, s.user.uid), getLinkKey(APP_DATA)]);
   const body = raw.slice(0, -1) + ',"linkKey":' + JSON.stringify(linkKey) + ',"serverTime":' + JSON.stringify(new Date().toISOString()) + '}';
-  return new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store' } });
+  return maybeGzip(request, body, { 'content-type': 'application/json; charset=UTF-8', 'cache-control': 'no-store' });
 }
 
 export async function onRequestPost({ request }) {

@@ -1037,18 +1037,32 @@ function emptyData(){
     payables:{ pos:[], suppliers:[], internalSuppliers:[], monthsCovered:'', factoryRollupBalance:0 }, payablesCutoff:'', openingPayables:[], payments:[],
     allocations:[], allocSkippedRows:0, dispatches:[], standardUpholstery:[], standardFinishes:[], standardStone:[], coverage:{} };
 }
+// Big replies are asked for gzipped (?gz=1); if anything about that fails, ask again plainly.
+async function getText(path, opts){
+  var sep = path.indexOf('?') < 0 ? '?' : '&';
+  try { return await api(path + sep + 'gz=1', Object.assign({ raw:true }, opts || {})); }
+  catch(e){ if (e.status) throw e; return api(path, Object.assign({ raw:true }, opts || {})); }
+}
+async function getJSONgz(path){
+  var t = await getText(path, { cache:'no-store' });
+  try { return JSON.parse(t); } catch(e){ return api(path, { cache:'no-store' }); }
+}
 async function loadData(meta){
-  var parts = new Array(meta.chunks), next = 0, done = 0;
-  async function worker(){
-    while (next < meta.chunks){
-      var n = next++;
-      parts[n] = await api('/api/data/chunk?id=' + encodeURIComponent(meta.id) + '&n=' + n, { raw:true });
-      done++; setMsg('Loading data… ' + Math.round(done * 100 / meta.chunks) + '%');
+  async function all(gz){
+    var parts = new Array(meta.chunks), next = 0, done = 0;
+    async function worker(){
+      while (next < meta.chunks){
+        var n = next++, u = '/api/data/chunk?id=' + encodeURIComponent(meta.id) + '&n=' + n;
+        parts[n] = gz ? await getText(u) : await api(u, { raw:true });
+        done++; setMsg('Loading data… ' + Math.round(done * 100 / meta.chunks) + '%');
+      }
     }
+    await Promise.all([worker(), worker(), worker(), worker(), worker(), worker()]);
+    return parts.join('');
   }
-  await Promise.all([worker(), worker(), worker(), worker()]);
+  var text = await all(true);
   setMsg('Preparing…');
-  return JSON.parse(parts.join(''));
+  try { return JSON.parse(text); } catch(e){ return JSON.parse(await all(false)); }
 }
 
 function runApp(){
@@ -1056,19 +1070,20 @@ function runApp(){
   olds.forEach(function(old){ var s = document.createElement('script'); s.textContent = old.textContent; old.parentNode.replaceChild(s, old); });
 }
 
-async function start(user){
+async function start(user, pre){
   OB.user = user; OB.uidSafe = String(user.uid).replace(/[^A-Za-z0-9_]/g, '_');
   loading('Loading data…');
+  pre = pre || prefetch();
   var data, snap;
   try {
-    var m = await api('/api/data/meta', { cache:'no-store' });
+    var m = await pre.meta;
     OB.dataMeta = (m && m.meta) || null;
     if (OB.dataMeta) data = await loadData(OB.dataMeta);
     else if (user.role === 'admin') data = emptyData();
     else return failScreen('No data has been uploaded yet. Ask an admin to upload the Order Bridge data file in Admin Uploads.');
     setMsg('Loading saved work…');
-    snap = await api('/api/store', { cache:'no-store' });
-    if (user.role === 'admin'){ try { OB.users = ((await api('/api/admin/users', { cache:'no-store' })) || {}).users || []; } catch(e){ OB.users = []; } }
+    snap = await pre.store;
+    OB.users = user.role === 'admin' ? await api('/api/admin/users', { cache:'no-store' }).then(function(r){ return (r || {}).users || []; }, function(){ return []; }) : [];
   } catch(e){
     if (e.status === 401){ clrTok(); return loginScreen('Your session has ended. Please sign in again.'); }
     return failScreen(e.message || 'Could not load the data.');
@@ -1079,6 +1094,12 @@ async function start(user){
   hideCard();
   OB.sync = true;
   runApp();
+}
+// meta and the saved store are fetched while the sign-in is still being checked
+function prefetch(){
+  var p = { meta: api('/api/data/meta', { cache:'no-store' }), store: getJSONgz('/api/store') };
+  p.meta.catch(function(){}); p.store.catch(function(){});
+  return p;
 }
 
 // ---------------------------------------------------------------- customer site-details form (no login)
@@ -1117,10 +1138,10 @@ async function main(){
   if (m) return publicMain(decodeURIComponent(m[1]), m[2] || '');
   if (!tok()) return loginScreen();
   loading('Checking your sign-in…');
-  var me;
+  var pre = prefetch(), me;
   try { me = await api('/api/auth/me', { cache:'no-store' }); }
   catch(e){ if (e.status === 401){ clrTok(); return loginScreen(); } return failScreen('Could not reach the server. Check your connection and try again.'); }
-  return start(me.user);
+  return start(me.user, pre);
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', main); else main();
 })();

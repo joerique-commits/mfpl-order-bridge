@@ -43,8 +43,8 @@ export async function listKeys(kv, prefix) {
 
 async function getTextMany(kv, keys) {
   const vals = new Array(keys.length);
-  for (let i = 0; i < keys.length; i += 32) {
-    const part = keys.slice(i, i + 32);
+  for (let i = 0; i < keys.length; i += 100) {
+    const part = keys.slice(i, i + 100);
     const got = await Promise.all(part.map(k => kv.get(k, { type: 'text' })));
     got.forEach((v, j) => { vals[i + j] = v; });
   }
@@ -159,4 +159,17 @@ function hmac(key, msg) {
 export async function linkToken(linkKey, kind, id) {
   const enc = new TextEncoder();
   return Array.from(hmac(enc.encode(linkKey), enc.encode(kind + '|' + id)), x => x.toString(16).padStart(2, '0')).join('').slice(0, 20);
+}
+
+// Optional gzip for big responses: the page asks with ?gz=1 and falls back to a plain request if
+// anything about the compressed reply fails. Plain response when CompressionStream is missing.
+export function maybeGzip(request, text, headers) {
+  const want = new URL(request.url).searchParams.get('gz') === '1';
+  if (want && typeof CompressionStream === 'function') {
+    try {
+      const body = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'));
+      return new Response(body, { status: 200, headers: Object.assign({}, headers, { 'content-encoding': 'gzip', 'x-ob-gz': '1' }) });
+    } catch (e) {}
+  }
+  return new Response(text, { status: 200, headers });
 }
