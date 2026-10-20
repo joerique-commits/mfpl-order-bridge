@@ -706,7 +706,7 @@ async function api(path, opts){
   var headers = Object.assign({}, opts.headers || {});
   var t = tok(); if (t && !opts.noAuth) headers.Authorization = 'Bearer ' + t;
   var body = opts.body;
-  if (body !== undefined && typeof body !== 'string'){ body = JSON.stringify(body); headers['Content-Type'] = 'application/json'; }
+  if (body !== undefined && typeof body !== 'string' && !(body instanceof ArrayBuffer)){ body = JSON.stringify(body); headers['Content-Type'] = 'application/json'; }
   var res = await fetch(path, { method: opts.method || (body !== undefined ? 'POST' : 'GET'), headers: headers, body: body, keepalive: !!opts.keepalive, cache: opts.cache || 'default' });
   var text = await res.text();
   if (opts.raw && res.ok) return text;
@@ -1000,11 +1000,17 @@ OB.uploadData = async function(file, redraw){
       if (end < text.length && cc >= 0xD800 && cc <= 0xDBFF) end--;
       chunks.push(text.slice(i, end)); i = end;
     }
+    var gz = typeof CompressionStream === 'function';   // stored gzipped, so loading costs the server nothing
     for (var n = 0; n < chunks.length; n++){
       OB.dataUpload.msg = 'Uploading… ' + Math.round(n * 100 / chunks.length) + '%'; redraw();
-      await api('/api/data/upload?id=' + id + '&n=' + n, { method:'POST', body:chunks[n], headers:{ 'Content-Type':'text/plain; charset=utf-8' } });
+      if (gz){
+        var zb = await new Response(new Blob([chunks[n]]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+        await api('/api/data/upload?id=' + id + '&n=' + n + '&gz=1', { method:'POST', body:zb, headers:{ 'Content-Type':'application/octet-stream' } });
+      } else {
+        await api('/api/data/upload?id=' + id + '&n=' + n, { method:'POST', body:chunks[n], headers:{ 'Content-Type':'text/plain; charset=utf-8' } });
+      }
     }
-    var res = await api('/api/data/upload?id=' + id + '&finish=1', { body:{ chunks:chunks.length, bytes:text.length, builtAt:d.builtAt, pub:pub } });
+    var res = await api('/api/data/upload?id=' + id + '&finish=1', { body:{ chunks:chunks.length, gz:gz, bytes:text.length, builtAt:d.builtAt, pub:pub } });
     OB.dataMeta = res.meta;
     OB.dataUpload = { busy:false, kind:'ok', msg:'Uploaded the data built ' + d.builtAt + ' (' + d.orders.length + ' order lines). Reload to use it here; everyone else gets it the next time they open or reload Order Bridge.' };
   } catch(e){ OB.dataUpload = { busy:false, kind:'error', msg:'Upload failed: ' + (e.message || e) }; }
