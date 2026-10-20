@@ -16,6 +16,7 @@
 // KV has no compare-and-swap and is eventually consistent across edge nodes
 // (up to ~60s), so this limits simultaneous edits rather than eliminating them.
 import { getJSON, putJSON } from './kv.js';
+import { gzipSync } from './fflate.js';
 
 export const STORE_RE = /^ob_[A-Za-z0-9_]{1,60}$/;
 export const BUCKET_RE = /^[A-Za-z0-9_]{1,80}$/;
@@ -169,6 +170,12 @@ export function maybeGzip(request, text, headers) {
     try {
       const body = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'));
       return new Response(body, { status: 200, headers: Object.assign({}, headers, { 'content-encoding': 'gzip', 'x-ob-gz': '1' }) });
+    } catch (e) {}
+  }
+  if (want) {   // EdgeOne has no CompressionStream: plain-JS gzip (about 50 ms for 3 MB)
+    try {
+      const gz = gzipSync(new TextEncoder().encode(text), { level: 1 });
+      return new Response(gz, { status: 200, headers: Object.assign({}, headers, { 'content-encoding': 'gzip', 'x-ob-gz': '2' }) });
     } catch (e) {}
   }
   return new Response(text, { status: 200, headers });

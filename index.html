@@ -1041,7 +1041,7 @@ function emptyData(){
 async function getText(path, opts){
   var sep = path.indexOf('?') < 0 ? '?' : '&';
   try { return await api(path + sep + 'gz=1', Object.assign({ raw:true }, opts || {})); }
-  catch(e){ if (e.status) throw e; return api(path, Object.assign({ raw:true }, opts || {})); }
+  catch(e){ if (e.status && e.status < 500) throw e; return api(path, Object.assign({ raw:true }, opts || {})); }
 }
 async function getJSONgz(path){
   var t = await getText(path, { cache:'no-store' });
