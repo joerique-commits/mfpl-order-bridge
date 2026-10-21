@@ -764,7 +764,8 @@ var STORES = {
   ob_site_details:{ t:'map', n:16 }, ob_risk_golive:{ t:'value' }, ob_activity:{ t:'act' }, ob_act_parts:{ t:'map', n:32, merge:true },
   ob_permissions:{ t:'value' },
   ob_fabric_entries:{ t:'list', n:16, dir:'desc' }, ob_fabric_challans:{ t:'list', n:8, dir:'desc' }, ob_fabric_receipts:{ t:'list', n:8, dir:'desc' },
-  ob_stock_blocks:{ t:'list', n:8, dir:'desc' }, ob_wh_tags:{ t:'list', n:16, dir:'desc' }, ob_job_cards:{ t:'list', n:16, dir:'desc' }
+  ob_stock_blocks:{ t:'list', n:8, dir:'desc' }, ob_wh_tags:{ t:'list', n:16, dir:'desc' }, ob_job_cards:{ t:'list', n:16, dir:'desc' },
+  ob_fab_locations:{ t:'value' }
 };
 var USER_RE = /^ob_(profiles$|approver_me$|inbox_read_|inbox_seen_|mute_|unfollow_)/;   // kept per signed-in user
 function cfgFor(k){ if (Object.prototype.hasOwnProperty.call(STORES, k)) return STORES[k]; if (USER_RE.test(k) && /^[A-Za-z0-9_]+$/.test(k)) return { t:'user' }; return null; }
@@ -4399,8 +4400,8 @@ function lastMileBadgeForRole(role){
 }
 // Separate vendor rosters per leg — a Dispatch booking is handed to a transporter, an
 // Installation booking to an on-site assembly crew, and the two are never interchangeable.
-const DISPATCH_VENDORS = ['In-house fleet', 'Swift Road Logistics', 'BlueDart Freight'];
-const INSTALLATION_VENDORS = ['In-house install crew', 'Metro Assembly Partners', 'Third-party — client-appointed'];
+const DISPATCH_VENDORS = ['In-house fleet/ Milk Run', 'APML', 'Installco Wify', 'Other'];   // JK, 21 Oct
+const INSTALLATION_VENDORS = ['Installco Wify', 'MFPL', 'Other'];   // JK, 21 Oct
 function vendorsForType(type){ return type==='dispatch' ? DISPATCH_VENDORS : INSTALLATION_VENDORS; }
 const SLOT_BOOKINGS = [
   { id:'SLOT-1', type:'dispatch', date:'2026-09-22', window:'10:00–12:00', orderId:'SO-24118-A', location:'Client site — Bandra, Mumbai', vendor:'In-house fleet', bookedBy:'Priya Menon', status:'confirmed', notes:'Client wants a morning delivery — security gate closes 1pm.', pod:null },
@@ -8898,7 +8899,7 @@ const detailFilled = o => {
   return d.fabrics.some(f => f && f.type) || d.finishes.some(f => f && f.type) || !!d.stoneType ||
     ['design','siteReq','siteMap','notes'].some(k => d[k] && String(d[k]).trim() && String(d[k]).trim() !== '—');
 };
-const requestLines = so => (LINES_BY_SO[so] || []).filter(o => (o.appNative && o.lifecycle !== 'draft') || detailFilled(o));
+const requestLines = so => (LINES_BY_SO[so] || []).filter(o => o.appNative ? o.lifecycle !== 'draft' : detailFilled(o));   // unsent drafts aren't 'submitted' (JK, 21 Oct)
 const canRequestCsv = () => ['supply','admin'].includes(state.role);
 const xlText = v => v ? `="${String(v)}"` : '';   // 16-digit SO/PO numbers would otherwise become 3.11E+15 in Excel
 const reqCsvHead = () => ['SO Number','SO Date','Customer','Site','Sales Rep','SO Line #','Article Code','Article Name','Qty','UOM',...(bothView() ? ['Committed Date to Client','Factory Target Date'] : [state.role === 'production' ? 'Committed Date' : 'Committed Date to Client']),'Request Status',
@@ -9230,7 +9231,7 @@ renderOrderDetail = function(orderId){
     if (o.lifecycle === 'draft'){
       const ready = detailComplete(o);
       box.innerHTML = `<div class="part-po-note" id="poReadyNote" style="background:var(--neutral-tint);color:var(--ink-soft);">${ready ? 'All required details are filled in.' : furn ? 'Fill in the committed date, fabric, finish and design related instructions before this can be sent.' : 'Choose the committed date before this can be sent.'}</div>
-        ${canSales ? `<button class="btn btn-primary" id="submitPoDetail" ${ready ? '' : 'disabled'} style="margin-top:10px;">Send to supply for PO</button>` : ''}`;
+        ${canSales ? `<button class="btn btn-primary" id="submitPoDetail" ${ready ? '' : 'disabled'} style="margin-top:10px;">Send to supply for PO</button> <button class="btn btn-ghost" id="xDiscardDraft" style="margin-top:10px;">${state.xDiscardArm === o.id ? 'Click again to discard' : 'Discard draft'}</button>` : ''}`;
     } else if (o.lifecycle === 'submitted'){
       box.innerHTML = `<div class="part-po-note" style="background:var(--warn-tint);color:var(--warn);">Sent by ${xe(o.submittedBy || '')} on ${fmtDT(o.submittedAt)} — supply raises it in the ERP and marks it raised here. The PO number, date and supplier then come from PO Summary on the next data refresh.</div>
         ${canSup ? `<button class="btn btn-primary" data-xpo-raised="${o.id}" style="margin-top:10px;">Mark PO raised in ERP</button>` : ''}`;
@@ -10411,8 +10412,8 @@ const tagsFor = (so, code) => WAREHOUSE_TAGS.filter(t => t.so === so && tagSoCod
 const flaggedFor = (so, code) => tagsFor(so, code).filter(t => t.installRequired).length;
 function clientDateFor(so, arts){
   const ls_ = arts && arts.length ? [].concat(...arts.map(a => lmLinesOf(so, a))) : (LINES_BY_SO[so] || []);
-  const c = ls_.map(o => o.committedDeadline).filter(Boolean).sort();
-  return c[0] || (LINES_BY_SO[so] || []).map(o => o.committedDeadline).filter(Boolean).sort()[0] || '';
+  const c = ls_.filter(o => o.lifecycle !== 'draft').map(o => o.committedDeadline).filter(Boolean).sort();   // drafts never sent to supply don't count (JK, 21 Oct)
+  return c[0] || (LINES_BY_SO[so] || []).filter(o => o.lifecycle !== 'draft').map(o => o.committedDeadline).filter(Boolean).sort()[0] || '';
 }
 const heldQty = (so, code, type, exceptId) => SLOT_BOOKINGS.filter(b => b.type === type && b.so === so && LM_HOLD.includes(b.status) && b.id !== exceptId)
   .reduce((s, b) => s + (b.items || []).filter(i => i.sku === code).reduce((s2, i) => s2 + (+i.qty || 0), 0), 0);
@@ -10995,7 +10996,8 @@ function lmActionHtml(b){
   const a = (state.xLmApprove || {})[b.id] || {}; const err = (state.xLmApproveErr || {})[b.id];
   const E = err ? `<div class="cell-sub" style="color:var(--critical);margin-top:4px;">${xe(err)}</div>` : '';
   const lab = b.type === 'dispatch' ? 'vendor' : 'installation crew';
-  if (b.status === 'requested') return `<select data-xlm2-ap="${b.id}:vendor" style="width:100%;"><option value="">Choose ${lab}…</option>${vendorsForType(b.type).map(v => `<option value="${xe(v)}" ${a.vendor === v ? 'selected' : ''}>${xe(v)}</option>`).join('')}</select>
+  if (b.status === 'requested') return `<select data-xlm2-ap="${b.id}:vendor" style="width:100%;" onchange="var o=this.parentNode.querySelector('[data-xlm2-other]'); if (o) o.style.display = this.value === 'Other' ? '' : 'none';"><option value="">Choose ${lab}…</option>${vendorsForType(b.type).map(v => `<option value="${xe(v)}" ${a.vendor === v ? 'selected' : ''}>${xe(v)}</option>`).join('')}</select>
+    <input data-xlm2-ap="${b.id}:vendorOther" data-xlm2-other="1" placeholder="Name of the ${lab}" value="${xe(a.vendorOther || '')}" style="width:100%;margin-top:4px;${a.vendor === 'Other' ? '' : 'display:none;'}">
     <input data-xlm2-ap="${b.id}:tracking" placeholder="Tracking link" value="${xe(a.tracking || '')}" style="width:100%;margin-top:4px;">
     <div class="cell-sub" style="margin-top:2px;">No tracking link? Give the ${b.type === 'dispatch' ? 'transport' : 'crew'} POC:</div>
     <input data-xlm2-ap="${b.id}:pocName" placeholder="POC name" value="${xe(a.pocName || '')}" style="width:100%;margin-top:2px;"><input data-xlm2-ap="${b.id}:pocPhone" placeholder="POC number" value="${xe(a.pocPhone || '')}" style="width:100%;margin-top:4px;">
@@ -11260,11 +11262,13 @@ extraWiring.push(() => {
   document.querySelectorAll('[data-xlm2-approve]').forEach(btn => btn.addEventListener('click', () => {
     const id = btn.dataset.xlm2Approve; const b = B(id); if (!b) return; const a = (state.xLmApprove || {})[id] || {};
     if (!a.vendor) return failA(id, b.type === 'dispatch' ? 'Choose the vendor.' : 'Choose the installation crew.');
+    const vend = a.vendor === 'Other' ? String(a.vendorOther || '').trim() : a.vendor;
+    if (!vend) return failA(id, b.type === 'dispatch' ? 'Enter the name of the vendor.' : 'Enter the name of the installation crew.');
     const hasTrack = (a.tracking || '').trim(); const hasPoc = (a.pocName || '').trim() && (a.pocPhone || '').trim();
     if (!hasTrack && !hasPoc) return failA(id, 'Add a tracking link, or the POC name and number.');
     if (hasTrack && !isUrl(a.tracking)) return failA(id, 'The tracking link should start with http:// or https://');
     if (!hasTrack && !isPhone(a.pocPhone)) return failA(id, 'Enter a valid 10-digit POC number.');
-    Object.assign(b, { vendor:a.vendor, trackingLink:hasTrack ? a.tracking.trim() : '', transportPocName:(a.pocName || '').trim(), transportPocPhone:(a.pocPhone || '').trim(), status:'confirmed', approvedBy:actingUserName(), approvedAt:nowIso() });
+    Object.assign(b, { vendor:vend, trackingLink:hasTrack ? a.tracking.trim() : '', transportPocName:(a.pocName || '').trim(), transportPocPhone:(a.pocPhone || '').trim(), status:'confirmed', approvedBy:actingUserName(), approvedAt:nowIso() });
     okA(id); renderAll(); }));
   document.querySelectorAll('[data-xlm2-reject]').forEach(btn => btn.addEventListener('click', () => { const b = B(btn.dataset.xlm2Reject); if (b){ b.status = 'rejected'; b.approvedBy = actingUserName(); b.approvedAt = nowIso(); } renderAll(); }));
   document.querySelectorAll('[data-xlm2-cancel]').forEach(btn => btn.addEventListener('click', () => { const b = B(btn.dataset.xlm2Cancel); if (b){ b.status = 'cancelled'; b.cancelledBy = actingUserName(); b.cancelledAt = nowIso(); } renderAll(); }));
@@ -14019,6 +14023,151 @@ extraWiring.push(() => {
   const ecl = document.getElementById('obExpClear'); if (ecl) ecl.addEventListener('click', () => window.__OB.expClear(() => renderAll()));
   document.querySelectorAll('[data-obexp-remove]').forEach(b => b.addEventListener('click', () => { const s = b.dataset.obexpRemove, ex = window.__OB.exp;
     if (ex.confirmRemove !== s){ ex.confirmRemove = s; renderAll(); return; } ex.confirmRemove = null; window.__OB.expRemove(s, () => renderAll()); }));
+});
+
+// ---------------------------------------------------------------- Furnishings: dispatch / receiving locations (JK, 21 Oct)
+// Admins keep two lists in Furnishings Tag Station > Locations: dispatchers (challan "From") and receivers
+// (challan "To" and the factory's "Received at"). Name, full address, POC name and POC phone print on the challan.
+const FAB_LOC_KEY = 'ob_fab_locations';
+const FAB_LOC_SEED = () => ({ dispatchers:[], receivers:['MFPL - Stores', 'MFPL - Upholstery', 'NB', 'CBE'].map((n, i) => ({ id:'r' + (i + 1), name:n, address:'', pocName:'', pocPhone:'' })) });
+const fabLocs = () => (state.xFabLocs = state.xFabLocs || ls.get(FAB_LOC_KEY, null) || FAB_LOC_SEED());
+const saveFabLocs = () => ls.set(FAB_LOC_KEY, fabLocs());
+const fabLoc = (kind, id) => (fabLocs()[kind] || []).find(l => l.id === id) || null;
+const fabNewNo = (prefix, list, key) => { let n; do { n = prefix + Math.floor(10000 + Math.random() * 90000); } while (list.some(x => x[key] === n)); return n; };
+const _ftrLoc = fabricTabsForRole; fabricTabsForRole = function(){ const t = _ftrLoc.apply(this, arguments); return state.role === 'admin' ? [...t, 'locations'] : t; };
+function renderFabricLocations(){
+  const L = fabLocs();
+  const table = (kind, title, sub, addLabel) => `<div class="card action-card" style="margin-bottom:14px;"><div class="ac-title">${title}</div><div class="ac-sub">${sub}</div>
+    <div class="card table-wrap" style="margin-top:10px;"><table class="grid-table"><thead><tr><th>Name</th><th>Full address</th><th>POC name</th><th>POC phone</th><th></th></tr></thead><tbody>
+    ${(L[kind] || []).map(l => `<tr><td><input data-xfl="${kind}|${l.id}|name" value="${xe(l.name)}" placeholder="e.g. MFPL - Stores"></td>
+      <td><textarea data-xfl="${kind}|${l.id}|address" rows="2" placeholder="Building, street, area, city, PIN">${xe(l.address)}</textarea></td>
+      <td><input data-xfl="${kind}|${l.id}|pocName" value="${xe(l.pocName)}"></td><td><input data-xfl="${kind}|${l.id}|pocPhone" value="${xe(l.pocPhone)}" inputmode="tel"></td>
+      <td><button class="btn-text" data-xfl-del="${kind}|${l.id}">${state.xFlDelArm === kind + '|' + l.id ? 'Click again to remove' : 'Remove'}</button></td></tr>`).join('') || `<tr><td colspan="5"><div class="empty-note">None yet.</div></td></tr>`}
+    </tbody></table></div><button class="btn-text" data-xfl-add="${kind}" style="margin-top:8px;">${addLabel}</button></div>`;
+  return `<div class="cell-sub" style="margin-bottom:12px;">Admin only. Changes are saved as you type and apply to new challans and receipts; challans already made keep the details they were printed with.</div>
+    ${table('dispatchers', 'Dispatcher locations', 'The "Dispatcher address" choices in Dispatch: where furnishings are sent from.', '+ Add dispatcher location')}
+    ${table('receivers', 'Receiver locations', 'The "Receiver address" choices in Dispatch, and the "Received at" choices in Receiving (which also offers Other).', '+ Add receiver location')}`;
+}
+const _rfsLoc = renderFabricStation;
+renderFabricStation = function(){
+  const html = _rfsLoc.apply(this, arguments);
+  const t = document.createElement('template'); t.innerHTML = html;
+  const tb = t.content.querySelector('[data-fabtab="locations"]'); if (tb) tb.textContent = 'Locations';
+  if (state.fabricTab === 'locations'){ const hr = t.content.querySelector('hr.fts-divider'); if (hr){ while (hr.nextSibling) hr.nextSibling.remove(); const d = document.createElement('div'); d.innerHTML = renderFabricLocations(); hr.after(d); } }
+  return t.innerHTML;
+};
+const locOpts = (kind, sel, ph) => `<option value="">${ph}</option>` + (fabLocs()[kind] || []).filter(l => l.name.trim()).map(l => `<option value="${xe(l.id)}" ${sel === l.id ? 'selected' : ''}>${xe(l.name)}</option>`).join('');
+const _rfdLoc = renderFabricDispatch;
+renderFabricDispatch = function(){
+  const html = _rfdLoc.apply(this, arguments);
+  const t = document.createElement('template'); t.innerHTML = html;
+  const L = fabLocs(), ds = L.dispatchers.filter(l => l.name.trim()), rs = L.receivers.filter(l => l.name.trim());
+  const from = t.content.querySelector('#disp_from'), to = t.content.querySelector('#disp_to');
+  if (from) from.innerHTML = locOpts('dispatchers', state.xDispFrom || (ds.length === 1 ? ds[0].id : ''), ds.length ? 'Choose where it is sent from…' : 'No dispatcher locations yet');
+  if (to) to.innerHTML = locOpts('receivers', state.xDispTo || '', rs.length ? 'Choose a destination…' : 'No receiver locations yet');
+  const btn = t.content.querySelector('#submitDispatch');
+  if (btn){
+    const note = document.createElement('div'); note.className = 'cell-sub'; note.style.marginTop = '8px';
+    if (!ds.length || !rs.length){ note.style.color = 'var(--critical)'; note.textContent = 'An admin needs to add ' + (!ds.length ? 'dispatcher' : 'receiver') + ' locations first (Furnishings Tag Station › Locations).'; btn.disabled = true; }
+    else if (state.xFabDispErr){ note.style.color = 'var(--critical)'; note.textContent = state.xFabDispErr; }
+    else note.textContent = 'The Delivery Challan opens for printing as soon as it is generated.';
+    btn.parentNode.after(note);
+  }
+  const c = state.xFabLastChallan && FABRIC_CHALLANS.find(x => x.id === state.xFabLastChallan);
+  if (c){ const d = document.createElement('div'); d.className = 'card action-card'; d.style.marginBottom = '14px';
+    d.innerHTML = `<div class="ac-title">Delivery Challan ${xe(c.challanNo)} generated</div><div class="ac-sub">${c.items.length} tag(s) · ${xe(c.fromLabel)} → ${xe(c.toLabel)}. If the print window didn't open, print it here; it can also be reprinted from the Logbook.</div>
+      <div style="display:flex;gap:8px;margin-top:10px;"><button class="btn btn-primary btn-sm" data-fab-print-challan="${xe(c.id)}">Print challan</button><button class="btn-text" id="xFabChallanDone">Done</button></div>`;
+    t.content.prepend(d); }
+  return t.innerHTML;
+};
+const recvDefault = () => {   // the destination of the challan the tags in the cart came on, when they all agree
+  const tos = [...state.fabricReceiveCart].map(id => FABRIC_ENTRIES.find(e => e.id === id)).filter(Boolean).map(e => { const d = e.dispatches[e.dispatches.length - 1]; const c = d && FABRIC_CHALLANS.find(x => x.challanNo === d.challanNo); return c ? (c.toId || (fabLocs().receivers.find(l => l.name === c.toLabel) || {}).id || '') : ''; });
+  return tos.length && tos.every(x => x && x === tos[0]) ? tos[0] : '';
+};
+const _rfrLoc = renderFabricReceive;
+renderFabricReceive = function(){
+  const html = _rfrLoc.apply(this, arguments);
+  const t = document.createElement('template'); t.innerHTML = html;
+  const sel = t.content.querySelector('#recv_location');
+  if (sel){
+    const cur = state.xRecvSel != null ? state.xRecvSel : recvDefault();
+    sel.innerHTML = locOpts('receivers', cur, 'Choose where it was received…') + `<option value="__other" ${cur === '__other' ? 'selected' : ''}>Other</option>`;
+    const box = document.createElement('div');
+    box.innerHTML = (cur === '__other' ? `<input id="x_recv_other" placeholder="Name of the location" value="${xe(state.xRecvOther || '')}" style="margin-top:6px;">` : '')
+      + (state.xFabRecvErr ? `<div class="cell-sub" style="color:var(--critical);margin-top:6px;">${xe(state.xFabRecvErr)}</div>` : '') + (recvDefault() && cur === recvDefault() ? '<div class="cell-sub" style="margin-top:4px;">Pre-selected from the challan the tags came on.</div>' : '');
+    sel.after(box); const lab = sel.parentNode.querySelector('label'); if (lab) lab.textContent = 'Received at';
+  }
+  return t.innerHTML;
+};
+const _printChallanSrc = printableChallanHtml;
+printableChallanHtml = function(c){
+  if (!c.fromPoc && !c.toPoc && !c.fromPhone && !c.toPhone) return _printChallanSrc(c);
+  const party = (lab, name, addr, poc, ph) => `<div><div class="p-addr-label">${lab}</div><b>${xe(name || '')}</b><br>${xe(addr || '').replace(/\n/g, '<br>')}${poc || ph ? `<br>POC: ${xe(poc || '')}${ph ? ' · ' + xe(ph) : ''}` : ''}</div>`;
+  const t = document.createElement('template'); t.innerHTML = _printChallanSrc(c);
+  const row = t.content.querySelector('.p-addr-row');
+  if (row) row.innerHTML = party('From', c.fromLabel, c.fromAddress, c.fromPoc, c.fromPhone) + party('To', c.toLabel, c.toAddress, c.toPoc, c.toPhone);
+  return t.innerHTML;
+};
+const _rflChallans = renderFabricLog;
+renderFabricLog = function(){   // the compact logbook dropped the challan list; it comes back here, with Reprint for supply/admin
+  const html = _rflChallans.apply(this, arguments);
+  const canPrint = ['supply', 'admin'].includes(state.role);
+  return html + `<div class="group-label" style="margin-top:18px;">Delivery Challans</div>
+    <div class="card table-wrap"><table class="grid-table x-compact"><thead><tr><th>Challan #</th><th>Date</th><th>From → To</th><th>Items</th><th>Created by</th><th></th></tr></thead><tbody>
+    ${FABRIC_CHALLANS.length ? FABRIC_CHALLANS.map(c => `<tr><td class="mono cell-primary">${xe(c.challanNo)}</td><td>${fmtDate(c.date)}</td><td>${xe(c.fromLabel)} → ${xe(c.toLabel)}</td>
+      <td>${c.items.map(i => `${xe(i.fabricName)} (${i.qty} ${xe(i.unit)})`).join(', ')}</td><td>${xe(c.createdBy)}</td>
+      <td><div class="row-actions"><button class="btn-text" data-fab-view-challan="${xe(c.id)}">View</button>${canPrint ? `<button class="btn-text" data-fab-print-challan="${xe(c.id)}">Reprint</button>` : ''}</div></td></tr>`).join('')
+      : '<tr><td colspan="6"><div class="empty-note">No Delivery Challans yet.</div></td></tr>'}</tbody></table></div>`;
+};
+extraWiring.push(() => {
+  const $ = id => document.getElementById(id);
+  // Locations editor
+  document.querySelectorAll('[data-xfl]').forEach(el => el.addEventListener('input', () => { const [k, id, f] = el.dataset.xfl.split('|'); const l = fabLoc(k, id); if (l){ l[f] = el.value; saveFabLocs(); } }));
+  document.querySelectorAll('[data-xfl-add]').forEach(b => b.addEventListener('click', () => { const k = b.dataset.xflAdd; fabLocs()[k].push({ id:k[0] + Date.now().toString(36), name:'', address:'', pocName:'', pocPhone:'' }); saveFabLocs(); renderAll(); }));
+  document.querySelectorAll('[data-xfl-del]').forEach(b => b.addEventListener('click', () => { const v = b.dataset.xflDel; if (state.xFlDelArm !== v){ state.xFlDelArm = v; renderAll(); return; }
+    const [k, id] = v.split('|'); fabLocs()[k] = fabLocs()[k].filter(l => l.id !== id); state.xFlDelArm = null; saveFabLocs(); renderAll(); }));
+  // Dispatch: remember the picks, generate the challan with the locations' details, print it
+  const df = $('disp_from'), dt = $('disp_to');
+  if (df) df.addEventListener('change', e => { state.xDispFrom = e.target.value; });
+  if (dt) dt.addEventListener('change', e => { state.xDispTo = e.target.value; });
+  const sd = $('submitDispatch');
+  if (sd){ const nb = sd.cloneNode(true); sd.replaceWith(nb); nb.addEventListener('click', () => {
+    const ids = [...state.fabricDispatchCart]; if (!ids.length) return;
+    const F = fabLoc('dispatchers', $('disp_from').value), T = fabLoc('receivers', $('disp_to').value);
+    if (!F || !T){ state.xFabDispErr = 'Choose the dispatcher and the receiver address.'; return renderAll(); }
+    state.xFabDispErr = '';
+    const challanNo = fabNewNo('CHL-', FABRIC_CHALLANS, 'challanNo'), at = nowIso();
+    const entries = ids.map(id => FABRIC_ENTRIES.find(e => e.id === id)).filter(Boolean);
+    entries.forEach(e => { e.dispatches.push({ dispatchedAt:at, dispatchedBy:actingUserName(), dispatchedPhone:'—', location:F.name, to:T.name, challanNo }); });
+    const c = { id:challanNo, challanNo, date:at.slice(0, 10), createdAt:at, createdBy:actingUserName(), createdByPhone:'—',
+      fromId:F.id, fromLabel:F.name, fromAddress:F.address, fromPoc:F.pocName, fromPhone:F.pocPhone, toId:T.id, toLabel:T.name, toAddress:T.address, toPoc:T.pocName, toPhone:T.pocPhone,
+      items:entries.map(e => ({ id:e.id, sku:e.sku, fabricName:e.fabricName, qty:e.qty, unit:e.unit })) };
+    FABRIC_CHALLANS.unshift(c); state.fabricDispatchCart = new Set(); state.xFabLastChallan = c.id; state.xDispTo = '';
+    renderAll(); printDocument(printableChallanHtml(c), { top:true });
+  }); }
+  const cd = $('xFabChallanDone'); if (cd) cd.addEventListener('click', () => { state.xFabLastChallan = null; renderAll(); });
+  // Receiving: receiver list + Other, pre-selected from the challan
+  const rl = $('recv_location'); if (rl) rl.addEventListener('change', e => { state.xRecvSel = e.target.value; state.xFabRecvErr = ''; renderAll(); });
+  const ro = $('x_recv_other'); if (ro) ro.addEventListener('input', e => { state.xRecvOther = e.target.value; });
+  const sr = $('submitReceive');
+  if (sr){ const nb = sr.cloneNode(true); sr.replaceWith(nb); nb.addEventListener('click', () => {
+    const ids = [...state.fabricReceiveCart]; if (!ids.length) return;
+    const v = $('recv_location').value, R = fabLoc('receivers', v);
+    const location = v === '__other' ? String(($('x_recv_other') || {}).value || '').trim() : (R ? R.name : '');
+    if (!location){ state.xFabRecvErr = v === '__other' ? 'Enter the name of the location.' : 'Choose where it was received.'; return renderAll(); }
+    state.xFabRecvErr = '';
+    const receiptNo = fabNewNo('RCV-', FABRIC_RECEIPTS, 'receiptNo'), at = nowIso();
+    const entries = ids.map(id => FABRIC_ENTRIES.find(e => e.id === id)).filter(Boolean);
+    entries.forEach(e => { e.receipts.push({ receivedAt:at, receivedBy:actingUserName(), receivedPhone:'—', location, receiptNo }); e.destReceivedAt = at; e.destReceivedBy = actingUserName(); e.destLocation = location; });
+    FABRIC_RECEIPTS.unshift({ id:receiptNo, receiptNo, date:at.slice(0, 10), createdAt:at, createdBy:actingUserName(), createdByPhone:'—', location, items:entries.map(e => ({ id:e.id, sku:e.sku, fabricName:e.fabricName, qty:e.qty, unit:e.unit })) });
+    state.fabricReceiveCart = new Set(); state.xRecvSel = null; state.xRecvOther = ''; renderAll();
+  }); }
+  // Discard an unsent draft from its own page
+  const dd = $('xDiscardDraft');
+  if (dd) dd.addEventListener('click', () => { const o = ORDERS.find(x => x.id === state.openOrderId); if (!o || !o.appNative || o.lifecycle !== 'draft') return;
+    if (state.xDiscardArm !== o.id){ state.xDiscardArm = o.id; return renderAll(); }
+    const i = ORDERS.indexOf(o); ORDERS.splice(i, 1); const L = LINES_BY_SO[o.so] || []; const j = L.indexOf(o); if (j >= 0) L.splice(j, 1);
+    state.xDiscardArm = null; state.openOrderId = null; renderAll(); });
 });
 
 if (!routePublic() && state.currentUser) renderAll();
