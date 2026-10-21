@@ -986,6 +986,28 @@ OB.logout = async function(){
   clrTok(); OB.sync = false; location.replace(location.pathname);
 };
 // Admin Uploads > Order Bridge data file: order-bridge-data.json from build_from_folder.py, sent in ~500 KB pieces.
+async function publishDataText(text, d, progress){
+  var pub = {}; d.dpi.forEach(function(h){ if (h && h.so) pub[h.so] = { so:h.so, customer:h.customer || '', date:h.date || '' }; });
+  var id = 'd' + Date.now().toString(36), size = 500000, chunks = [];
+  for (var i = 0; i < text.length; ){
+    var end = Math.min(text.length, i + size), cc = text.charCodeAt(end - 1);
+    if (end < text.length && cc >= 0xD800 && cc <= 0xDBFF) end--;
+    chunks.push(text.slice(i, end)); i = end;
+  }
+  var gz = typeof CompressionStream === 'function';   // stored gzipped, so loading costs the server nothing
+  for (var n = 0; n < chunks.length; n++){
+    progress(n, chunks.length);
+    if (gz){
+      var zb = await new Response(new Blob([chunks[n]]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
+      await api('/api/data/upload?id=' + id + '&n=' + n + '&gz=1', { method:'POST', body:zb, headers:{ 'Content-Type':'application/octet-stream' } });
+    } else {
+      await api('/api/data/upload?id=' + id + '&n=' + n, { method:'POST', body:chunks[n], headers:{ 'Content-Type':'text/plain; charset=utf-8' } });
+    }
+  }
+  var res = await api('/api/data/upload?id=' + id + '&finish=1', { body:{ chunks:chunks.length, gz:gz, bytes:text.length, builtAt:d.builtAt, pub:pub } });
+  OB.dataMeta = res.meta;
+  return res.meta;
+}
 OB.uploadData = async function(file, redraw){
   OB.dataUpload = { busy:true, kind:'info', msg:'Reading ' + file.name + '…' }; redraw();
   try {
@@ -993,29 +1015,91 @@ OB.uploadData = async function(file, redraw){
     var d = safeParse(text);
     if (!d) throw new Error('That file is not valid JSON. Upload order-bridge-data.json from build_from_folder.py.');
     if (!Array.isArray(d.orders) || !Array.isArray(d.dpi) || !d.builtAt) throw new Error('That JSON is not an Order Bridge data file (orders, dpi or builtAt is missing).');
-    var pub = {}; d.dpi.forEach(function(h){ if (h && h.so) pub[h.so] = { so:h.so, customer:h.customer || '', date:h.date || '' }; });
-    var id = 'd' + Date.now().toString(36), size = 500000, chunks = [];
-    for (var i = 0; i < text.length; ){
-      var end = Math.min(text.length, i + size), cc = text.charCodeAt(end - 1);
-      if (end < text.length && cc >= 0xD800 && cc <= 0xDBFF) end--;
-      chunks.push(text.slice(i, end)); i = end;
-    }
-    var gz = typeof CompressionStream === 'function';   // stored gzipped, so loading costs the server nothing
-    for (var n = 0; n < chunks.length; n++){
-      OB.dataUpload.msg = 'Uploading… ' + Math.round(n * 100 / chunks.length) + '%'; redraw();
-      if (gz){
-        var zb = await new Response(new Blob([chunks[n]]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer();
-        await api('/api/data/upload?id=' + id + '&n=' + n + '&gz=1', { method:'POST', body:zb, headers:{ 'Content-Type':'application/octet-stream' } });
-      } else {
-        await api('/api/data/upload?id=' + id + '&n=' + n, { method:'POST', body:chunks[n], headers:{ 'Content-Type':'text/plain; charset=utf-8' } });
-      }
-    }
-    var res = await api('/api/data/upload?id=' + id + '&finish=1', { body:{ chunks:chunks.length, gz:gz, bytes:text.length, builtAt:d.builtAt, pub:pub } });
-    OB.dataMeta = res.meta;
+    await publishDataText(text, d, function(n, t){ OB.dataUpload.msg = 'Uploading… ' + Math.round(n * 100 / t) + '%'; redraw(); });
     OB.dataUpload = { busy:false, kind:'ok', msg:'Uploaded the data built ' + d.builtAt + ' (' + d.orders.length + ' order lines). Reload to use it here; everyone else gets it the next time they open or reload Order Bridge.' };
   } catch(e){ OB.dataUpload = { busy:false, kind:'error', msg:'Upload failed: ' + (e.message || e) }; }
   redraw();
 };
+
+// Admin Uploads > Daily exports: the ERP .xlsx exports are kept online (newest copy of each) and the data
+// file is rebuilt from them in this browser by OBBuild (a port of build_from_folder.py).
+OB.exp = { meta:null, metaLoaded:false, picked:[], busy:false, msg:'', kind:'' };
+OB.expLoadMeta = async function(redraw){
+  if (OB.exp.metaLoading) return; OB.exp.metaLoading = true;
+  try { OB.exp.meta = ((await api('/api/exports', { cache:'no-store' })) || {}).meta || { slots:{} }; OB.exp.metaLoaded = true; }
+  catch(e){ OB.exp.msg = 'Could not load the stored exports: ' + (e.message || e); OB.exp.kind = 'error'; OB.exp.metaLoaded = true; }
+  OB.exp.metaLoading = false; redraw();
+};
+function readWb(buf){ return window.XLSX.read(new Uint8Array(buf), { type:'array', cellNF:true }); }
+OB.expPick = async function(fileList, redraw){
+  var ex = OB.exp; ex.busy = true; ex.msg = 'Reading ' + fileList.length + ' file(s)…'; ex.kind = 'info'; redraw();
+  try {
+    var picked = [];
+    for (var i = 0; i < fileList.length; i++){
+      var f = fileList[i]; ex.msg = 'Reading ' + f.name + '…'; redraw();
+      var buf = await f.arrayBuffer(), info;
+      try { var wb = readWb(buf); info = window.OBBuild.classify(f.name, wb); picked.push({ name:f.name, buf:buf, wb:wb, info:info }); }
+      catch(e){ picked.push({ name:f.name, buf:null, wb:null, info:{ file:f.name, slot:null, label:'Could not be read (' + (e.message || e) + ')', rows:0 } }); }
+    }
+    // two files for the same export: keep the one with the newer data (or the later one)
+    var bySlot = {};
+    picked.forEach(function(p){ if (!p.info.slot) return; var q = bySlot[p.info.slot];
+      if (q && (q.info.newest || '') > (p.info.newest || '')){ p.dup = q.name; return; } if (q) q.dup = p.name; bySlot[p.info.slot] = p; });
+    ex.picked = picked; ex.msg = ''; ex.kind = '';
+  } catch(e){ ex.msg = 'Could not read the files: ' + (e.message || e); ex.kind = 'error'; }
+  ex.busy = false; redraw();
+};
+OB.expClear = function(redraw){ OB.exp.picked = []; OB.exp.msg = ''; redraw(); };
+OB.expPublish = async function(redraw){
+  var ex = OB.exp, say = function(t){ ex.msg = t; ex.kind = 'info'; redraw(); };
+  ex.busy = true; redraw();
+  try {
+    var use = ex.picked.filter(function(p){ return p.info.slot && !p.dup; });
+    if (!use.length) throw new Error('None of the chosen files is a recognised export.');
+    var slots = (ex.meta && ex.meta.slots) || {}, have = {};
+    use.forEach(function(p){ have[p.info.slot] = 1; });
+    var files = use.map(function(p){ return { name:p.name, wb:p.wb }; });
+    var keep = Object.keys(slots).filter(function(s){ return !have[s]; });
+    for (var k = 0; k < keep.length; k++){
+      var m = slots[keep[k]]; say('Fetching the stored ' + m.label + ' (' + (k + 1) + ' of ' + keep.length + ')…');
+      var parts = [];
+      for (var n = 0; n < m.chunks; n++){
+        var r = await fetch('/api/exports/file?id=' + m.id + '&n=' + n, { headers:{ Authorization:'Bearer ' + tok() } });
+        if (!r.ok) throw new Error('Could not fetch the stored ' + m.label + ' (' + r.status + ')');
+        parts.push(new Uint8Array(await r.arrayBuffer()));
+      }
+      var len = parts.reduce(function(t, p){ return t + p.length; }, 0), all = new Uint8Array(len), off = 0;
+      parts.forEach(function(p){ all.set(p, off); off += p.length; });
+      files.push({ name:m.file, wb:readWb(all.buffer) });
+    }
+    say('Building the data from ' + files.length + ' export(s)…');
+    await new Promise(function(r){ setTimeout(r, 30); });
+    var res = window.OBBuild.build(files), d = res.data;
+    // store the new exports first: the data file below is built from them
+    var entries = [];
+    for (var i = 0; i < use.length; i++){
+      var p = use[i], id = 'x' + Date.now().toString(36) + i, bytes = new Uint8Array(p.buf), size = 500000, cnt = Math.max(1, Math.ceil(bytes.length / size));
+      for (var c = 0; c < cnt; c++){
+        say('Saving ' + p.name + (cnt > 1 ? ' (' + (c + 1) + '/' + cnt + ')' : '') + '…');
+        await api('/api/exports/upload?id=' + id + '&n=' + c, { method:'POST', body:bytes.slice(c * size, (c + 1) * size).buffer, headers:{ 'Content-Type':'application/octet-stream' } });
+      }
+      entries.push({ slot:p.info.slot, id:id, chunks:cnt, bytes:bytes.length, file:p.name, type:p.info.type, label:p.info.label, rows:p.info.rows, oldest:p.info.oldest, newest:p.info.newest });
+    }
+    ex.meta = ((await api('/api/exports/commit', { body:{ files:entries, remove:[] } })) || {}).meta || ex.meta;
+    var text = JSON.stringify(d);
+    await publishDataText(text, d, function(n, t){ say('Publishing the data… ' + Math.round(n * 100 / t) + '%'); });
+    ex.picked = []; ex.kind = 'ok';
+    ex.msg = 'Published: ' + d.orders.length + ' order lines, ' + d.dpi.length + ' SOs, ' + d.soLines.length + ' SO lines, built from ' + files.length + ' export(s). Reload to see it here; everyone else gets it the next time they open or reload Order Bridge.';
+  } catch(e){ ex.kind = 'error'; ex.msg = 'Not published: ' + (e.message || e); }
+  ex.busy = false; redraw();
+};
+OB.expRemove = async function(slot, redraw){
+  var ex = OB.exp; ex.busy = true; redraw();
+  try { ex.meta = ((await api('/api/exports/commit', { body:{ files:[], remove:[slot] } })) || {}).meta || ex.meta; ex.msg = 'Removed. It stops being used from the next publish.'; ex.kind = 'ok'; }
+  catch(e){ ex.msg = 'Could not remove it: ' + (e.message || e); ex.kind = 'error'; }
+  ex.busy = false; redraw();
+};
+
 // Admin Uploads > Backup: the whole shared store (as stored, with record versions) + accounts list, as one JSON file.
 OB.downloadBackup = async function(redraw){
   OB.backup = { busy:true }; redraw();
@@ -1151,6 +1235,437 @@ async function main(){
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', main); else main();
 })();
+</script>
+<script>
+// =====================================================================================
+// Order Bridge — exports → data file, in the browser (21 Oct 2026).
+// A line-by-line port of build/build_from_folder.py (the part that builds
+// window.__MFPL_REAL_DATA__), so the online "Upload exports" card produces the same data
+// file the script does. Reads .xlsx with SheetJS (the XLSX global the page already loads)
+// and mimics pandas.read_excel(header=None, dtype=str): numbers become their Python str(),
+// date-formatted cells become 'YYYY-MM-DD HH:MM:SS', pandas' default NA strings become empty.
+// Keep in step with build_from_folder.py: any rule changed there must change here too.
+// =====================================================================================
+(function(root){
+'use strict';
+var INTERNAL_SUPPLIERS = ['S00165', 'S00013'];
+var IC_CODES = { C00240505102023:1, C00241202130428:1, C00250124125630:1, C00250722103706:1, C00241205044735:1, C00251210105459:1 };
+var NA = {}; ['-1.#IND','1.#QNAN','1.#IND','-1.#QNAN','#N/A N/A','#N/A','N/A','n/a','NA','<NA>','#NA','NULL','null','NaN','-NaN','nan','-nan','None',''].forEach(function(k){ NA[k] = 1; });
+var MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+var PAYABLES_CUTOFF = '2026-08-31';
+
+// ---------------------------------------------------------------- Python-compatible helpers
+function pad(n, w){ n = String(n); while (n.length < (w || 2)) n = '0' + n; return n; }
+function pyFloatStr(v){
+  if (!isFinite(v)) return v > 0 ? 'inf' : v < 0 ? '-inf' : 'nan';
+  if (Number.isInteger(v) && Math.abs(v) < 1e16) return String(v) + '.0';
+  var a = Math.abs(v);
+  if (a !== 0 && (a < 1e-4 || a >= 1e16)){
+    var e = v.toExponential(); var m = /^(-?[\d.]+)e([+-])(\d+)$/.exec(e);
+    return m[1] + 'e' + m[2] + pad(m[3], 2);
+  }
+  return String(v);
+}
+function cellStr(cell, date1904){
+  if (!cell || cell.t === 'z' || cell.v === undefined || cell.v === null) return null;
+  if (cell.t === 's' || cell.t === 'str'){ var s = String(cell.v); return NA[s] ? null : s; }
+  if (cell.t === 'b') return cell.v ? 'True' : 'False';
+  if (cell.t === 'e'){ var w = cell.w || ''; return NA[w] ? null : w; }
+  if (cell.t === 'd') return dtStr(cell.v);
+  if (cell.t === 'n'){
+    var v = cell.v;
+    if (cell.z && root.XLSX.SSF.is_date(cell.z)){
+      var p = root.XLSX.SSF.parse_date_code(v, { date1904: !!date1904 });
+      if (p){
+        if (v < 1 && v >= 0 && !/[dmy]/i.test(String(cell.z).replace(/\[[^\]]*\]/g, '').replace(/"[^"]*"/g, '').replace(/[hs]+:?m+|m+:s/gi, ''))) return pad(p.H) + ':' + pad(p.M) + ':' + pad(p.S);
+        return p.y + '-' + pad(p.m) + '-' + pad(p.d) + ' ' + pad(p.H) + ':' + pad(p.M) + ':' + pad(p.S);
+      }
+    }
+    // openpyxl: whole numbers come back as int, the rest as float
+    return Number.isInteger(v) && Math.abs(v) < 1e16 ? String(v) : pyFloatStr(v);
+  }
+  return String(cell.v);
+}
+function dtStr(d){ return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()) + ' ' + pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds()); }
+function sheetRows(ws, date1904){
+  var ref = ws && ws['!ref']; if (!ref) return [];
+  var R = root.XLSX.utils.decode_range(ref), rows = [];
+  for (var r = 0; r <= R.e.r; r++){
+    var row = [];
+    for (var c = 0; c <= R.e.c; c++) row.push(cellStr(ws[root.XLSX.utils.encode_cell({ r:r, c:c })], date1904));
+    rows.push(row);
+  }
+  while (rows.length && rows[rows.length - 1].every(function(v){ return v === null; })) rows.pop();
+  return rows;
+}
+// A frame: { cols:[names], rows:[[values]] }; get(row, name) = first column with that name.
+function frame(cols, rows){
+  var idx = {}; cols.forEach(function(c, i){ if (!(c in idx)) idx[c] = i; });
+  return { cols:cols, rows:rows, idx:idx };
+}
+function frameFrom(raw, thresh){
+  var h = -1;
+  for (var i = 0; i < Math.min(8, raw.length); i++){ if (raw[i].filter(function(v){ return v !== null; }).length >= thresh){ h = i; break; } }
+  if (h < 0) return frame([], []);
+  var cols = raw[h].map(function(c){ return String(c === null ? 'nan' : c).trim(); });
+  var rows = raw.slice(h + 1).filter(function(r){ return r.some(function(v){ return v !== null; }); })
+    .map(function(r){ var o = r.slice(0, cols.length); while (o.length < cols.length) o.push(null); return o; });
+  return frame(cols, rows);
+}
+function G(f, row, name){ var i = f.idx[name]; return i === undefined ? null : row[i]; }
+function has(f, name){ return name in f.idx; }
+// pandas.concat (outer join on column names, first-seen order)
+function concat(frames){
+  if (!frames.length) return frame([], []);
+  var cols = []; frames.forEach(function(f){ f.cols.forEach(function(c){ if (cols.indexOf(c) < 0) cols.push(c); }); });
+  var out = frame(cols, []);
+  frames.forEach(function(f){ var map = cols.map(function(c){ return f.idx[c]; });
+    f.rows.forEach(function(r){ out.rows.push(map.map(function(i){ return i === undefined ? null : r[i]; })); }); });
+  return out;
+}
+function dropDuplicates(f){
+  var seen = {}, rows = [];
+  f.rows.forEach(function(r){ var k = JSON.stringify(r); if (!seen[k]){ seen[k] = 1; rows.push(r); } });
+  return frame(f.cols, rows);
+}
+function s_(v){ if (v === null || v === undefined) return ''; v = String(v); return v === 'nan' ? '' : v.trim(); }
+function toNum(v){
+  if (v === null || v === undefined) return NaN;
+  var t = String(v).trim(); if (!t) return NaN;
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t) && !/^[+-]?(inf|infinity|nan)$/i.test(t)) return NaN;
+  return Number(/^[+-]?inf/i.test(t) ? (t[0] === '-' ? -Infinity : Infinity) : t);
+}
+function num1(v){ var x = toNum(v); return isNaN(x) ? 0.0 : x; }
+function iso(v){   // pd.to_datetime(v, format='%d-%b-%Y'); None if unparseable or year < 2000
+  var m = /^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/.exec(s_(v)); if (!m) return null;
+  var mo = MON.map(function(x){ return x.toLowerCase(); }).indexOf(m[2].toLowerCase()); if (mo < 0) return null;
+  var y = +m[3], d = +m[1]; if (!validYmd(y, mo + 1, d) || y < 2000) return null;
+  return y + '-' + pad(mo + 1) + '-' + pad(d);
+}
+function validYmd(y, m, d){ if (m < 1 || m > 12 || d < 1) return false; var dim = [31, (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0 ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1]; return d <= dim; }
+function cleanName(v){ v = s_(v); return (v.indexOf('-->') >= 0 ? v.split('-->').slice(1).join('-->') : v).trim(); }
+function code(v){ return s_(v).split('-->')[0].trim(); }
+function isIc(v){ return s_(v).toUpperCase().indexOf('IDC GLOBAL') >= 0 || !!IC_CODES[code(v)]; }
+function city(site){ var m = /\(([^)]+)\)\s*$/.exec(s_(site)); if (m) return m[1].trim(); return s_(site).toUpperCase().indexOf('MAGARI FURNITURE') >= 0 ? 'MFPL' : code(site); }
+function pyTitle(s){ var out = '', prev = false; for (var i = 0; i < s.length; i++){ var ch = s[i], lo = ch.toLowerCase(), up = ch.toUpperCase(), cased = lo !== up; out += cased ? (prev ? lo : up) : ch; prev = cased; } return out; }
+function pyIsUpper(s){ return s !== s.toLowerCase() && s === s.toUpperCase(); }
+function vlabel(v){
+  var p = s_(v).split('-->').map(function(x){ return x.trim(); }).filter(function(x){ return x && x !== 'NA'; });
+  if (!p.length) return '';
+  return [pyTitle(p[0])].concat(p.slice(1, 3).map(function(x){ return pyIsUpper(x) && x.length > 3 ? pyTitle(x) : x; })).join(' · ');
+}
+function pyRound(x, n){   // Python round(): correctly rounded, ties to even
+  var s = x.toFixed(30), neg = s[0] === '-'; if (neg) s = s.slice(1);
+  var dot = s.indexOf('.'), keep = s.slice(0, dot + 1 + n), rest = s.slice(dot + 1 + n);
+  var tie = /^50*$/.test(rest), up = rest[0] > '5' || (rest[0] === '5' && !tie);
+  if (tie){ var last = +keep[keep.length - 1]; up = last % 2 === 1; }
+  var r = Number(keep); if (up) r = Number((r + Math.pow(10, -n)).toFixed(n));
+  r = neg ? -r : r; return r === 0 ? 0 : r;
+}
+function sortedStrings(a){ return a.slice().sort(function(x, y){ return x < y ? -1 : x > y ? 1 : 0; }); }
+function uniqSorted(a){ return sortedStrings(Array.from(new Set(a))); }
+
+// verticle statement dates: pandas.to_datetime(errors='coerce', dayfirst=True) on mixed text
+function vstDate(s){
+  var m;
+  if ((m = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/.exec(s))) return validYmd(+m[1], +m[2], +m[3]) && +m[1] >= 1678 ? m[1] + '-' + pad(+m[2]) + '-' + pad(+m[3]) : null;
+  if ((m = /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4}|\d{2})$/.exec(s))){
+    var y = m[3].length === 2 ? 2000 + +m[3] : +m[3], d = +m[1], mo = +m[2];
+    if (!validYmd(y, mo, d)){ var t = d; d = mo; mo = t; if (!validYmd(y, mo, d)) return null; }
+    return y + '-' + pad(mo) + '-' + pad(d);
+  }
+  if ((m = /^(\d{1,2})[\s\/-]([A-Za-z]{3,9})[\s\/,-]+(\d{4}|\d{2})$/.exec(s))){
+    var mi = MON.map(function(x){ return x.toLowerCase(); }).indexOf(m[2].slice(0, 3).toLowerCase()); if (mi < 0) return null;
+    var yy = m[3].length === 2 ? 2000 + +m[3] : +m[3]; return validYmd(yy, mi + 1, +m[1]) ? yy + '-' + pad(mi + 1) + '-' + pad(+m[1]) : null;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- scan + classify
+var SIG = [
+  ['po_summary',  ['PO Number', 'Article Code', 'Store SO Number']],
+  ['so_article',  ['SO Qty', 'Gross Amt.', 'Article Code']],
+  ['stock',       ['Article', 'Stock Quantity', 'Site Name']],
+  ['so_grn',      ['GRN Number', 'PO Number', 'SO Number']],
+  ['po_payable',  ['PO No.', 'PO Balance', 'Paid to Supplier']],
+  ['po_balance',  ['Balance Payable', 'Total PO Value']],
+  ['so_header',   ['PI No.', 'PI Basic Amount', 'Customer Name']],
+  ['collections', ['Voucher Number', 'SO Number', 'Transaction Amount Total']],
+  ['payments',    ['Purchase Invoice Number', 'PO Number', 'Transaction Amount Total']],
+  ['verticle_stmt', ['Transcations', 'Debit', 'Credit', 'Balance']],
+  ['dispatch_sheet', ['Delivery Note Number', 'Net Amount', 'Total Discount']],
+];
+var LABEL = { po_summary:'PO Summary', so_article:'SO Article Breakup', stock:'Stock Summary', so_grn:'SO vs PO vs GRN', po_payable:'PO Payable', po_balance:'PO Balance Payables',
+  so_header:'Daily PI Revenue', collections:'Collections Receipts', payments:'Payment Expenses', verticle_stmt:'Verticle Statement', dispatch_sheet:'Dispatch Sheet', unknown:'Not recognised' };
+var DATE_COLS = { po_summary:'PO Date', so_article:'SO Date', so_header:'PI Date', payments:'Transaction Date', dispatch_sheet:'Delivery Note Date' };
+
+// files: [{ name, wb }] (SheetJS workbooks read with { cellNF:true }). Returns { data, files:[report] }.
+function build(files, opts){
+  opts = opts || {};
+  files = files.filter(function(f){ return !/^~\$/.test(f.name) && !/^EXAMPLE/.test(f.name); })
+    .sort(function(a, b){ return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
+  var found = [];
+  files.forEach(function(f){
+    var wb = f.wb, d1904 = !!(wb.Workbook && wb.Workbook.WBProps && wb.Workbook.WBProps.date1904);
+    var sheet = wb.SheetNames.indexOf('All Sites') >= 0 ? 'All Sites' : wb.SheetNames[0];
+    var df = frameFrom(sheetRows(wb.Sheets[sheet], d1904), 4);
+    var typ = 'unknown';
+    for (var i = 0; i < SIG.length; i++){ if (SIG[i][1].every(function(c){ return has(df, c); })){ typ = SIG[i][0]; break; } }
+    if (typ === 'stock') df = frame(df.cols, df.rows.filter(function(r){ return G(df, r, 'Site') !== null && G(df, r, 'Article') !== null; }));
+    found.push({ file:f.name, type:typ, rows:df.rows.length, sheet:sheet, df:df, wb:wb, d1904:d1904 });
+  });
+  var by = {}; Object.keys(LABEL).forEach(function(t){ by[t] = found.filter(function(x){ return x.type === t && x.rows > 0; }); });
+  function cat(t){ return concat(by[t].map(function(x){ return x.df; })); }
+  if (!by.po_summary.length) throw new Error('No PO Summary export among the files - it is the one file every section needs.');
+  var pos = dropDuplicates(cat('po_summary')), hdr = cat('so_header'), stk = cat('stock');
+  var pop = by.po_payable.length ? dropDuplicates(cat('po_payable')) : frame([], []), pob = cat('po_balance');
+  var vst = cat('verticle_stmt'), dsp = cat('dispatch_sheet');
+
+  // named sheets read from any workbook that has them (InvoicedOS, PI_Datasheet, Standard_*)
+  var extra = {}, named = { InvoicedOS:[], PI_Datasheet:[], Standard_Upholstery:[], Standard_Finishes:[], Standard_Stone:[] };
+  found.forEach(function(x){ Object.keys(named).forEach(function(sn){
+    if (x.wb.SheetNames.indexOf(sn) < 0) return;
+    var raw = sheetRows(x.wb.Sheets[sn], x.d1904), ncol = raw.reduce(function(m, r){ return Math.max(m, r.length); }, 0);
+    var d = frameFrom(raw, Math.max(2, Math.min(4, ncol)));
+    if (d.rows.length){ named[sn].push(d); extra[x.file] = 1; }
+  }); });
+  var invoicedos = concat(named.InvoicedOS), upholstery = concat(named.Standard_Upholstery), finishes = concat(named.Standard_Finishes), stone = concat(named.Standard_Stone);
+
+  var standardUpholstery = [], seenSc = {};
+  upholstery.rows.forEach(function(r){
+    var shortName = s_(G(upholstery, r, 'Upholstery Short Name')), shortCode = s_(G(upholstery, r, 'Short Code'));
+    if (!shortName || !shortCode || seenSc[shortCode]) return; seenSc[shortCode] = 1;
+    standardUpholstery.push({ shortName:shortName, shortCode:shortCode, vendor:cleanName(G(upholstery, r, 'Vendor Name')), collection:s_(G(upholstery, r, 'Collection Name')),
+      shade:s_(G(upholstery, r, 'Shade / Color')), type:s_(G(upholstery, r, 'Upholstery Type')), priceCategory:s_(G(upholstery, r, 'Price Category')) });
+  });
+  var standardFinishes = [], seenPn = {};
+  finishes.rows.forEach(function(r){ var name = s_(G(finishes, r, 'Polish Names')); if (!name || seenPn[name]) return; seenPn[name] = 1;
+    standardFinishes.push({ polishName:name, shortCode:s_(G(finishes, r, 'Short Code')), applicableOn:s_(G(finishes, r, 'Applicable on')) }); });
+  var standardStone = [], seenSn = {};
+  stone.rows.forEach(function(r){ var name = s_(G(stone, r, 'Stone Name')); if (!name || seenSn[name]) return; seenSn[name] = 1;
+    standardStone.push({ stoneName:name, shortCode:s_(G(stone, r, 'Short Code')), status:s_(G(stone, r, 'Status')) || 'Available' }); });
+
+  // SO headers (Daily PI Revenue)
+  var dpi = [], DPI = {};
+  hdr.rows.forEach(function(r){
+    var g = function(n){ return G(hdr, r, n); };
+    var so = s_(g('PI No.')).replace(/^'+/, '');
+    if (!so || DPI[so]) return;
+    var h = { so:so, site:code(g('Site Name')), city:city(g('Site Name')), date:iso(g('PI Date')), customer:cleanName(g('Customer Name')), custCode:code(g('Customer Name')),
+      value:num1(g('PI Taxable Amount')), basic:num1(g('PI Basic Amount')), total:num1(g('Total PI Value')), cost:num1(g('PI Cost')), collected:num1(g('Total Collection')),
+      collectedExTax:num1(g('Total Collection Wout Tax')), cancelled:!!s_(g('CancelPI')), ic:isIc(g('Customer Name')), rep:s_(g('Sales Representative')), vertical:vlabel(g('Vertical')),
+      nArt:num1(g('No. of Articles')), qArt:num1(g('Qty of Articles')), remark:s_(g('So Remark')) };
+    DPI[so] = h; dpi.push(h);
+  });
+
+  // PO lines (PO Summary)
+  function resolvedCustomer(g){
+    if (!isIc(g('Customer Name')) && s_(g('Customer Name'))) return cleanName(g('Customer Name'));
+    var sc = s_(g('Store Customer Name')); if (sc && sc !== '0') return cleanName(sc);
+    return cleanName(g('Customer Name'));
+  }
+  var poLines = [];
+  pos.rows.forEach(function(r){
+    var g = function(n){ return G(pos, r, n); };
+    if (!s_(g('PO Number'))) return;
+    var so = s_(g('SO Number')), sso = s_(g('Store SO Number')); sso = (sso === '0' || sso === '') ? '' : sso;
+    var link = DPI[sso] ? sso : (DPI[so] ? so : '');
+    var cust = link ? DPI[link].customer : resolvedCustomer(g);
+    poLines.push({ po:s_(g('PO Number')), poDate:iso(g('PO Date')), so:so, storeSo:sso, linkSo:link, customer:cust, vertical:s_(g('Vertical')), code:s_(g('Article Code')),
+      name:s_(g('Article Name')), uom:s_(g('UOM')), qty:num1(g('PO Qty')), cp:num1(g('CP')), nsv:num1(g('Net Selling Value (Before taxes)')), supplier:cleanName(g('Suppllier')), supplierCode:code(g('Suppllier')),
+      furniture:/furniture/i.test(s_(g('Vertical'))) });
+  });
+  dpi.forEach(function(h){ h.linked = false; });
+  poLines.forEach(function(l){ if (l.linkSo) DPI[l.linkSo].linked = true; });
+
+  // ORDERS: one line per (SO, PO, article)
+  var lines = new Map();
+  poLines.forEach(function(l){
+    var so = l.linkSo || l.so, k = JSON.stringify([so, l.po, l.code]);
+    if (!lines.has(k)) lines.set(k, { so:so, po:l.po, sku:l.code, article:l.name, uom:l.uom, qty:0.0, poDate:l.poDate, customer:l.customer, vertical:vlabel(l.vertical), supplier:l.supplier, dpiLinked:!!l.linkSo });
+    lines.get(k).qty += l.qty;
+  });
+  var orders = [], used = {};
+  lines.forEach(function(L){
+    var oid = (L.so + '__' + L.po + '__' + L.sku).replace(/[^A-Za-z0-9_-]/g, '_');
+    while (used[oid]) oid += '_x'; used[oid] = 1;
+    orders.push({ id:oid, so:L.so, po:L.po, poList:[L.po], customer:L.customer || '(customer not in any export)', customerSource:L.dpiLinked ? 'Daily PI Revenue' : 'PO Summary', dpiLinked:L.dpiLinked,
+      vertical:L.vertical, article:L.article, sku:L.sku, qty:L.qty, qtyKnown:false, poQty:L.qty, uom:L.uom, committedDeadline:null,
+      orderValue:0, orderValueSource:'', supplier:L.supplier, soDate:DPI[L.so] ? DPI[L.so].date : null,
+      detail:{ fabrics:[], finishes:[], stoneType:'', design:'', siteReq:'', siteMap:'', notes:'' },
+      lifecycle:'po_confirmed', submittedAt:L.poDate ? L.poDate + 'T00:00:00Z' : null, submittedBy:'PO Summary',
+      poRaisedDate:L.poDate, poConfirmedBy:'PO Summary', poConfirmedAt:L.poDate ? L.poDate + 'T00:00:00Z' : null,
+      clarifications:[], productionDeadline:null, productionDeadlineSetBy:null, productionDeadlineSetAt:null, pendingDeadlineChange:null, deadlineHistory:[], customerDeliveryDetails:null });
+  });
+  var okey = function(o){ return [o.soDate || o.poRaisedDate || '0000', o.so, o.po]; };
+  orders.sort(function(a, b){ var x = okey(a), y = okey(b); for (var i = 0; i < 3; i++){ if (x[i] < y[i]) return 1; if (x[i] > y[i]) return -1; } return 0; });
+
+  // SO lines (SO Article Breakup), matched to the PO lines tied to the same SO
+  function baseCode(c){
+    c = s_(c).toUpperCase(); c = c.replace(/^(FP|LP)-?/, '');
+    var mt = /^(A\d{5})-F\d+$/.exec(c); if (mt) return mt[1];
+    c = c.replace(/(FIN|PCS)$/, '');
+    return c.length > 4 ? c.replace(/(F\d*P\d*|P\d+|F\d+|F)$/, '') : c;
+  }
+  function nameKey(v){ return s_(v).toUpperCase().replace(/[^A-Z0-9]/g, ''); }
+  function isAddon(c){ return /^(FP|LP)-/.test(s_(c).toUpperCase()); }
+  var sart = cat('so_article'), poBySo = {};
+  poLines.forEach(function(l){ if (l.linkSo) (poBySo[l.linkSo] = poBySo[l.linkSo] || []).push(l); });
+  var soLines = [], matchStats = {};
+  if (sart.rows.length){
+    var selSet = {}; dpi.forEach(function(h){ if (!h.ic && !h.cancelled) selSet[h.so] = 1; });
+    var groups = new Map();
+    sart.rows.forEach(function(r){ var so = s_(G(sart, r, 'SO Number')); if (!selSet[so]) return; if (!groups.has(so)) groups.set(so, []); groups.get(so).push(r); });
+    groups.forEach(function(grp, so){
+      var pool = new Map();
+      (poBySo[so] || []).forEach(function(l){ if (!pool.has(l.code)) pool.set(l.code, { q:0.0, base:baseCode(l.code), name:nameKey(l.name), pos:new Set() }); var p = pool.get(l.code); p.q += l.qty; p.pos.add(l.po); });
+      var rows = [];
+      grp.forEach(function(r){
+        var g = function(n){ return G(sart, r, n); };
+        var c = s_(g('Article Code')), vt = s_(g('Vertical'));
+        rows.push({ so:so, sno:Math.trunc(num1(g('SNo'))) || rows.length + 1, code:c, name:s_(g('Article Name')), uom:s_(g('UOM')), qty:num1(g('SO Qty')) + num1(g('FOC Qty')),
+          vertical:vlabel(vt), svc:/servic/i.test(vt), addon:isAddon(c), cov:0.0, how:'', pos:[], poCodes:[] });
+      });
+      var tiers = [
+        function(r, pc, p){ return pc.toUpperCase() === r.code.toUpperCase(); },
+        function(r, pc, p){ return p.base === baseCode(r.code); },
+        function(r, pc, p){ var b = baseCode(r.code); return p.base.length >= 4 && (b.indexOf(p.base) === 0 || p.base.indexOf(b) === 0); },
+        function(r, pc, p){ return nameKey(r.name).length >= 4 && p.name === nameKey(r.name); }];
+      var HOW = ['exact', 'base', 'prefix', 'name'];
+      tiers.forEach(function(f, t){
+        rows.forEach(function(r){
+          if (r.addon || r.qty - r.cov <= 1e-6) return;
+          var stop = false;
+          pool.forEach(function(p, pc){
+            if (stop) return;
+            if (p.q > 1e-6 && f(r, pc, p)){
+              var take = Math.min(r.qty - r.cov, p.q); p.q -= take; r.cov += take;
+              r.how = r.how || HOW[t]; r.pos = uniqSorted(r.pos.concat(Array.from(p.pos))); r.poCodes = uniqSorted(r.poCodes.concat([pc]));
+              if (r.qty - r.cov <= 1e-6) stop = true;
+            }
+          });
+        });
+      });
+      rows.forEach(function(r){
+        if (r.addon){
+          var b = null; for (var i = 0; i < rows.length; i++){ var x = rows[i]; if (!x.addon && baseCode(x.code) === baseCode(r.code)){ b = x; break; } }
+          if (b){ r.cov = b.cov >= b.qty - 1e-6 ? r.qty : 0.0; r.how = 'with ' + b.code; r.pos = b.pos; }
+        }
+        var k = r.svc ? (r.cov > 1e-6 ? 'service on PO' : 'service') : (r.addon ? 'add-on' : (r.cov >= r.qty - 1e-6 ? 'covered' : (r.cov > 1e-6 ? 'part' : 'pending')));
+        matchStats[k] = (matchStats[k] || 0) + 1;
+        r.cov = pyRound(r.cov, 3); soLines.push(r);
+      });
+    });
+  }
+
+  // stock
+  var stock = stk.rows.map(function(r){ var g = function(n){ return G(stk, r, n); };
+    return { wh:city(g('Site Name')) || code(g('Site')), site:s_(g('Site')), code:s_(g('Article')), name:s_(g('Article Name')), qty:num1(g('Stock Quantity')) }; });
+  var whOrder = ['HO', 'BNG', 'COK'];
+  var warehouses = Array.from(new Set(stock.map(function(x){ return x.wh; })));
+  warehouses = sortedStrings(warehouses).sort(function(a, b){ var ia = whOrder.indexOf(a), ib = whOrder.indexOf(b); return (ia < 0 ? 9 : ia) - (ib < 0 ? 9 : ib); });
+
+  // payables (PO Payable / PO Balance Payables, kept for compatibility)
+  var ppos = pop.rows.map(function(r){ var g = function(n){ return G(pop, r, n); };
+    return { po:s_(g('PO No.')), poDate:iso(g('PO Date')), supplier:cleanName(g('Suppllier')), supplierCode:code(g('Suppllier')), amount:num1(g('PO Amount')), paid:num1(g('Paid to Supplier')), balance:num1(g('PO Balance')),
+      so:s_(g('SO No.')), customer:'', material:'', closedDate:iso(g('PO Closed Date')) }; });
+  var suppliers = pob.rows.map(function(r){ var g = function(n){ return G(pob, r, n); };
+    return { code:code(g('Supplier')), name:cleanName(g('Supplier')), total:num1(g('Total PO Value')), paid:num1(g('Total Payments')), balance:num1(g('Balance Payable')) }; });
+  suppliers = suppliers.map(function(s, i){ return [s, i]; }).sort(function(a, b){ return (b[0].balance - a[0].balance) || (a[1] - b[1]); }).map(function(x){ return x[0]; });
+  var pmonths = uniqSorted(ppos.filter(function(p){ return p.poDate; }).map(function(p){ return p.poDate.slice(0, 7); }));
+  var payables = { pos:ppos, suppliers:suppliers, internalSuppliers:INTERNAL_SUPPLIERS.slice(),
+    monthsCovered:pmonths.map(function(m){ return MON[+m.slice(5, 7) - 1] + ' ' + m.slice(0, 4); }).join(', ') || 'none',
+    factoryRollupBalance:suppliers.filter(function(s){ return INTERNAL_SUPPLIERS.indexOf(s.code) >= 0; }).reduce(function(t, s){ return t + s.balance; }, 0) };
+
+  // payments (Payment Expenses Report), opening payables (InvoicedOS)
+  var pay = cat('payments'), payments = [];
+  pay.rows.forEach(function(r){ var g = function(n){ return G(pay, r, n); }; if (!s_(g('PO Number'))) return;
+    payments.push({ po:s_(g('PO Number')), date:iso(g('Transaction Date')), so:s_(g('SO Number')), site:code(g('Site Name')), supplier:cleanName(g('Suppllier')), supplierCode:code(g('Suppllier')),
+      beforeTax:num1(g('Transaction Amount Before Tax')), total:num1(g('Transaction Amount Total')), narration:s_(g('Transaction Narration')) }); });
+  var openingPayables = [];
+  invoicedos.rows.forEach(function(r){   // first 5 columns by position (the sheet repeats some header names further right)
+    var name = cleanName(r[0]); if (!name) return;
+    openingPayables.push({ vendor:name, vertical:s_(r[1]), closingTaxable:num1(r[2]), closingGst:num1(r[3]), closingTotal:num1(r[4]) });
+  });
+
+  // allocations (verticle statement credits)
+  var allocations = [], allocSkipped = 0, lastDate = null;
+  vst.rows.forEach(function(r){
+    var ds = s_(G(vst, r, 'Date')); if (/^['"]+$/.test(ds)) ds = '';
+    if (ds) lastDate = ds; else ds = lastDate;
+    var credit = toNum(G(vst, r, 'Credit')); credit = isNaN(credit) ? 0.0 : credit;
+    if (credit <= 0) return;
+    var d = ds ? vstDate(ds) : null;
+    if (!d){ allocSkipped++; return; }
+    var desc = s_(G(vst, r, 'Transcations')), du = desc.toUpperCase();
+    var bucket = du.indexOf('KW') >= 0 ? 'kw' : du.indexOf('PMC') >= 0 ? 'pmc' : du.indexOf('GST') >= 0 ? 'gst' : 'vertical';
+    allocations.push({ date:d, mode:s_(G(vst, r, 'Mode')), desc:desc, credit:credit, bucket:bucket });
+  });
+
+  // dispatch sheet
+  var dispatches = [];
+  dsp.rows.forEach(function(r){ var g = function(n){ return G(dsp, r, n); }; var so = s_(g('SO Number')); if (!so) return;
+    dispatches.push({ so:so, site:code(g('Site Name')), date:iso(g('Delivery Note Date')), customer:cleanName(g('Customer Name')),
+      grossPreGst:num1(g('Total Amount')) - num1(g('Total Discount')), netAmount:num1(g('Net Amount')), status:s_(g('Status')) }); });
+
+  // coverage notes (same wording as the script)
+  var sel = dpi.filter(function(h){ return !h.cancelled && !h.ic; });
+  var soLineSos = new Set(soLines.map(function(l){ return l.so; })).size;
+  var whText = warehouses.join(', ') || 'none';
+  var postCut = new Set(poLines.filter(function(l){ return l.poDate && l.poDate > PAYABLES_CUTOFF; }).map(function(l){ return l.po; })).size;
+  var cov = {
+    dashboard:{ status:'partial', label:'Partly real', note:'Order lines come from PO Summary (' + orders.length + ' lines). Job-card, fabric and last-mile tiles start at zero.' },
+    confirmations:{ status:'partial', label:'Real', note: soLines.length ? ('SOs from Daily PI Revenue (' + sel.length + ' selectable); POs from PO Summary; the SKUs on each SO from SO Article Breakup, matched to PO lines to show what is still to raise.')
+      : ('SOs from Daily PI Revenue (' + sel.length + ' selectable); POs and articles from PO Summary. An SO with no PO shows no articles - Daily PI Revenue only has the article count.') },
+    stockblock:{ status:'partial', label:'Real stock', note:'Stock in hand from the Stock Summary files (' + whText + ', MAGARI Standard Furniture only). Requests and blocks are entered here.' },
+    sorevision:{ status:'partial', label:'Real values', note:'SO, customer and value from Daily PI Revenue; PO(s) from PO Summary. Advance collected is not in this folder.' },
+    deadlines:{ status:'partial', label:'Structure only', note:'SO > PO > SKU from real data. No file carries committed or production dates.' },
+    fabric:{ status:'partial', label:'Real POs', note:'PO and article pickers come from PO Summary. Tag entries are created here (the live tool\'s existing tags are not loaded).' },
+    warehousetag:{ status:'partial', label:'Real POs', note:'PO, article, SO and customer from PO Summary. Tags are created here.' },
+    slots:{ status:'partial', label:'Real SOs', note:'SOs from Daily PI Revenue, SKUs from PO Summary. Bookings are created here.' },
+    payables:{ status:'partial', label:(openingPayables.length || payments.length) ? 'Real, two-part' : 'No source in this folder',
+      note:(openingPayables.length || payments.length) ? ('Payable = InvoicedOS closing balance as of 31 Aug 2026 (' + openingPayables.length + ' vendor(s)), plus PO Summary cost and Payment Expenses Report payments dated after that (pre-GST throughout, ' + postCut + ' PO(s) / ' + payments.length + ' payment row(s) post-cutoff). Total allocated comes from the verticle statement credits (' + allocations.length + ' row(s) used, ' + allocSkipped + ' left out for an unreadable date).')
+        : 'None of InvoicedOS (Receivables Vs Payables), PO Summary or Payment Expenses Report are in this folder.' },
+    jobcards:{ status:'none', label:'No source', note:'Job cards live in the separate Job Card Station.' },
+  };
+  cov.confirmations.note += (standardUpholstery.length || standardFinishes.length || standardStone.length)
+    ? (' Fabric/finish/stone dropdowns in the SKU-level form come from Standard Materials.xlsx (' + standardUpholstery.length + ' upholstery, ' + standardFinishes.length + ' finish, ' + standardStone.length + ' stone option(s)).')
+    : ' No Standard Materials.xlsx in this folder - fabric/finish/stone fields fall back to free text.';
+
+  var sourceFiles = uniqSorted(found.filter(function(x){ return x.type !== 'unknown' && x.rows > 0; }).map(function(x){ return x.file; }).concat(Object.keys(extra)));
+  var soHeaders = {}; dpi.forEach(function(h){ soHeaders[h.so] = { customer:h.customer, value:h.value, qty:h.qArt, cancelled:h.cancelled, date:h.date, city:h.city, rep:h.rep }; });
+  var data = { builtAt:(opts.now || new Date()).toISOString().slice(0, 19) + 'Z', sourceFiles:sourceFiles, orders:orders, soHeaders:soHeaders, dpi:dpi, poLines:poLines, soLines:soLines,
+    stock:stock, warehouses:warehouses, payables:payables, payablesCutoff:PAYABLES_CUTOFF, openingPayables:openingPayables, payments:payments, allocations:allocations,
+    allocSkippedRows:allocSkipped, dispatches:dispatches, standardUpholstery:standardUpholstery, standardFinishes:standardFinishes, standardStone:standardStone, coverage:cov };
+
+  // per-file report: what each file was read as, and the newest date in it
+  var report = found.map(function(x){
+    var dc = DATE_COLS[x.type], newest = null, oldest = null;
+    if (dc && has(x.df, dc)) x.df.rows.forEach(function(r){ var d = iso(G(x.df, r, dc)); if (d){ if (!newest || d > newest) newest = d; if (!oldest || d < oldest) oldest = d; } });
+    return { file:x.file, type:x.type, label:LABEL[x.type] + (extra[x.file] && x.type === 'unknown' ? ' (named sheets used)' : ''), rows:x.rows, sheet:x.sheet, used:(x.type !== 'unknown' && x.rows > 0) || !!extra[x.file], oldest:oldest, newest:newest };
+  });
+  return { data:data, files:report, matchStats:matchStats };
+}
+// One file on its own: what it is, how many rows, its data dates and the storage slot it fills.
+// Slot = one stored copy per export (a new upload of the same export replaces the old one):
+// the export type; Stock Summary per warehouse; workbooks used only for named sheets by those sheets.
+function classify(name, wb){
+  var d1904 = !!(wb.Workbook && wb.Workbook.WBProps && wb.Workbook.WBProps.date1904);
+  var sheet = wb.SheetNames.indexOf('All Sites') >= 0 ? 'All Sites' : wb.SheetNames[0];
+  var df = frameFrom(sheetRows(wb.Sheets[sheet], d1904), 4), typ = 'unknown';
+  for (var i = 0; i < SIG.length; i++){ if (SIG[i][1].every(function(c){ return has(df, c); })){ typ = SIG[i][0]; break; } }
+  if (typ === 'stock') df = frame(df.cols, df.rows.filter(function(r){ return G(df, r, 'Site') !== null && G(df, r, 'Article') !== null; }));
+  var named = ['InvoicedOS', 'PI_Datasheet', 'Standard_Upholstery', 'Standard_Finishes', 'Standard_Stone'].filter(function(sn){ return wb.SheetNames.indexOf(sn) >= 0; });
+  var slot = null, label = LABEL[typ];
+  if (typ === 'stock'){ var whs = uniqSorted(df.rows.map(function(r){ return city(G(df, r, 'Site Name')) || code(G(df, r, 'Site')); })); slot = 'stock|' + whs.join(','); label = 'Stock Summary ' + whs.join(', '); }
+  else if (typ !== 'unknown' && df.rows.length) slot = typ;
+  else if (named.length){ slot = 'sheets|' + named.join(','); label = named.indexOf('InvoicedOS') >= 0 ? 'Receivables Vs Payables (InvoicedOS)' : named.some(function(n){ return /^Standard_/.test(n); }) ? 'Standard materials' : named.join(', '); }
+  var dc = DATE_COLS[typ], newest = null, oldest = null;
+  if (dc && has(df, dc)) df.rows.forEach(function(r){ var x = iso(G(df, r, dc)); if (x){ if (!newest || x > newest) newest = x; if (!oldest || x < oldest) oldest = x; } });
+  return { file:name, type:typ, label:label, rows:df.rows.length, slot:slot, named:named, oldest:oldest, newest:newest };
+}
+root.OBBuild = { build:build, classify:classify, version:'2026-10-21' };
+})(typeof window !== 'undefined' ? window : globalThis);
 </script>
 <script type="text/x-ob-app">
   const FIREBASE_CONFIG = {
@@ -11035,11 +11550,37 @@ if (!state.adminUploads.payables || !state.adminUploads.payables.files) {
 renderAdminUploads = function(){
   const sections = NAV.filter(n => !['dashboard','userpermissions','adminuploads'].includes(n.id));
   const gapCount = sections.filter(n => !(RFT_SOURCE_MAP[n.id]||[]).length).length;
-  const dm = window.__OB.dataMeta, du = window.__OB.dataUpload;
+  const dm = window.__OB.dataMeta, du = window.__OB.dataUpload, ex = window.__OB.exp;
+  if (!ex.metaLoaded) window.__OB.expLoadMeta(() => renderAll());
+  const exSlots = ex.meta ? Object.entries(ex.meta.slots).sort((a, b) => a[1].label.localeCompare(b[1].label)) : [];
+  const exOld = m => (Date.now() - new Date(m.uploadedAt).getTime()) > 864e5;
+  const exPicked = ex.picked || [], exUsable = exPicked.filter(p => p.info.slot && !p.dup);
+  const exHasPo = exUsable.some(p => p.info.type === 'po_summary') || exSlots.some(([s]) => s === 'po_summary');
   return `
+    <div class="card action-card" id="obExpCard">
+      <div class="ac-title">Daily exports</div>
+      <div class="ac-sub">Add the day's ERP exports here: any of them, as many as you have. Order Bridge keeps the newest copy of each export, rebuilds the data every section reads from all of them, and everyone gets it the next time they open or reload Order Bridge. Files are recognised by their columns, not their names. Work saved in the app is kept.</div>
+      <input type="file" id="obExpInput" accept=".xlsx" multiple style="display:none;">
+      <button class="btn btn-primary" id="obExpPick" style="margin-top:10px;" ${ex.busy ? 'disabled' : ''}>Choose export files</button>
+      ${exPicked.length ? `<div class="card table-wrap" style="margin-top:12px;"><table class="grid-table"><thead><tr><th>Chosen file</th><th>Read as</th><th class="num">Rows</th><th>Data up to</th><th>Replaces</th></tr></thead><tbody>
+        ${exPicked.map(p => { const cur = p.info.slot && ex.meta && ex.meta.slots[p.info.slot]; return `<tr><td class="cell-primary">${xe(p.name)}</td>
+          <td>${p.info.slot ? xe(p.info.label) : `<span class="pill warn">${xe(p.info.label === 'Not recognised' ? 'Not recognised — skipped' : p.info.label)}</span>`}${p.dup ? `<div class="cell-sub">Skipped: ${xe(p.dup)} is a newer copy of the same export</div>` : ''}</td>
+          <td class="num">${p.info.rows || 0}</td><td>${p.info.newest ? fmtDate(p.info.newest) : '—'}</td>
+          <td>${cur ? `${xe(cur.file)}<div class="cell-sub">uploaded ${fmtDT(cur.uploadedAt)}</div>` : (p.info.slot ? '<span class="cell-sub">New export</span>' : '')}</td></tr>`; }).join('')}
+        </tbody></table></div>
+        ${exHasPo ? '' : '<div class="scan-error" style="margin-top:8px;">A PO Summary export is needed at least once — add it to these files.</div>'}
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;"><button class="btn btn-primary" id="obExpPublish" ${ex.busy || !exUsable.length || !exHasPo ? 'disabled' : ''}>${ex.busy ? 'Working…' : 'Build & publish'}</button><button class="btn btn-ghost" id="obExpClear" ${ex.busy ? 'disabled' : ''}>Clear</button></div>` : ''}
+      ${ex.msg ? `<div class="${ex.kind === 'error' ? 'scan-error' : 'cell-sub'}" style="margin-top:10px;">${xe(ex.msg)}${ex.kind === 'ok' && /Published/.test(ex.msg) ? ' <button class="btn-text" id="obDataReload">Reload now</button>' : ''}</div>` : ''}
+      <div class="group-label" style="margin-top:16px;">Exports in use</div>
+      ${!ex.metaLoaded ? '<div class="cell-sub">Loading…</div>' : exSlots.length ? `<div class="card table-wrap"><table class="grid-table"><thead><tr><th>Export</th><th>File</th><th class="num">Rows</th><th>Data up to</th><th>Uploaded</th><th></th></tr></thead><tbody>
+        ${exSlots.map(([slot, m]) => `<tr><td class="cell-primary">${xe(m.label)}</td><td><div class="cell-sub">${xe(m.file)}</div></td><td class="num">${m.rows}</td><td>${m.newest ? fmtDate(m.newest) : '—'}</td>
+          <td>${fmtDT(m.uploadedAt)}<div class="cell-sub">${xe(m.uploadedBy || '')}</div>${exOld(m) ? '<span class="pill warn" style="margin-top:4px;">Over a day old</span>' : ''}</td>
+          <td><button class="btn-text" data-obexp-remove="${xe(slot)}" ${ex.busy ? 'disabled' : ''}>${ex.confirmRemove === slot ? 'Click again to remove' : 'Remove'}</button></td></tr>`).join('')}
+        </tbody></table></div>` : '<div class="cell-sub">None yet. The first time, add the full set of exports (PO Summary, Daily PI Revenue, SO Article Breakup, the Stock Summaries and the rest); after that, only the ones that changed.</div>'}
+    </div>
     <div class="card action-card" id="obDataCard">
       <div class="ac-title">Order Bridge data file</div>
-      <div class="ac-sub">Upload <span class="mono">order-bridge-data.json</span> from build_from_folder.py. It replaces the data every section reads, for everyone. Each person gets it the next time they open or reload Order Bridge. Work saved in the app (deadlines, links, bookings, tags and so on) is kept.</div>
+      <div class="ac-sub">Alternative to Daily exports: upload <span class="mono">order-bridge-data.json</span> made on a computer by build_from_folder.py. It replaces the data every section reads, for everyone. Each person gets it the next time they open or reload Order Bridge. Work saved in the app (deadlines, links, bookings, tags and so on) is kept.</div>
       ${dm ? `<div class="cell-sub">Current data: built ${fmtDT(dm.builtAt)} · uploaded ${fmtDT(dm.uploadedAt)} by ${xe(dm.uploadedBy || '—')}</div>` : `<div class="cell-sub">No data uploaded yet.</div>`}
       <input type="file" id="obDataInput" accept=".json,application/json" style="display:none;">
       <button class="btn btn-primary" id="obDataTrigger" style="margin-top:10px;" ${du && du.busy ? 'disabled' : ''}>${du && du.busy ? 'Uploading…' : 'Upload data file'}</button>
@@ -13472,6 +14013,12 @@ extraWiring.push(() => {
   if (t && inp){ t.addEventListener('click', () => inp.click()); inp.addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) window.__OB.uploadData(f, () => renderAll()); }); }
   const rl = document.getElementById('obDataReload'); if (rl) rl.addEventListener('click', () => location.reload());
   const bk = document.getElementById('obBackupBtn'); if (bk) bk.addEventListener('click', () => window.__OB.downloadBackup(() => renderAll()));
+  const ep = document.getElementById('obExpPick'), ei = document.getElementById('obExpInput');
+  if (ep && ei){ ep.addEventListener('click', () => ei.click()); ei.addEventListener('change', e => { const fl = [...(e.target.files || [])]; e.target.value = ''; if (fl.length) window.__OB.expPick(fl, () => renderAll()); }); }
+  const epub = document.getElementById('obExpPublish'); if (epub) epub.addEventListener('click', () => window.__OB.expPublish(() => renderAll()));
+  const ecl = document.getElementById('obExpClear'); if (ecl) ecl.addEventListener('click', () => window.__OB.expClear(() => renderAll()));
+  document.querySelectorAll('[data-obexp-remove]').forEach(b => b.addEventListener('click', () => { const s = b.dataset.obexpRemove, ex = window.__OB.exp;
+    if (ex.confirmRemove !== s){ ex.confirmRemove = s; renderAll(); return; } ex.confirmRemove = null; window.__OB.expRemove(s, () => renderAll()); }));
 });
 
 if (!routePublic() && state.currentUser) renderAll();
