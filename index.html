@@ -1208,6 +1208,8 @@ async function publicSubmit(){
 }
 async function publicMain(so, k){
   OB.mode = 'public'; OB.publicSo = so; OB.publicK = k;
+  // the customer form is read on phones: size it to the screen (the staff app keeps its desktop layout)
+  var vp = document.createElement('meta'); vp.name = 'viewport'; vp.content = 'width=device-width, initial-scale=1'; document.head.appendChild(vp);
   loading('Opening your form…', true);
   var res;
   try { res = await api('/api/public/site?so=' + encodeURIComponent(so) + '&k=' + encodeURIComponent(k), { noAuth:true, cache:'no-store' }); }
@@ -11726,14 +11728,14 @@ const SITE_FIELDS = [   // order + mandatory fields revised 9 Oct (address corre
   ['access','Truck access to the building', 'textarea', false],
   ['lift','Lift', LIFT_OPTS, true],
   ['liftL','Lift length', 'num', false, 'lift'], ['liftB','Lift breadth', 'num', false, 'lift'], ['liftH','Lift height', 'num', false, 'lift'], ['liftUom','Unit', ['Feet','Centimeters'], false, 'lift'],
-  ['stairW','Width of the stairs', 'num', false, 'nolift'], ['landL','Stair landing length', 'num', false, 'nolift'], ['landB','Stair landing breadth', 'num', false, 'nolift'], ['stairUom','Unit', ['Feet','Centimeters'], false, 'nolift'],
+  ['stairW','Width of the stairs', 'num', false, 'nolift'], ['stairH','Height clearance over the stairs (lowest ceiling or beam)', 'num', false, 'nolift'], ['landL','Stair landing length', 'num', false, 'nolift'], ['landB','Stair landing breadth', 'num', false, 'nolift'], ['stairUom','Unit', ['Feet','Centimeters'], false, 'nolift'],
   ['liftAlt','Anything else about getting the furniture up? (narrow turns, crane, other)', 'text', false, 'nolift'],
   ['timings','Allowed delivery days and hours', 'text', false],
   ['notes','Anything else the delivery team should know', 'textarea', false] ];
 const SITE_OPTIONAL = new Set(['liftAlt']);
-const SITE_HALF = new Set(['liftL','liftB','liftH','stairW','landL','landB']);
+const SITE_HALF = new Set(['liftL','liftB','liftH','stairW','stairH','landL','landB']);
 const siteAddr = r => { const sc = r && r.scan; const F = (r && r.fields) || {}; return F.addressFix || (sc && sc.shipping && !sc.shippingWarn ? sc.shipping.replace(/\n/g, ', ') : '') || F.address || ''; };
-const stairsText = F => /^No lift/.test(F.lift || '') && F.stairW ? `No lift — stairs ${F.stairW} ${F.stairUom === 'Centimeters' ? 'cm' : 'ft'} wide, landing ${F.landL}×${F.landB} ${F.stairUom === 'Centimeters' ? 'cm' : 'ft'}` : '';
+const stairsText = F => /^No lift/.test(F.lift || '') && F.stairW ? `No lift — stairs ${F.stairW} ${F.stairUom === 'Centimeters' ? 'cm' : 'ft'} wide${F.stairH ? ', ' + F.stairH + ' ' + (F.stairUom === 'Centimeters' ? 'cm' : 'ft') + ' headroom' : ''}, landing ${F.landL}×${F.landB} ${F.stairUom === 'Centimeters' ? 'cm' : 'ft'}` : '';
 const siteSummary = r => { if (!r || !r.fields) return ''; const F = r.fields; const lift = /^Yes/.test(F.lift || '') && F.liftL ? `${F.lift.replace(/^Yes — /, '')} ${F.liftL}×${F.liftB}×${F.liftH} ${F.liftUom === 'Centimeters' ? 'cm' : 'ft'}` : stairsText(F) || F.lift;
   return [F.contactName && `${F.contactName} · ${F.contactPhone || ''}`, siteAddr(r), (F.flat || F.floor) && [F.flat, F.floor && 'floor ' + F.floor].filter(Boolean).join(', '), lift, F.parking, F.access, F.timings].filter(Boolean).map(xe).join(' · '); };
 function copyText(text, btn){
@@ -11776,10 +11778,21 @@ function renderSiteDetailsTab(){
         || `<tr><td colspan="6"><div class="empty-note">No site-details forms yet.</div></td></tr>`}</tbody>
     </table></div>`;
 }
+function siteReviewHtml(F, addr){   // what the customer is about to send, before it is sent
+  const unit = k => (/^lift/.test(k) ? F.liftUom : F.stairUom) === 'Centimeters' ? ' cm' : ' ft';
+  const rows = SITE_FIELDS.filter(([k, , , , grp]) => F[k] && !/Uom$/.test(k) && !(grp === 'lift' && !/^Yes/.test(F.lift)) && !(grp === 'nolift' && !/^No/.test(F.lift)))
+    .map(([k, label, type]) => `<tr><td class="cell-sub" style="width:42%;vertical-align:top;">${xe(k === 'addressFix' ? 'Delivery address' : label)}</td><td>${xe(F[k]).replace(/\n/g, '<br>')}${type === 'num' ? unit(k) : ''}</td></tr>`).join('');
+  return `<div class="ac-title" style="margin-top:8px;">Please check your details</div>
+    <div class="ac-sub">Nothing has been sent yet. If everything is right, press Confirm and submit.</div>
+    ${addr && !F.addressFix ? `<div class="card" style="margin-top:12px;padding:10px 12px;background:var(--surface-sunken);"><div class="cell-sub">Delivery address on your order</div><div>${xe(addr).replace(/\n/g, '<br>')}</div></div>` : ''}
+    <table class="grid-table" style="margin-top:12px;"><tbody>${rows}</tbody></table>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;"><button class="btn btn-primary" id="x_pub_confirm">Confirm and submit</button><button class="btn btn-ghost" id="x_pub_back">Edit my answers</button></div>`;
+}
 function renderPublicSiteForm(so){
   const h = DPI_BY_SO[so]; const r = sites()[so]; const locked = !!(r && r.lockedAt);
   const done = locked || state.xSdDone === so || (r && r.submittedAt && !state.xSdEdit);
-  const v = (r && r.fields) || {}; const addr = r && r.scan && r.scan.shipping && !r.scan.shippingWarn ? r.scan.shipping : '';
+  const v = (state.xSdDraft && state.xSdDraft.so === so ? state.xSdDraft.fields : null) || (r && r.fields) || {}; const addr = r && r.scan && r.scan.shipping && !r.scan.shippingWarn ? r.scan.shipping : '';
+  const rev = !done && state.xSdReview === so && state.xSdDraft ? state.xSdDraft.fields : null;
   const liftNow = v.lift || '';
   const input = ([k, label, type, req, grp]) => `<div class="field ${SITE_HALF.has(k) ? '' : 'span2'}" data-grp="${grp || ''}" style="${grp === 'lift' && !/^Yes/.test(liftNow) || grp === 'nolift' && !/^No/.test(liftNow) ? 'display:none;' : ''}"><label>${label}${req || (grp && !SITE_OPTIONAL.has(k)) || (k === 'addressFix' && !addr) ? ' <span style="color:var(--critical);">*</span>' : ''}</label>${
     Array.isArray(type) ? `<select id="x_pub_${k}"><option value="">Choose…</option>${type.map(o => `<option ${v[k] === o || ((k === 'liftUom' || k === 'stairUom') && !v[k] && o === 'Feet') ? 'selected' : ''}>${o}</option>`).join('')}</select>`
@@ -11788,15 +11801,15 @@ function renderPublicSiteForm(so){
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;"><div class="xum-av" style="border-radius:4px;">M</div><div><div style="font-family:var(--font-heading);font-weight:700;font-size:20px;color:var(--heading);">Magari Furniture</div><div class="cell-sub">Site details for your delivery</div></div></div>
     <div class="card action-card">
       ${h ? `<div class="cell-sub">Order ${so}${h.customer ? ' · ' + xe(h.customer) : ''}</div>` : `<div class="cell-sub">Order ${xe(so)}</div>`}
-      ${done ? `<div class="ac-title" style="margin-top:8px;">Thank you — we have your site details.</div>
-        <div class="ac-sub">${locked ? 'Your order is on its way, so these details can no longer be changed here. Please contact your sales person for any change.' : 'Our delivery team will use them to plan your delivery and installation.'}</div>
-        ${locked ? '' : '<button class="btn btn-ghost btn-sm" id="x_pub_edit" style="margin-top:12px;">Edit my answers</button>'}` : `
+      ${done ? `<div class="ac-title" style="margin-top:8px;">${locked ? 'Thank you — we have your site details.' : '✓ Thank you — your site details have been submitted.'}</div>
+        <div class="ac-sub">${locked ? 'Your order is on its way, so these details can no longer be changed here. Please contact your sales person for any change.' : 'Our delivery team will use them to plan your delivery and installation. You can close this page now.'}</div>
+        ${locked ? '' : '<button class="btn btn-ghost btn-sm" id="x_pub_edit" style="margin-top:12px;">Edit my answers</button>'}` : rev ? siteReviewHtml(rev, addr) : `
       <div class="ac-title" style="margin-top:8px;">Help us deliver smoothly</div>
       <div class="ac-sub">A few details about your site so the team can plan the truck, unloading and carrying the furniture in. Fields marked * are required.</div>
       <div class="card" style="margin-top:12px;padding:10px 12px;background:var(--surface-sunken);"><div class="cell-sub">Delivery address on your order</div><div>${addr ? xe(addr).replace(/\n/g, '<br>') : 'Not on our records yet — please enter it in the first box below.'}</div></div>
       <div class="field-grid" style="margin-top:14px;">${SITE_FIELDS.map(input).join('')}</div>
       <div id="x_pub_err" class="cell-sub" style="color:var(--critical);margin-top:8px;"></div>
-      <button class="btn btn-primary" id="x_pub_submit" style="margin-top:12px;">Submit site details</button>`}
+      <button class="btn btn-primary" id="x_pub_submit" style="margin-top:12px;">Review my answers</button>`}
     </div></div>`;
 }
 function routePublic(){
@@ -11824,16 +11837,23 @@ function routePublic(){
     if (fields.map && !isMapUrl(fields.map)) return bad('The location pin should be a Google Maps link.');
     if (/^Yes/.test(fields.lift)){ if (!['liftL','liftB','liftH'].every(k => +fields[k] > 0)) return bad('Please enter the lift length, breadth and height (numbers, decimals allowed).'); if (!fields.liftUom) return bad('Please choose feet or centimeters for the lift size.'); }
     else ['liftL','liftB','liftH'].forEach(k => { fields[k] = ''; });
-    if (/^No lift/.test(fields.lift)){ if (!['stairW','landL','landB'].every(k => +fields[k] > 0)) return bad('Please enter the width of the stairs and the landing length and breadth (numbers, decimals allowed).'); if (!fields.stairUom) return bad('Please choose feet or centimeters for the stairs.'); }
-    else { ['stairW','landL','landB','liftAlt'].forEach(k => { fields[k] = ''; }); }
+    if (/^No lift/.test(fields.lift)){ if (!['stairW','stairH','landL','landB'].every(k => +fields[k] > 0)) return bad('Please enter the width of the stairs, the height clearance over them, and the landing length and breadth (numbers, decimals allowed).'); if (!fields.stairUom) return bad('Please choose feet or centimeters for the stairs.'); }
+    else { ['stairW','stairH','landL','landB','liftAlt'].forEach(k => { fields[k] = ''; }); }
     const r0 = sites()[so]; const addrKnown = r0 && r0.scan && r0.scan.shipping && !r0.scan.shippingWarn;
     if (!addrKnown && !fields.addressFix) return bad('We don\'t have your delivery address yet — please enter it.');
     if (fields.addressFix && !/(?<!\d)[1-9]\d{2}\s?\d{3}(?!\d)/.test(fields.addressFix)) return bad('Please include the 6-digit PIN code in the address.');
+    state.xSdDraft = { so, fields }; state.xSdReview = so; routePublic(); window.scrollTo(0, 0);
+  };
+  const back = document.getElementById('x_pub_back'); if (back) back.onclick = () => { state.xSdReview = null; routePublic(); window.scrollTo(0, 0); };
+  const conf = document.getElementById('x_pub_confirm');
+  if (conf) conf.onclick = () => {
+    const fields = state.xSdDraft && state.xSdDraft.fields; if (!fields) return;
     state.xSites = ls.get(SITE_KEY, {});
     const r = sites()[so] = sites()[so] || { so, createdAt:nowIso(), createdBy:'(link opened directly)' };
-    if (r.lockedAt){ state.xSdDone = so; return routePublic(); }
+    state.xSdReview = null; state.xSdDraft = null;
+    if (r.lockedAt){ state.xSdDone = so; routePublic(); return window.scrollTo(0, 0); }
     Object.assign(r, { fields, submittedAt:nowIso() }); saveSites();
-    state.xSdDone = so; state.xSdEdit = false; routePublic();
+    state.xSdDone = so; state.xSdEdit = false; routePublic(); window.scrollTo(0, 0);
   };
   return true;
 }
