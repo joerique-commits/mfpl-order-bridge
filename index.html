@@ -6318,8 +6318,7 @@ function renderJobCardCapture(){
           <div class="mc-emoji">&#9997;&#65039;</div><div class="mc-title">Enter manually</div><div class="mc-sub">Skip scanning</div>
         </button>
       </div>
-      ${(state.jobcardMethod==='photo'||state.jobcardMethod==='upload') && d && state.xJcPhoto ? `<div class="readonly-banner" style="margin-top:14px;">${icon('lock')} Automatic reading of the card isn't switched on yet — type the details from the photo into the form below. The photo stays on this device only; it isn't saved with the card.</div>
-      <div style="margin-top:10px;"><a href="${state.xJcPhoto}" target="_blank" rel="noopener"><img src="${state.xJcPhoto}" alt="Job card photo" style="max-width:100%;max-height:480px;border-radius:8px;border:1px solid var(--line, #ddd);"></a><div class="cell-sub">Tap the photo to open it full size.</div></div>` : ''}
+      ${(state.jobcardMethod==='photo'||state.jobcardMethod==='upload') && d && state.xJcPhoto ? window.xJcBanner() : ''}
     </div>
     ${!d ? `<div class="empty-note">Choose how to start above.</div>` : renderJobCardCaptureForm(d)}
   `;
@@ -8032,14 +8031,14 @@ function wireContentEvents(){
   // Job Card Station — Capture & review
   document.querySelectorAll('[data-jc-method]').forEach(b => b.addEventListener('click', () => {
     const m = b.dataset.jcMethod;
-    if (m === 'manual'){ state.jobcardMethod = m; state.jobcardDraft = newJobcardDraft(); state.xJcPhoto = null; return renderAll(); }
+    if (m === 'manual'){ state.jobcardMethod = m; state.jobcardDraft = newJobcardDraft(); state.xJcPhoto = null; state.xJcRead = null; state.xJcStageUnsure = []; state.xJcReadSeq = (state.xJcReadSeq || 0) + 1; return renderAll(); }
     const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.style.display = 'none';
     if (m === 'photo') inp.setAttribute('capture', 'environment');
     inp.addEventListener('change', () => { const f = inp.files && inp.files[0]; inp.remove(); if (!f) return;
       if (state.xJcPhoto) { try { URL.revokeObjectURL(state.xJcPhoto); } catch (e) {} }
       state.xJcPhoto = URL.createObjectURL(f); state.jobcardMethod = m;
-      if (!state.jobcardDraft) state.jobcardDraft = newJobcardDraft();
-      renderAll(); });
+      state.jobcardDraft = newJobcardDraft(); state.xJcStageUnsure = []; state.xJcFile = f;
+      window.xJcRead(f); });
     document.body.appendChild(inp); inp.click();
   }));
   const jcTextFieldMap = { jc_jobCardNumber:'jobCardNumber', jc_clientName:'clientName', jc_cardDate:'cardDate', jc_deadlineDate:'deadlineDate', jc_workOrderNumber:'workOrderNumber', jc_productCode:'productCode', jc_qty:'qty', jc_factoryRemarks:'factoryRemarks', jc_designTeamRemarks:'designTeamRemarks' };
@@ -11637,7 +11636,7 @@ renderJobCardCapture = function(){
     .replace('Nothing on the card reliably matches an order automatically — pick the right PO/article yourself. Search by PO number, customer, or article name/code.', `Pick the PO line this card is for, straight from the PO Summary file (${JOBCARD_ORDERS.length.toLocaleString('en-IN')} PO lines). Search by PO number, customer, or article name/code.`);
 };
 renderJobCards = function(){
-  const canCapture = ['production','admin'].includes(state.role);
+  const canCapture = ['production','supply','admin'].includes(state.role);
   if (state.jobcardTab === 'orders') state.jobcardTab = 'capture';
   const tab = canCapture ? (state.jobcardTab || 'capture') : 'dashboard';
   const body = tab === 'capture' && canCapture ? renderJobCardCapture() : (state.jobcardOpenId ? renderJobCardDetail(state.jobcardOpenId) : renderJobCardDashboard());
@@ -14195,6 +14194,149 @@ extraWiring.push(() => {
     if (state.xDiscardArm !== o.id){ state.xDiscardArm = o.id; return renderAll(); }
     const i = ORDERS.indexOf(o); ORDERS.splice(i, 1); const L = LINES_BY_SO[o.so] || []; const j = L.indexOf(o); if (j >= 0) L.splice(j, 1);
     state.xDiscardArm = null; state.openOrderId = null; renderAll(); });
+});
+
+// ---------------------------------------------------------------- Job Card Station: automatic reading (JK, 22 Oct)
+// The photo is shrunk on the phone, sent to /api/jobcard/read (free AI plans with fallback, set up in
+// Admin Uploads), and the answer fills the form. Nothing is saved until the person checks it and presses Save.
+// Capture is open to Production, Supply and Admin.
+const xJcClean = v => String(v == null ? '' : v).replace(/[<>"`]/g, '').trim();
+function xJcMergeRemarks(a, b){ a = (a || '').trim(); b = (b || '').trim(); if (!a) return b; if (!b || a === b) return a; if (b.includes(a)) return b; if (a.includes(b)) return a; return a + '\n' + b; }
+async function xJcShrink(file){
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('decode')); i.src = url; });
+    for (const [max, q] of [[1600, .82], [1280, .75], [1024, .7]]){
+      let w = img.naturalWidth, h = img.naturalHeight; const k = Math.min(1, max / Math.max(w, h)); w = Math.round(w * k); h = Math.round(h * k);
+      const c = document.createElement('canvas'); c.width = w; c.height = h; c.getContext('2d').drawImage(img, 0, 0, w, h);
+      const d = c.toDataURL('image/jpeg', q).split(',')[1] || ''; if (d && d.length < 1.2e6) return d;
+    }
+    throw new Error('big');
+  } finally { URL.revokeObjectURL(url); }
+}
+function xJcApply(R){
+  const cur = state.jobcardDraft || newJobcardDraft(); const d = newJobcardDraft();
+  const U = new Set(R.uncertainFields || []); const unsure = []; const stU = [];
+  const hdr = { jobCardNumber:'Job card #', clientName:'Client name', workOrderNumber:'Work order number', productCode:'Product code', qty:'Qty' };
+  Object.keys(hdr).forEach(k => { d[k] = (cur[k] || '').trim() || xJcClean(R[k]); if (U.has(k)){ d.uncertain.push(k); unsure.push(hdr[k]); } });
+  [['cardDate', 'Card date'], ['deadlineDate', 'Deadline date']].forEach(([k, lab]) => { const iso = R[k + 'ISO'], raw = R[k + 'Raw'];
+    d[k] = cur[k] || iso || ''; if ((raw && !iso) || U.has(k)){ d.uncertain.push(k); unsure.push(lab + (raw && !iso ? ` (read as "${xJcClean(raw)}")` : '')); } });
+  d.stages.forEach((s, i) => { const r = (R.stages || [])[i] || {};
+    s.start = r.startDateISO || ''; s.end = r.endDateISO || ''; s.sup = !!r.supervisorSigned; s.mgr = !!r.managerSigned;
+    [['startDate', 'start', 'start date'], ['endDate', 'end', 'end date']].forEach(([f, ff, lab]) => { const raw = r[f + 'Raw'], iso = r[f + 'ISO'];
+      if (U.has(`stages.${i}.${f}`) || (raw && !iso)){ stU.push(i + ':' + ff); unsure.push(`${s.label} ${lab}` + (raw && !iso ? ` (read as "${xJcClean(raw)}")` : '')); } });
+    [['supervisorSigned', 'sup', 'supervisor signature'], ['managerSigned', 'mgr', 'manager signature']].forEach(([f, ff, lab]) => { if (U.has(`stages.${i}.${f}`)){ stU.push(i + ':' + ff); unsure.push(`${s.label} ${lab}`); } });
+  });
+  d.factoryRemarks = xJcClean(R.factoryRemarks); d.designTeamRemarks = xJcClean(R.designTeamRemarks);
+  d.materials = (R.materials || []).map(m => ({ slNo:'', material:xJcClean(m.material), qty:xJcClean(m.qty) })).filter(m => m.material || m.qty);
+  // Same card scanned before: keep what was saved where this photo shows nothing; signatures stay once given.
+  const ex = d.jobCardNumber && JOB_CARDS.find(j => String(j.jobCardNumber).trim().toLowerCase() === d.jobCardNumber.trim().toLowerCase());
+  if (ex){
+    ['clientName', 'workOrderNumber', 'productCode'].forEach(k => { if (!d[k]) d[k] = ex[k] || ''; });
+    if (!d.qty && ex.qty && ex.qty !== '—') d.qty = ex.qty;
+    if (!d.cardDate) d.cardDate = ex.cardDateISO || ''; if (!d.deadlineDate) d.deadlineDate = ex.deadlineDate || '';
+    d.stages.forEach((s, i) => { const e = (ex.stages || [])[i] || {}; if (!s.start) s.start = e.startDateISO || ''; if (!s.end) s.end = e.endDateISO || ''; s.sup = s.sup || !!e.supervisorSigned; s.mgr = s.mgr || !!e.managerSigned; });
+    d.factoryRemarks = xJcMergeRemarks(ex.factoryRemarks, d.factoryRemarks); d.designTeamRemarks = xJcMergeRemarks(ex.designTeamRemarks, d.designTeamRemarks);
+    const seen = new Set(); d.materials = [...(ex.materials || []), ...d.materials].filter(m => { const k = (m.material + '|' + m.qty).toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+  }
+  d.materials = d.materials.length ? d.materials.map((m, i) => ({ slNo:String(i + 1), material:m.material, qty:m.qty })) : [{ slNo:'1', material:'', qty:'' }];
+  d.linkedPo = cur.linkedPo || (ex && ex.linkedPo) || ''; d.linkQuery = cur.linkQuery || '';
+  state.jobcardDraft = d; state.xJcStageUnsure = stU;
+  return { unsure, existing:!!ex };
+}
+window.xJcRead = async function(file){
+  const seq = state.xJcReadSeq = (state.xJcReadSeq || 0) + 1;
+  state.xJcRead = { busy:true }; renderAll();
+  let data;
+  try { data = await xJcShrink(file); }
+  catch (e){ if (seq !== state.xJcReadSeq) return; state.xJcRead = { msg:"This photo couldn't be opened here (iPhone HEIC photos sometimes can't). Please type the card in, or retake it with the camera button.", retry:false }; return renderAll(); }
+  let res;
+  try { res = await window.__OB.api('/api/jobcard/read', { body:{ image:data, mediaType:'image/jpeg' } }); }
+  catch (e){ res = { ok:false, message:e.status === 403 ? "Your role can't use automatic reading." : `Couldn't reach the reader (${e.message}). Try again, or type the card in.` }; }
+  if (seq !== state.xJcReadSeq || !state.jobcardDraft) return;
+  if (!res.ok){ state.xJcRead = { msg:res.message || "The card couldn't be read.", retry:res.reason !== 'not_configured' }; return renderAll(); }
+  const out = xJcApply(res.result);
+  state.xJcRead = { ok:true, label:res.label, model:res.model, unsure:out.unsure, existing:out.existing };
+  renderAll();
+};
+window.xJcBanner = function(){
+  const r = state.xJcRead || {};
+  let msg = '';
+  if (r.busy) msg = `<div class="readonly-banner" style="margin-top:14px;">⏳ Reading the card… usually 5–30 seconds. The form below fills in when it's done — please wait before typing.</div>`;
+  else if (r.ok) msg = `<div class="readonly-banner" style="margin-top:14px;display:block;">✓ Read automatically (${xe(r.label)}). <b>Check every field against the photo before saving</b> — handwriting and signatures can be misread.${r.unsure.length ? `<div style="margin-top:6px;">Unclear, outlined in amber: ${r.unsure.map(xe).join(' · ')}</div>` : ''}${r.existing ? '<div style="margin-top:6px;">This job card was saved before: blanks on this photo were filled from the saved card, signatures already given are kept, and remarks and materials were merged.</div>' : ''}</div>`;
+  else if (r.msg) msg = `<div class="scan-error" style="margin-top:14px;">${xe(r.msg)}${r.retry && state.xJcFile ? ' <button class="btn-text" id="xJcRetry">Try reading again</button>' : ''}</div>`;
+  return msg + `<div style="margin-top:10px;"><a href="${state.xJcPhoto}" target="_blank" rel="noopener"><img src="${state.xJcPhoto}" alt="Job card photo" style="max-width:100%;max-height:480px;border-radius:8px;border:1px solid var(--line, #ddd);"></a><div class="cell-sub">Tap the photo to open it full size. The photo stays on this device; it isn't saved with the card.</div></div>`;
+};
+const _rjccAi = renderJobCardCapture;
+renderJobCardCapture = function(){
+  let h = _rjccAi.apply(this, arguments);
+  if (state.jobcardDraft) (state.xJcStageUnsure || []).forEach(k => { h = h.replace(`data-jc-stage-field="${k}"`, `data-jc-stage-field="${k}" style="outline:2px solid var(--warn);outline-offset:1px;"`); });
+  if (state.xJcRead && state.xJcRead.busy) h = h.replace('id="jcSaveCard"', 'id="jcSaveCard" disabled');
+  return h;
+};
+
+// ---------------------------------------------------------------- Admin Uploads: job card reading keys
+const XAI_LINKS = { gemini:'https://aistudio.google.com/apikey', mistral:'https://console.mistral.ai/api-keys', groq:'https://console.groq.com/keys' };
+async function xAiCall(body){
+  const A = state.xAi = state.xAi || {}; A.busy = true; renderAll();
+  try { const r = await window.__OB.api('/api/admin/ai', body ? { body } : {}); if (body && body.action === 'test'){ A.test = A.test || {}; A.test[body.provider] = r; } else { A.data = r; A.msg = body ? 'Saved.' : ''; } A.err = ''; }
+  catch (e){ A.err = e.message; }
+  A.busy = false; A.loaded = true; renderAll();
+}
+function xAiCard(){
+  const A = state.xAi = state.xAi || {};
+  if (!A.loaded && !A.busy){ setTimeout(() => xAiCall(null), 0); }
+  const D = A.data;
+  const fmtT = iso => iso ? new Date(iso).toLocaleString('en-IN', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit' }) : '';
+  const prov = (P, i) => {
+    const t = A.test && A.test[P.id];
+    return `<div class="card" style="padding:12px;margin-top:10px;">
+      <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
+        <div><b>${i + 1}. ${xe(P.label)}</b> ${P.hasKey ? `<span class="pill">Key saved ••••${xe(P.keyEnd)}</span>` : '<span class="pill warn">No key</span>'} ${P.hasKey && !P.on ? '<span class="pill warn">Switched off</span>' : ''}</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+          ${i > 0 ? `<button class="btn-text" data-xai-up="${P.id}">Move up</button>` : ''}
+          ${P.hasKey ? `<label class="cell-sub"><input type="checkbox" data-xai-on="${P.id}" ${P.on ? 'checked' : ''}> In use</label>
+          <button class="btn-text" data-xai-test="${P.id}" ${A.busy ? 'disabled' : ''}>Test</button>
+          <button class="btn-text" data-xai-remove="${P.id}">${A.armRemove === P.id ? 'Click again to remove the key' : 'Remove key'}</button>` : ''}
+        </div></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;"><input type="password" id="xai_key_${P.id}" placeholder="${P.hasKey ? 'Paste a new key to replace the saved one' : 'Paste the API key here'}" autocomplete="off" style="flex:1;min-width:220px;">
+        <button class="btn btn-primary btn-sm" data-xai-save="${P.id}" ${A.busy ? 'disabled' : ''}>Save key</button></div>
+      <div class="cell-sub" style="margin-top:4px;">Get a free key at <a href="${XAI_LINKS[P.id]}" target="_blank" rel="noopener">${XAI_LINKS[P.id].replace('https://', '')}</a></div>
+      ${t ? `<div style="margin-top:8px;">${t.models ? t.models.map(m => `<div class="${m.ok ? 'cell-sub' : 'scan-error'}">${m.ok ? '✓' : '✗'} ${xe(m.model)}: ${xe(m.msg)} (${(m.ms / 1000).toFixed(1)} s)</div>`).join('') : `<div class="scan-error">${xe(t.msg || 'Test failed')}</div>`}</div>` : ''}
+      <details style="margin-top:8px;"><summary class="cell-sub" style="cursor:pointer;">Models, tried in this order — today: ${P.rows.reduce((a, r) => a + r.ok, 0)} read${P.rows.some(r => r.resting) ? ' · some resting' : ''}</summary>
+        <table class="grid-table" style="margin-top:6px;"><thead><tr><th>Model</th><th class="num">Read today</th><th class="num">Failed</th><th>Status</th></tr></thead><tbody>
+        ${P.rows.map(r => `<tr><td class="mono">${xe(r.model)}</td><td class="num">${r.ok}</td><td class="num">${r.fail}</td><td>${r.resting ? `<span class="pill warn">${xe(r.resting)}</span><div class="cell-sub">until ${fmtT(r.until)}</div>` : 'Ready'}</td></tr>`).join('')}</tbody></table>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;"><input id="xai_models_${P.id}" value="${xe(P.models.join(', '))}" style="flex:1;min-width:220px;"><button class="btn btn-ghost btn-sm" data-xai-models="${P.id}">Save models</button><button class="btn-text" data-xai-defmodels="${P.id}">Reset</button></div>
+        <div class="cell-sub">Only change these if a model is retired. Separate with commas.</div></details>
+    </div>`;
+  };
+  return `<div class="card action-card" id="xAiCard">
+    <div class="ac-title">Job card reading (AI)</div>
+    <div class="ac-sub">Reads job card photos in Job Card Station › Capture for Production, Supply and Admin. Uses free API plans: they're tried in the order below, and when one is used up for the day the next takes over. If all are used up, people type the card in. Keys are kept on the server and are never shown again. Free plans may use the photos to improve their AI.</div>
+    ${A.err ? `<div class="scan-error" style="margin-top:8px;">${xe(A.err)}</div>` : ''}
+    ${!D ? '<div class="cell-sub" style="margin-top:8px;">Loading…</div>' : D.providers.map(prov).join('') + `
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;"><button class="btn-text" id="xaiRefresh">Refresh</button>${D.providers.some(P => P.rows.some(r => r.resting)) ? '<button class="btn-text" id="xaiClearRest">Stop resting models now</button>' : ''}</div>
+    <details style="margin-top:8px;"><summary class="cell-sub" style="cursor:pointer;">Recent readings (${D.log.length})</summary>
+      ${D.log.length ? `<div class="table-wrap"><table class="grid-table" style="margin-top:6px;"><thead><tr><th>When</th><th>By</th><th>Model</th><th>Result</th></tr></thead><tbody>${D.log.map(l => `<tr><td>${fmtT(l.at)}</td><td>${xe(l.by || '')}</td><td class="mono">${xe(l.provider)} · ${xe(l.model)}</td><td>${l.ok ? `Read (${(l.ms / 1000).toFixed(1)} s)` : `<span class="cell-sub">${xe(l.err)}</span>`}</td></tr>`).join('')}</tbody></table></div>` : '<div class="cell-sub">None yet.</div>'}</details>`}
+  </div>`;
+}
+const _rauAi = renderAdminUploads;
+renderAdminUploads = function(){ const h = _rauAi.apply(this, arguments); return h.replace(/\s*$/, '') + xAiCard(); };
+extraWiring.push(() => {
+  const $ = id => document.getElementById(id);
+  const rt = $('xJcRetry'); if (rt) rt.addEventListener('click', () => { if (state.xJcFile){ state.jobcardDraft = newJobcardDraft(); state.xJcStageUnsure = []; window.xJcRead(state.xJcFile); } });
+  if (!$('xAiCard')) return;
+  const D = state.xAi && state.xAi.data;
+  document.querySelectorAll('[data-xai-save]').forEach(b => b.addEventListener('click', () => { const p = b.dataset.xaiSave; const k = ($('xai_key_' + p).value || '').trim();
+    if (!k){ state.xAi.err = 'Paste the key first.'; return renderAll(); } xAiCall({ action:'save', provider:p, key:k, on:true }); }));
+  document.querySelectorAll('[data-xai-test]').forEach(b => b.addEventListener('click', () => xAiCall({ action:'test', provider:b.dataset.xaiTest })));
+  document.querySelectorAll('[data-xai-remove]').forEach(b => b.addEventListener('click', () => { const p = b.dataset.xaiRemove; if (state.xAi.armRemove !== p){ state.xAi.armRemove = p; return renderAll(); } state.xAi.armRemove = null; xAiCall({ action:'remove', provider:p }); }));
+  document.querySelectorAll('[data-xai-on]').forEach(c => c.addEventListener('change', () => xAiCall({ action:'save', provider:c.dataset.xaiOn, on:c.checked })));
+  document.querySelectorAll('[data-xai-models]').forEach(b => b.addEventListener('click', () => { const p = b.dataset.xaiModels; xAiCall({ action:'save', provider:p, models:($('xai_models_' + p).value || '').split(',') }); }));
+  document.querySelectorAll('[data-xai-defmodels]').forEach(b => b.addEventListener('click', () => { const P = D.providers.find(x => x.id === b.dataset.xaiDefmodels); xAiCall({ action:'save', provider:P.id, models:P.defaults }); }));
+  document.querySelectorAll('[data-xai-up]').forEach(b => b.addEventListener('click', () => { const o = D.order.slice(); const i = o.indexOf(b.dataset.xaiUp); if (i > 0){ [o[i - 1], o[i]] = [o[i], o[i - 1]]; xAiCall({ action:'order', order:o }); } }));
+  const rf = $('xaiRefresh'); if (rf) rf.addEventListener('click', () => xAiCall(null));
+  const cr = $('xaiClearRest'); if (cr) cr.addEventListener('click', () => xAiCall({ action:'clearRest' }));
 });
 
 if (!routePublic() && state.currentUser) renderAll();
