@@ -14245,6 +14245,24 @@ extraWiring.push(() => {
   const pc = document.getElementById('xu_pw_cancel'); if (pc) pc.addEventListener('click', () => { state.xPwFor = null; renderAll(); });
 });
 
+// ---------------------------------------------------------------- "User guide" link in the menu (22 Oct)
+// Opens /guide.html (the same file as the shared guide) on the signed-in person's own manual.
+extraWiring.push(() => {
+  const r = { production:'factory' }[state.role] || state.role;
+  const href = '/guide.html#' + (['sales','supply','factory','accounts','approver','admin'].includes(r) ? r : 'map');
+  const rail = document.getElementById('rail');
+  if (rail && !rail.querySelector('.x-guide')){
+    const a = document.createElement('a'); a.className = 'navitem x-guide'; a.href = href; a.target = '_blank'; a.rel = 'noopener';
+    a.innerHTML = `${icon('check')}<span class="label">User guide</span>`; a.style.textDecoration = 'none'; a.style.color = 'inherit';
+    const foot = rail.querySelector('.rail-foot'); rail.insertBefore(a, foot || null);
+  }
+  const strip = document.getElementById('navstrip');
+  if (strip && !strip.querySelector('.x-guide')){
+    const a = document.createElement('a'); a.className = 'x-guide'; a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'User guide';
+    a.style.cssText = 'white-space:nowrap;padding:6px 10px;color:inherit;font-weight:600;'; strip.appendChild(a);
+  }
+});
+
 // ---------------------------------------------------------------- Admin Uploads: automatic backup key (22 Oct)
 async function xBkCall(body){
   const B = state.xBk = state.xBk || {}; B.busy = true; renderAll();
