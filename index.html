@@ -11728,14 +11728,14 @@ const SITE_FIELDS = [   // order + mandatory fields revised 9 Oct (address corre
   ['access','Truck access to the building', 'textarea', false],
   ['lift','Lift', LIFT_OPTS, true],
   ['liftL','Lift length', 'num', false, 'lift'], ['liftB','Lift breadth', 'num', false, 'lift'], ['liftH','Lift height', 'num', false, 'lift'], ['liftUom','Unit', ['Feet','Centimeters'], false, 'lift'],
-  ['stairW','Width of the stairs', 'num', false, 'nolift'], ['stairH','Height clearance over the stairs (lowest ceiling or beam)', 'num', false, 'nolift'], ['landL','Stair landing length', 'num', false, 'nolift'], ['landB','Stair landing breadth', 'num', false, 'nolift'], ['stairUom','Unit', ['Feet','Centimeters'], false, 'nolift'],
+  ['stairW','Width of the stairs', 'num', false, 'nolift'], ['landL','Stair landing length', 'num', false, 'nolift'], ['landB','Stair landing breadth', 'num', false, 'nolift'], ['landH','Stair landing height (floor to the lowest ceiling or beam above the landing)', 'num', false, 'nolift'], ['stairUom','Unit', ['Feet','Centimeters'], false, 'nolift'],
   ['liftAlt','Anything else about getting the furniture up? (narrow turns, crane, other)', 'text', false, 'nolift'],
   ['timings','Allowed delivery days and hours', 'text', false],
   ['notes','Anything else the delivery team should know', 'textarea', false] ];
 const SITE_OPTIONAL = new Set(['liftAlt']);
-const SITE_HALF = new Set(['liftL','liftB','liftH','stairW','stairH','landL','landB']);
+const SITE_HALF = new Set(['liftL','liftB','liftH','stairW','landL','landB','landH']);
 const siteAddr = r => { const sc = r && r.scan; const F = (r && r.fields) || {}; return F.addressFix || (sc && sc.shipping && !sc.shippingWarn ? sc.shipping.replace(/\n/g, ', ') : '') || F.address || ''; };
-const stairsText = F => /^No lift/.test(F.lift || '') && F.stairW ? `No lift — stairs ${F.stairW} ${F.stairUom === 'Centimeters' ? 'cm' : 'ft'} wide${F.stairH ? ', ' + F.stairH + ' ' + (F.stairUom === 'Centimeters' ? 'cm' : 'ft') + ' headroom' : ''}, landing ${F.landL}×${F.landB} ${F.stairUom === 'Centimeters' ? 'cm' : 'ft'}` : '';
+const stairsText = F => /^No lift/.test(F.lift || '') && F.stairW ? `No lift — stairs ${F.stairW} ${F.stairUom === 'Centimeters' ? 'cm' : 'ft'} wide, landing ${F.landL}×${F.landB}${F.landH ? '×' + F.landH : ''} ${F.stairUom === 'Centimeters' ? 'cm' : 'ft'}${F.landH ? ' (L×B×H)' : ''}` : '';
 const siteSummary = r => { if (!r || !r.fields) return ''; const F = r.fields; const lift = /^Yes/.test(F.lift || '') && F.liftL ? `${F.lift.replace(/^Yes — /, '')} ${F.liftL}×${F.liftB}×${F.liftH} ${F.liftUom === 'Centimeters' ? 'cm' : 'ft'}` : stairsText(F) || F.lift;
   return [F.contactName && `${F.contactName} · ${F.contactPhone || ''}`, siteAddr(r), (F.flat || F.floor) && [F.flat, F.floor && 'floor ' + F.floor].filter(Boolean).join(', '), lift, F.parking, F.access, F.timings].filter(Boolean).map(xe).join(' · '); };
 function copyText(text, btn){
@@ -11837,8 +11837,8 @@ function routePublic(){
     if (fields.map && !isMapUrl(fields.map)) return bad('The location pin should be a Google Maps link.');
     if (/^Yes/.test(fields.lift)){ if (!['liftL','liftB','liftH'].every(k => +fields[k] > 0)) return bad('Please enter the lift length, breadth and height (numbers, decimals allowed).'); if (!fields.liftUom) return bad('Please choose feet or centimeters for the lift size.'); }
     else ['liftL','liftB','liftH'].forEach(k => { fields[k] = ''; });
-    if (/^No lift/.test(fields.lift)){ if (!['stairW','stairH','landL','landB'].every(k => +fields[k] > 0)) return bad('Please enter the width of the stairs, the height clearance over them, and the landing length and breadth (numbers, decimals allowed).'); if (!fields.stairUom) return bad('Please choose feet or centimeters for the stairs.'); }
-    else { ['stairW','stairH','landL','landB','liftAlt'].forEach(k => { fields[k] = ''; }); }
+    if (/^No lift/.test(fields.lift)){ if (!['stairW','landL','landB','landH'].every(k => +fields[k] > 0)) return bad('Please enter the width of the stairs and the landing length, breadth and height (numbers, decimals allowed).'); if (!fields.stairUom) return bad('Please choose feet or centimeters for the stairs.'); }
+    else { ['stairW','landL','landB','landH','liftAlt'].forEach(k => { fields[k] = ''; }); }
     const r0 = sites()[so]; const addrKnown = r0 && r0.scan && r0.scan.shipping && !r0.scan.shippingWarn;
     if (!addrKnown && !fields.addressFix) return bad('We don\'t have your delivery address yet — please enter it.');
     if (fields.addressFix && !/(?<!\d)[1-9]\d{2}\s?\d{3}(?!\d)/.test(fields.addressFix)) return bad('Please include the 6-digit PIN code in the address.');
