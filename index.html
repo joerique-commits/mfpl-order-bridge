@@ -6318,7 +6318,8 @@ function renderJobCardCapture(){
           <div class="mc-emoji">&#9997;&#65039;</div><div class="mc-title">Enter manually</div><div class="mc-sub">Skip scanning</div>
         </button>
       </div>
-      ${(state.jobcardMethod==='photo'||state.jobcardMethod==='upload') && d ? `<div class="readonly-banner" style="margin-top:14px;">${icon('lock')} This session has no camera or file access — showing a sample read so you can see the flow. Fields outlined in amber are ones the reader wasn't sure about; check those against the photo.</div>` : ''}
+      ${(state.jobcardMethod==='photo'||state.jobcardMethod==='upload') && d && state.xJcPhoto ? `<div class="readonly-banner" style="margin-top:14px;">${icon('lock')} Automatic reading of the card isn't switched on yet — type the details from the photo into the form below. The photo stays on this device only; it isn't saved with the card.</div>
+      <div style="margin-top:10px;"><a href="${state.xJcPhoto}" target="_blank" rel="noopener"><img src="${state.xJcPhoto}" alt="Job card photo" style="max-width:100%;max-height:480px;border-radius:8px;border:1px solid var(--line, #ddd);"></a><div class="cell-sub">Tap the photo to open it full size.</div></div>` : ''}
     </div>
     ${!d ? `<div class="empty-note">Choose how to start above.</div>` : renderJobCardCaptureForm(d)}
   `;
@@ -7604,7 +7605,7 @@ function renderAll(){
     warehousetag:['Warehouse Tag Station','QR-tagged handoff from factory packaging to the brand warehouse'],
     slots:['Last Mile Ops','Coordinate dispatch slots between sales and supply'],
     sorevision:['SO Revision Request','Standalone revision requests — reconciled against the original value and advance collected before sign-off'],
-    adminuploads:['Admin Uploads','Admin-only — one upload slot per menu section (shell only, nothing is parsed yet)'],
+    adminuploads:['Admin Uploads','Admin only — the daily ERP exports, the data file and backups'],
     userpermissions:['User Permissions','Admin-only — user access, menu visibility and edit rights by role'],
   };
   document.getElementById('moduleTitle').textContent = titles[state.module][0];
@@ -8031,9 +8032,15 @@ function wireContentEvents(){
   // Job Card Station — Capture & review
   document.querySelectorAll('[data-jc-method]').forEach(b => b.addEventListener('click', () => {
     const m = b.dataset.jcMethod;
-    state.jobcardMethod = m;
-    state.jobcardDraft = (m === 'manual') ? newJobcardDraft() : sampleScannedDraft();
-    renderAll();
+    if (m === 'manual'){ state.jobcardMethod = m; state.jobcardDraft = newJobcardDraft(); state.xJcPhoto = null; return renderAll(); }
+    const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.style.display = 'none';
+    if (m === 'photo') inp.setAttribute('capture', 'environment');
+    inp.addEventListener('change', () => { const f = inp.files && inp.files[0]; inp.remove(); if (!f) return;
+      if (state.xJcPhoto) { try { URL.revokeObjectURL(state.xJcPhoto); } catch (e) {} }
+      state.xJcPhoto = URL.createObjectURL(f); state.jobcardMethod = m;
+      if (!state.jobcardDraft) state.jobcardDraft = newJobcardDraft();
+      renderAll(); });
+    document.body.appendChild(inp); inp.click();
   }));
   const jcTextFieldMap = { jc_jobCardNumber:'jobCardNumber', jc_clientName:'clientName', jc_cardDate:'cardDate', jc_deadlineDate:'deadlineDate', jc_workOrderNumber:'workOrderNumber', jc_productCode:'productCode', jc_qty:'qty', jc_factoryRemarks:'factoryRemarks', jc_designTeamRemarks:'designTeamRemarks' };
   Object.keys(jcTextFieldMap).forEach(fieldId => {
@@ -11598,7 +11605,7 @@ renderAdminUploads = function(){
       <button class="btn btn-primary" id="obBackupBtn" style="margin-top:10px;" ${window.__OB.backup && window.__OB.backup.busy ? 'disabled' : ''}>${window.__OB.backup && window.__OB.backup.busy ? 'Preparing…' : 'Download backup'}</button>
       ${window.__OB.backup && window.__OB.backup.msg ? `<div class="${window.__OB.backup.ok ? 'cell-sub' : 'scan-error'}" style="margin-top:10px;">${xe(window.__OB.backup.msg)}</div>` : ''}
     </div>
-    <div class="preview-banner dashed">${icon('upload')} <div><strong>Everything below is shell only — nothing is parsed yet.</strong> Each menu section gets its own upload slot. For now this just records what file was uploaded and when; the source-file format and how it feeds that section will be decided later. "Expected source file(s)" is what we found reviewing the real RFT Cloud Suite exports — ${gapCount} section(s) below have no matching extract in that folder at all. Payables &amp; Flushout's source files are pre-recorded here from the local data build — picking a replacement file below still only records a name, it doesn't re-run the build.</div></div>
+    ${false ? `<div class="preview-banner dashed">${icon('upload')} <div><strong>Everything below is shell only — nothing is parsed yet.</strong> Each menu section gets its own upload slot. For now this just records what file was uploaded and when; the source-file format and how it feeds that section will be decided later. "Expected source file(s)" is what we found reviewing the real RFT Cloud Suite exports — ${gapCount} section(s) below have no matching extract in that folder at all. Payables &amp; Flushout's source files are pre-recorded here from the local data build — picking a replacement file below still only records a name, it doesn't re-run the build.</div></div>
     <div class="card table-wrap"><table class="grid-table">
       <thead><tr><th>Menu section</th><th>Expected source file(s)</th><th>Uploaded file(s)</th><th></th></tr></thead>
       <tbody>${sections.map(n => {
@@ -11615,7 +11622,7 @@ renderAdminUploads = function(){
           </td>
         </tr>`;
       }).join('')}</tbody>
-    </table></div>
+    </table></div>` : ''}
   `;
 };
 
