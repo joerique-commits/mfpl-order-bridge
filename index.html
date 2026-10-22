@@ -14196,6 +14196,89 @@ extraWiring.push(() => {
     state.xDiscardArm = null; state.openOrderId = null; renderAll(); });
 });
 
+// ---------------------------------------------------------------- User Permissions: deactivate / reactivate / reset password (22 Oct)
+const xUserInfo = id => (window.__OB.users || []).find(x => x.uid === id) || {};
+const xUserActive = id => xUserInfo(id).active !== false;
+const xGenPw = () => { const c = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'; const a = new Uint32Array(10); crypto.getRandomValues(a); return Array.from(a, n => c[n % c.length]).join(''); };
+async function xUserAct(uid, action, password){
+  state.xUserBusy = uid; state.xUserMsg = null; renderAll();
+  try {
+    const r = await window.__OB.api('/api/admin/user-update', { body:{ uid, action, password } });
+    const i = (window.__OB.users || []).findIndex(x => x.uid === uid); if (i >= 0) window.__OB.users[i] = Object.assign({}, window.__OB.users[i], r.user);
+    const u = r.user;
+    state.xUserMsg = { uid, ok:true, text: action === 'reset' ? `New password for ${u.name}: ${password} — give it to them; they can change it after signing in, from the menu under their name (top right) › Reset password.`
+      : action === 'deactivate' ? `${u.name} is deactivated and can't sign in. Their past entries are kept.` : `${u.name} can sign in again.` };
+    if (action === 'reset') state.xPwFor = null;
+  } catch (e){ state.xUserMsg = { uid, ok:false, text:e.message }; }
+  state.xUserBusy = null; state.xUserArm = null; renderAll();
+}
+const _rpuX = renderPermUsers;
+renderPermUsers = function(){
+  const h = _rpuX.apply(this, arguments);
+  const cut = h.indexOf('<div class="group-label">Users</div>');
+  const me = window.__OB.user && window.__OB.user.uid;
+  const rows = USERS.slice().sort((a, b) => (xUserActive(b.id) - xUserActive(a.id)) || a.name.localeCompare(b.name));
+  const nAct = rows.filter(u => xUserActive(u.id)).length;
+  const table = `<div class="group-label">Users (${nAct} active${rows.length > nAct ? `, ${rows.length - nAct} deactivated` : ''})</div>
+    <div class="card table-wrap"><table class="grid-table">
+      <thead><tr><th>Name</th><th>Email</th><th>User type</th><th>Status</th><th></th></tr></thead>
+      <tbody>${rows.map(u => { const act = xUserActive(u.id), busy = state.xUserBusy === u.id, m = state.xUserMsg && state.xUserMsg.uid === u.id ? state.xUserMsg : null;
+        return `<tr style="${act ? '' : 'opacity:.6;'}"><td class="cell-primary">${xe(u.name)}${u.id === me ? ' <span class="cell-sub">(you)</span>' : ''}</td><td class="mono">${xe(u.email)}</td><td>${xe((ROLES[u.role] && ROLES[u.role].label) || u.role)}</td>
+          <td>${act ? 'Active' : '<span class="pill warn">Deactivated</span>'}</td>
+          <td style="white-space:nowrap;">${busy ? '<span class="cell-sub">Saving…</span>' : `
+            ${act ? `<button class="btn-text" data-xu-pw="${u.id}">Reset password</button>` : ''}
+            ${u.id === me ? '' : act ? ` · <button class="btn-text" data-xu-deact="${u.id}">${state.xUserArm === u.id ? 'Click again to deactivate' : 'Deactivate'}</button>` : `<button class="btn-text" data-xu-act="${u.id}">Reactivate</button>`}`}</td></tr>
+        ${state.xPwFor === u.id ? `<tr><td colspan="5" style="padding-top:0;"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;"><span class="cell-sub">New password for ${xe(u.name)}:</span>
+          <input id="xu_pw" value="${xe(state.xPwDraft || '')}" autocomplete="off" style="min-width:180px;"><button class="btn btn-primary btn-sm" id="xu_pw_set">Set password</button><button class="btn-text" id="xu_pw_cancel">Cancel</button></div>
+          <div class="cell-sub">At least 8 characters. A random one is filled in; you can change it.</div></td></tr>` : ''}
+        ${m ? `<tr><td colspan="5" style="padding-top:0;"><div class="${m.ok ? 'cell-sub' : 'scan-error'}">${xe(m.text)}</div></td></tr>` : ''}`; }).join('')}</tbody>
+    </table></div>
+    <div class="cell-sub" style="margin-top:6px;">Deactivating is reversible: the person can't sign in (and is signed out within about a minute), but their name stays on everything they entered.</div>`;
+  return (cut >= 0 ? h.slice(0, cut) : h) + table;
+};
+extraWiring.push(() => {
+  document.querySelectorAll('[data-xu-pw]').forEach(b => b.addEventListener('click', () => { state.xPwFor = b.dataset.xuPw; state.xPwDraft = xGenPw(); state.xUserMsg = null; renderAll(); }));
+  document.querySelectorAll('[data-xu-deact]').forEach(b => b.addEventListener('click', () => { const id = b.dataset.xuDeact; if (state.xUserArm !== id){ state.xUserArm = id; return renderAll(); } xUserAct(id, 'deactivate'); }));
+  document.querySelectorAll('[data-xu-act]').forEach(b => b.addEventListener('click', () => xUserAct(b.dataset.xuAct, 'activate')));
+  const pi = document.getElementById('xu_pw'); if (pi) pi.addEventListener('input', () => { state.xPwDraft = pi.value; });
+  const ps = document.getElementById('xu_pw_set'); if (ps) ps.addEventListener('click', () => { const pw = (state.xPwDraft || '').trim(); if (pw.length < 8){ state.xUserMsg = { uid:state.xPwFor, ok:false, text:'At least 8 characters.' }; return renderAll(); } xUserAct(state.xPwFor, 'reset', pw); });
+  const pc = document.getElementById('xu_pw_cancel'); if (pc) pc.addEventListener('click', () => { state.xPwFor = null; renderAll(); });
+});
+
+// ---------------------------------------------------------------- Admin Uploads: automatic backup key (22 Oct)
+async function xBkCall(body){
+  const B = state.xBk = state.xBk || {}; B.busy = true; renderAll();
+  try { const r = await window.__OB.api('/api/admin/backup-key', body ? { body } : {}); B.info = r; B.newKey = r.key || null; B.err = ''; }
+  catch (e){ B.err = e.message; }
+  B.busy = false; B.loaded = true; B.arm = false; renderAll();
+}
+function xBkCard(){
+  const B = state.xBk = state.xBk || {};
+  if (!B.loaded && !B.busy) setTimeout(() => xBkCall(null), 0);
+  const I = B.info || {};
+  const fmt = iso => iso ? new Date(iso).toLocaleString('en-IN', { day:'numeric', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' }) : '—';
+  const stale = I.exists && (!I.lastUsedAt || Date.now() - new Date(I.lastUsedAt).getTime() > 16 * 864e5);
+  return `<div class="card action-card" id="xBkCard">
+    <div class="ac-title">Automatic backup (every 2 weeks)</div>
+    <div class="ac-sub">A scheduled task on the office computer downloads the same backup file as the button above, every 2 weeks, into a local folder and copies it to the shared folder. It uses a backup key instead of a password; the key can only download the backup.</div>
+    ${B.err ? `<div class="scan-error" style="margin-top:8px;">${xe(B.err)}</div>` : ''}
+    ${!B.loaded ? '<div class="cell-sub" style="margin-top:8px;">Loading…</div>' : `
+      <div class="cell-sub" style="margin-top:8px;">${I.exists ? `Backup key made ${fmt(I.createdAt)} by ${xe(I.createdBy || '')}. Last automatic backup: <b>${I.lastUsedAt ? fmt(I.lastUsedAt) : 'not yet'}</b>.` : 'No backup key yet.'}</div>
+      ${stale ? '<div class="scan-error" style="margin-top:6px;">No automatic backup in the last 16 days — check that the office computer was on and the task is still scheduled.</div>' : ''}
+      ${B.newKey ? `<div class="readonly-banner" style="margin-top:10px;display:block;"><b>Copy this key now — it won't be shown again:</b><div class="mono" style="margin:6px 0;word-break:break-all;user-select:all;">${xe(B.newKey)}</div>Paste it when the setup on the office computer asks for it. Any older key has stopped working.</div>` : ''}
+      <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;">
+        <button class="btn ${I.exists ? 'btn-ghost' : 'btn-primary'} btn-sm" id="xBkNew" ${B.busy ? 'disabled' : ''}>${I.exists ? 'Make a new key (replaces the old one)' : 'Make backup key'}</button>
+        ${I.exists ? `<button class="btn-text" id="xBkRemove">${B.arm ? 'Click again — scheduled backups will stop' : 'Remove key'}</button>` : ''}
+      </div>`}
+  </div>`;
+}
+const _rauBk = renderAdminUploads;
+renderAdminUploads = function(){ return _rauBk.apply(this, arguments) + xBkCard(); };
+extraWiring.push(() => {
+  const n = document.getElementById('xBkNew'); if (n) n.addEventListener('click', () => xBkCall({ action:'new' }));
+  const r = document.getElementById('xBkRemove'); if (r) r.addEventListener('click', () => { if (!state.xBk.arm){ state.xBk.arm = true; return renderAll(); } xBkCall({ action:'remove' }); });
+});
+
 // ---------------------------------------------------------------- Job Card Station: automatic reading (JK, 22 Oct)
 // The photo is shrunk on the phone, sent to /api/jobcard/read (free AI plans with fallback, set up in
 // Admin Uploads), and the answer fills the form. Nothing is saved until the person checks it and presses Save.

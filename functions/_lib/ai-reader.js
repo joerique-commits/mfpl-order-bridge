@@ -16,7 +16,9 @@
 import { getJSON, putJSON } from './kv.js';
 
 export const PROVIDERS = {
-  gemini: { label: 'Google Gemini', models: ['gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'] },
+  // 22 Oct: flash-lite first — on the first day's live scans it answered every time in 2-9 s, while
+  // 3.8 / 3.6 Flash were often "high demand" (503) or cut off by EdgeOne at 15 s (504).
+  gemini: { label: 'Google Gemini', models: ['gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-3.1-flash-lite'] },
   mistral: { label: 'Mistral', models: ['mistral-medium-latest', 'mistral-small-latest'] },
   groq: { label: 'Groq', models: ['qwen/qwen3.8-27b'] },
 };
@@ -127,7 +129,9 @@ export function extractJson(text) {
 async function readError(resp) {
   let msg = '';
   try { const t = await resp.text(); try { const j = JSON.parse(t); msg = (j.error && (j.error.message || j.error)) || j.message || t; } catch (e) { msg = t; } } catch (e) {}
-  return String(msg || `HTTP ${resp.status}`).slice(0, 300);
+  msg = String(msg || '');
+  if (/^\s*<(!doctype|html)/i.test(msg)) msg = resp.status === 504 ? 'Timed out (no answer within 15 s)' : `HTTP ${resp.status} error page`;
+  return (msg || `HTTP ${resp.status}`).slice(0, 300);
 }
 
 async function callGemini(key, model, prompt, img) {
@@ -172,7 +176,8 @@ function callProvider(p, key, model, prompt, img) {
 export async function loadCfg() {
   const c = (await getJSON(AUTH, 'cfg_ai')) || {};
   c.providers = c.providers || {};
-  Object.keys(PROVIDERS).forEach(p => { const x = c.providers[p] = c.providers[p] || {}; if (!Array.isArray(x.models) || !x.models.length) x.models = PROVIDERS[p].models.slice(); if (x.on === undefined) x.on = true; });
+  const OLD_DEFAULTS = { gemini: 'gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash-lite,gemini-3.1-flash-lite' };
+  Object.keys(PROVIDERS).forEach(p => { const x = c.providers[p] = c.providers[p] || {}; if (!Array.isArray(x.models) || !x.models.length || x.models.join(',') === OLD_DEFAULTS[p]) x.models = PROVIDERS[p].models.slice(); if (x.on === undefined) x.on = true; });
   c.order = Array.isArray(c.order) && c.order.length ? c.order.filter(p => PROVIDERS[p]) : DEFAULT_ORDER.slice();
   Object.keys(PROVIDERS).forEach(p => { if (!c.order.includes(p)) c.order.push(p); });
   return c;
@@ -196,6 +201,7 @@ function restFor(p, http, msg, now) {
   }
   if (http === 401 || http === 403 || /api key not valid|invalid api key|api_key_invalid|unauthori[sz]ed/.test(m)) return { until: now + 30 * 60e3, why: 'Key refused (check the key)', all: true };
   if (http === 404 || (http === 400 && /model|not found|not supported|does not exist|invalid model/.test(m))) return { until: now + 6 * 3600e3, why: 'Model not available on this key' };
+  if (http === 503 || http === 504) return { until: now + 10 * 60e3, why: http === 503 ? 'Busy (high demand) — resting 10 minutes' : 'Too slow (timed out) — resting 10 minutes' };
   if (http >= 500) return { until: now + 2 * 60e3, why: 'Service error — resting 2 minutes' };
   return null;
 }
