@@ -79,8 +79,8 @@ export async function loadAllRaw(kv, uid) {
 // ---- Split loading (23 Oct): one invocation reading ~130 buckets ran past EdgeOne's 15 s limit
 // when KV was slow (545). The page now asks for the bucket list, then fetches buckets in small
 // groups in parallel, each group in its own invocation.
-export async function loadIndexRaw(kv, uid) {
-  const listed = await listKeysTimed(kv, 'b_', 6000);
+export async function loadIndexRaw(kv, uid, noList) {
+  const listed = noList ? null : await listKeysTimed(kv, 'b_', 6000);
   let keys = null, act = [];
   if (listed) {
     const old = listed.filter(actBucketTooOld);

@@ -1141,9 +1141,13 @@ async function getJSONgz(path){
 // Saved work, loaded in pieces (23 Oct): the bucket list first, then up to 25 buckets per request,
 // 7 requests at a time, each retried. One request for everything ran past EdgeOne's 15 s limit (545).
 async function loadStore(onProgress){
-  var idx = null, err = null;
-  for (var a = 0; a < 3 && !idx; a++){ try { idx = await api('/api/store/keys', { cache:'no-store' }); } catch(e){ err = e; if (e.status && e.status < 500) throw e; await new Promise(function(r){ setTimeout(r, 1500 * (a + 1)); }); } }
-  if (!idx) throw err;
+  // Ask for the full list and for the no-list version at once; use the full list if it arrives within
+  // 8 s, otherwise the no-list answer (list() can hang on EdgeOne while plain reads work, 23 Oct).
+  var full = api('/api/store/keys', { cache:'no-store' }).then(function(r){ return r; }, function(e){ if (e.status && e.status < 500) throw e; return null; });
+  var idx = await Promise.race([full, new Promise(function(r){ setTimeout(function(){ r(null); }, 8000); })]);
+  var err = null;
+  for (var a = 0; a < 3 && !idx; a++){ try { idx = await api('/api/store/keys?nolist=1', { cache:'no-store' }); } catch(e){ err = e; if (e.status && e.status < 500) throw e; await new Promise(function(r){ setTimeout(r, 1500 * (a + 1)); }); } }
+  if (!idx) throw err || new Error('Could not load saved work');
   var keys = idx.keys;
   if (!keys){   // storage listing stalled: ask for every piece name this page can produce, plus the activity index
     keys = [];
@@ -1210,7 +1214,7 @@ async function start(user, pre){
     else return failScreen('No data has been uploaded yet. Ask an admin to upload the Order Bridge data file in Admin Uploads.');
     setMsg('Loading saved work…');
     snap = await pre.store;
-    OB.users = user.role === 'admin' ? await api('/api/admin/users', { cache:'no-store' }).then(function(r){ return (r || {}).users || []; }, function(){ return []; }) : [];
+    OB.users = user.role === 'admin' ? await Promise.race([api('/api/admin/users', { cache:'no-store' }).then(function(r){ return (r || {}).users || []; }, function(){ return []; }), new Promise(function(r){ setTimeout(function(){ r([]); }, 6000); })]) : [];
   } catch(e){
     if (e.status === 401){ clrTok(); return loginScreen('Your session has ended. Please sign in again.'); }
     return failScreen(e.message || 'Could not load the data.');
