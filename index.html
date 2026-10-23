@@ -1144,7 +1144,18 @@ async function loadStore(onProgress){
   var idx = null, err = null;
   for (var a = 0; a < 3 && !idx; a++){ try { idx = await api('/api/store/keys', { cache:'no-store' }); } catch(e){ err = e; if (e.status && e.status < 500) throw e; await new Promise(function(r){ setTimeout(r, 1500 * (a + 1)); }); } }
   if (!idx) throw err;
-  var keys = idx.keys || [], groups = [];
+  var keys = idx.keys;
+  if (!keys){   // storage listing stalled: ask for every piece name this page can produce, plus the activity index
+    keys = [];
+    Object.keys(STORES).forEach(function(st){ var c = STORES[st];
+      if (c.t === 'value') keys.push('b_' + st + '__v');
+      else if (c.n) for (var h = 0; h < c.n; h++) keys.push('b_' + st + '__h' + h); });
+    var mine = {}; (idx.act || []).forEach(function(k){ mine[k] = 1; });
+    var uid = idx.uid || String(OB.user && OB.user.uid || '').replace(/[^A-Za-z0-9_]/g, '_');
+    for (var d = 0; d < 31 && uid; d++){ mine['b_ob_activity__d' + new Date(Date.now() - d * 864e5).toISOString().slice(0, 10).replace(/-/g, '') + '_' + uid] = 1; }
+    keys = keys.concat(Object.keys(mine));
+  }
+  var groups = [];
   for (var i = 0; i < keys.length; i += 20) groups.push(keys.slice(i, i + 20));
   var b = {}, next = 0, done = 0;
   async function worker(){

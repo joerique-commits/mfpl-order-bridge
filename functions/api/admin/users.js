@@ -9,6 +9,7 @@
 // this endpoint like any other role.
 import { requireRole, createUser } from '../../_lib/session.js';
 import { getJSON } from '../../_lib/kv.js';
+import { userRecordNames, noteUserRecord } from '../../_lib/store.js';
 import { json, errorJson, readJsonBody, bearerToken } from '../../_lib/http.js';
 
 // 'approver' added 14 Oct for SO Revision Request's COO/Director sign-off
@@ -27,14 +28,8 @@ export async function onRequestGet({ request }) {
   // an index for a handful of records; revisit if the account list grows
   // large enough that list()'s 256-key page size becomes a real limit.
   // EdgeOne list() returns { keys:[{ key }], complete, cursor } (max 256 per page).
-  const names = [];
-  let cursor;
-  for (let guard = 0; guard < 50; guard++) {
-    const page = await AUTH.list(cursor ? { prefix: 'user:', limit: 256, cursor } : { prefix: 'user:', limit: 256 });
-    (page.keys || []).forEach(e => names.push(e.key || e.name));
-    if (page.complete || !page.cursor) break;
-    cursor = page.cursor;
-  }
+  // 23 Oct: list() can stall on EdgeOne; userRecordNames falls back to an index kept in AUTH.
+  const names = await userRecordNames(AUTH, ['user:' + auth.user.uid]);
   // 23 Oct: read in parallel (one at a time ran past the 15 s limit when KV was slow).
   const recs = await Promise.all(names.map(n => getJSON(AUTH, n).catch(() => null)));
   const users = recs.filter(Boolean).map(u => ({ uid: u.uid, email: u.email, name: u.name, role: u.role, title: u.title || null, active: u.active, createdAt: u.createdAt }));
@@ -68,6 +63,7 @@ export async function onRequestPost({ request }) {
     // card, e.g. "COO" / "Director") but there's no reason to reject it for
     // other roles - createUser just stores whatever is passed.
     const user = await createUser(AUTH, { email, name, role, password, title: title || null });
+    try { await noteUserRecord(AUTH, `user:${user.uid}`); } catch (e) {}
     return json({ user: { uid: user.uid, email: user.email, name: user.name, role: user.role, title: user.title } }, 201);
   } catch (e) {
     return errorJson(e.message, 409);

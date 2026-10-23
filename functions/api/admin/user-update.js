@@ -7,15 +7,11 @@
 import { requireRole, getUserById } from '../../_lib/session.js';
 import { hashPassword } from '../../_lib/crypto.js';
 import { getJSON, putJSON } from '../../_lib/kv.js';
+import { userRecordNames } from '../../_lib/store.js';
 import { json, errorJson, readJsonBody, bearerToken } from '../../_lib/http.js';
 
 async function activeAdmins() {
-  const names = []; let cursor;
-  for (let g = 0; g < 50; g++) {
-    const page = await AUTH.list(cursor ? { prefix: 'user:', limit: 256, cursor } : { prefix: 'user:', limit: 256 });
-    (page.keys || []).forEach(e => names.push(e.key || e.name));
-    if (page.complete || !page.cursor) break; cursor = page.cursor;
-  }
+  const names = await userRecordNames(AUTH, []);
   const recs = await Promise.all(names.map(n => getJSON(AUTH, n).catch(() => null)));
   return recs.filter(u => u && u.role === 'admin' && u.active !== false).map(u => u.uid);
 }

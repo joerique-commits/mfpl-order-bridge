@@ -80,16 +80,23 @@ export async function loadAllRaw(kv, uid) {
 // when KV was slow (545). The page now asks for the bucket list, then fetches buckets in small
 // groups in parallel, each group in its own invocation.
 export async function loadIndexRaw(kv, uid) {
-  const all = await listKeys(kv, 'b_');
-  const old = all.filter(actBucketTooOld);
-  const keys = all.filter(k => !actBucketTooOld(k));
-  const uPrefix = userKey(uid, '');
-  const ukeys = await listKeys(kv, uPrefix);
+  const listed = await listKeysTimed(kv, 'b_', 6000);
+  let keys = null, act = [];
+  if (listed) {
+    const old = listed.filter(actBucketTooOld);
+    keys = listed.filter(k => !actBucketTooOld(k));
+    const actNow = keys.filter(k => /^b_ob_activity__d/.test(k));
+    try { const cur = (await getJSON(kv, ACT_IDX)) || []; if (cur.length !== actNow.length || actNow.some(k => !cur.includes(k))) await putJSON(kv, ACT_IDX, actNow); } catch (e) {}
+    if (old.length) { try { await Promise.all(old.slice(0, 50).map(k => kv.delete(k))); } catch (e) {} }
+  } else {
+    act = ((await getJSON(kv, ACT_IDX).catch(() => null)) || []).filter(k => !actBucketTooOld(k));
+  }
+  // per-person values: fixed names, read directly (no list)
+  const names = userStoreNames(), ukeys = names.map(n => userKey(uid, n));
   const uvals = await getTextMany(kv, ukeys);
   const uparts = [];
-  ukeys.forEach((k, i) => { if (uvals[i]) uparts.push(JSON.stringify(k.slice(uPrefix.length)) + ':' + uvals[i]); });
-  if (old.length) { try { await Promise.all(old.slice(0, 50).map(k => kv.delete(k))); } catch (e) {} }
-  return { keys, uRaw: '{' + uparts.join(',') + '}' };
+  names.forEach((n, i) => { if (uvals[i]) uparts.push(JSON.stringify(n) + ':' + uvals[i]); });
+  return { keys, act, uRaw: '{' + uparts.join(',') + '}' };
 }
 export const PART_MAX = 25;
 export async function loadPartRaw(kv, keys) {
@@ -103,6 +110,7 @@ export async function loadPartRaw(kv, keys) {
 // changes: [{ s, bk, k, v (null = delete), ver, c }]
 export async function applyChanges(kv, changes, actor) {
   const byBucket = new Map();
+  const actWritten = [];
   for (const ch of changes) {
     if (!ch || !STORE_RE.test(ch.s || '') || !BUCKET_RE.test(ch.bk || '') || typeof ch.k !== 'string' || !ch.k || ch.k.length > 300) {
       throw new Error('Bad change: ' + JSON.stringify(ch).slice(0, 200));
@@ -132,9 +140,44 @@ export async function applyChanges(kv, changes, actor) {
     }
     if (dirty) {
       if (Object.keys(doc.recs).length) await putJSON(kv, key, doc); else await kv.delete(key);
+      if (/^b_ob_activity__d/.test(key)) actWritten.push(key);
     }
   }
+  if (actWritten.length) { try { await noteActKeys(kv, actWritten); } catch (e) {} }
   return { ok, conflicts };
+}
+
+// ---- Index of activity pieces (23 Oct): lets the page load the activity log when KV list() stalls.
+export const ACT_IDX = 'idx_act';
+export async function noteActKeys(kv, keys) {
+  const cur = (await getJSON(kv, ACT_IDX)) || [];
+  const next = [...new Set(cur.concat(keys))].filter(k => !actBucketTooOld(k));
+  if (next.length !== cur.length || next.some(k => !cur.includes(k))) await putJSON(kv, ACT_IDX, next);
+}
+// Index of account records in AUTH (user:<uid>), for when list() stalls.
+export async function userRecordNames(authKv, extra) {
+  const listed = await listKeysTimed(authKv, 'user:', 6000);
+  const cur = (await getJSON(authKv, 'idx_users').catch(() => null)) || [];
+  if (listed) {
+    if (listed.length !== cur.length || listed.some(k => !cur.includes(k))) { try { await putJSON(authKv, 'idx_users', listed); } catch (e) {} }
+    return listed;
+  }
+  return [...new Set(cur.concat(extra || []))];
+}
+export async function noteUserRecord(authKv, name) {
+  const cur = (await getJSON(authKv, 'idx_users').catch(() => null)) || [];
+  if (!cur.includes(name)) await putJSON(authKv, 'idx_users', cur.concat([name]));
+}
+// list() with a time limit: returns null if it stalls (seen 23 Oct: list() hanging while get() was fine).
+export async function listKeysTimed(kv, prefix, ms) {
+  let t; const timeout = new Promise(r => { t = setTimeout(() => r(null), ms); });
+  try { return await Promise.race([listKeys(kv, prefix), timeout]); } catch (e) { return null; } finally { clearTimeout(t); }
+}
+// Per-person values have fixed names: ob_profiles, ob_approver_me, and four lists × the views an admin can act as.
+export function userStoreNames() {
+  const out = ['ob_profiles', 'ob_approver_me'];
+  ['inbox_read_', 'inbox_seen_', 'mute_', 'unfollow_'].forEach(p => ['self', 'sales', 'supply', 'production', 'accounts', 'admin', 'approver'].forEach(r => out.push('ob_' + p + r)));
+  return out;
 }
 
 export async function getLinkKey(kv) {

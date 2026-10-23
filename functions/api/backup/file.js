@@ -8,7 +8,7 @@
 // A plain GET (no ?list) still returns the whole file in one call, for small stores.
 import { getJSON, putJSON } from '../../_lib/kv.js';
 import { errorJson, readJsonBody } from '../../_lib/http.js';
-import { loadAllRaw, listKeys, loadPartRaw } from '../../_lib/store.js';
+import { loadAllRaw, listKeysTimed, loadPartRaw, userRecordNames, ACT_IDX } from '../../_lib/store.js';
 
 async function checkKey(request) {
   const key = (request.headers.get('X-Backup-Key') || request.headers.get('x-backup-key') || '').trim();
@@ -18,7 +18,7 @@ async function checkKey(request) {
   return diff ? null : cfg;
 }
 async function usersList() {
-  const names = await listKeys(AUTH, 'user:');
+  const names = await userRecordNames(AUTH, []);
   const recs = await Promise.all(names.map(n => getJSON(AUTH, n).catch(() => null)));
   return recs.filter(Boolean).map(u => ({ uid: u.uid, email: u.email, name: u.name, role: u.role, title: u.title || null, active: u.active, createdAt: u.createdAt }));
 }
@@ -32,7 +32,8 @@ export async function onRequestGet({ request }) {
   const head = { kind: 'order-bridge-backup', version: 1, createdAt: now, createdBy: 'scheduled backup', site: new URL(request.url).host, dataFile: meta, users };
   cfg.lastUsedAt = now; await putJSON(AUTH, 'cfg_backup_key', cfg);
   if (new URL(request.url).searchParams.get('list') === '1') {
-    const keys = (await listKeys(APP_DATA, 'b_'));
+    const keys = (await listKeysTimed(APP_DATA, 'b_', 8000));
+    if (!keys) return errorJson('Storage listing is not responding right now; the backup will retry next time', 503);
     return new Response(JSON.stringify(Object.assign(head, { keys })), { status: 200, headers: JH });
   }
   const raw = await loadAllRaw(APP_DATA, '__backup__');
