@@ -16,9 +16,8 @@ async function activeAdmins() {
     (page.keys || []).forEach(e => names.push(e.key || e.name));
     if (page.complete || !page.cursor) break; cursor = page.cursor;
   }
-  const out = [];
-  for (const n of names) { const u = await getJSON(AUTH, n); if (u && u.role === 'admin' && u.active !== false) out.push(u.uid); }
-  return out;
+  const recs = await Promise.all(names.map(n => getJSON(AUTH, n).catch(() => null)));
+  return recs.filter(u => u && u.role === 'admin' && u.active !== false).map(u => u.uid);
 }
 
 export async function onRequestPost({ request }) {

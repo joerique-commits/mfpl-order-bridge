@@ -1106,7 +1106,7 @@ OB.downloadBackup = async function(redraw){
   OB.backup = { busy:true }; redraw();
   try {
     if (OB.sync) await OB.flush();
-    var store = await api('/api/store', { cache:'no-store' });
+    var store = await loadStore();
     var users = []; try { users = ((await api('/api/admin/users', { cache:'no-store' })) || {}).users || []; } catch(e){}
     var meta = null; try { meta = ((await api('/api/data/meta', { cache:'no-store' })) || {}).meta || null; } catch(e){}
     delete store.linkKey;
@@ -1137,6 +1137,31 @@ async function getText(path, opts){
 async function getJSONgz(path){
   var t = await getText(path, { cache:'no-store' });
   try { return JSON.parse(t); } catch(e){ return api(path, { cache:'no-store' }); }
+}
+// Saved work, loaded in pieces (23 Oct): the bucket list first, then up to 25 buckets per request,
+// 7 requests at a time, each retried. One request for everything ran past EdgeOne's 15 s limit (545).
+async function loadStore(onProgress){
+  var idx = null, err = null;
+  for (var a = 0; a < 3 && !idx; a++){ try { idx = await api('/api/store/keys', { cache:'no-store' }); } catch(e){ err = e; if (e.status && e.status < 500) throw e; await new Promise(function(r){ setTimeout(r, 1500 * (a + 1)); }); } }
+  if (!idx) throw err;
+  var keys = idx.keys || [], groups = [];
+  for (var i = 0; i < keys.length; i += 20) groups.push(keys.slice(i, i + 20));
+  var b = {}, next = 0, done = 0;
+  async function worker(){
+    while (next < groups.length){
+      var g = groups[next++], got = null, last = null;
+      for (var t = 0; t < 4 && !got; t++){
+        try { got = JSON.parse(await getText('/api/store/part', { body:{ keys:g } })); }
+        catch(e){ last = e; if (e.status && e.status < 500) throw e; await new Promise(function(r){ setTimeout(r, 1000 * (t + 1)); }); }
+      }
+      if (!got) throw last || new Error('Could not load saved work');
+      Object.assign(b, got.b || {});
+      done++; if (onProgress) onProgress(done, groups.length);
+    }
+  }
+  var ws = []; for (var w = 0; w < Math.min(7, groups.length || 1); w++) ws.push(worker());
+  await Promise.all(ws);
+  return { b:b, u:idx.u || {}, linkKey:idx.linkKey || '', serverTime:idx.serverTime };
 }
 async function loadData(meta){
   async function all(gz){
@@ -1188,7 +1213,7 @@ async function start(user, pre){
 }
 // meta and the saved store are fetched while the sign-in is still being checked
 function prefetch(){
-  var p = { meta: api('/api/data/meta', { cache:'no-store' }), store: getJSONgz('/api/store') };
+  var p = { meta: api('/api/data/meta', { cache:'no-store' }), store: loadStore() };
   p.meta.catch(function(){}); p.store.catch(function(){});
   return p;
 }

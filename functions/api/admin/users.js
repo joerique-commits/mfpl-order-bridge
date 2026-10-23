@@ -35,11 +35,9 @@ export async function onRequestGet({ request }) {
     if (page.complete || !page.cursor) break;
     cursor = page.cursor;
   }
-  const users = [];
-  for (const name of names) {
-    const u = await getJSON(AUTH, name);
-    if (u) users.push({ uid: u.uid, email: u.email, name: u.name, role: u.role, title: u.title || null, active: u.active, createdAt: u.createdAt });
-  }
+  // 23 Oct: read in parallel (one at a time ran past the 15 s limit when KV was slow).
+  const recs = await Promise.all(names.map(n => getJSON(AUTH, n).catch(() => null)));
+  const users = recs.filter(Boolean).map(u => ({ uid: u.uid, email: u.email, name: u.name, role: u.role, title: u.title || null, active: u.active, createdAt: u.createdAt }));
   return json({ users });
 }
 

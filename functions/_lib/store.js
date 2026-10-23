@@ -75,6 +75,31 @@ export async function loadAllRaw(kv, uid) {
   return '{"b":{' + parts.join(',') + '},"u":{' + uparts.join(',') + '}}';
 }
 
+
+// ---- Split loading (23 Oct): one invocation reading ~130 buckets ran past EdgeOne's 15 s limit
+// when KV was slow (545). The page now asks for the bucket list, then fetches buckets in small
+// groups in parallel, each group in its own invocation.
+export async function loadIndexRaw(kv, uid) {
+  const all = await listKeys(kv, 'b_');
+  const old = all.filter(actBucketTooOld);
+  const keys = all.filter(k => !actBucketTooOld(k));
+  const uPrefix = userKey(uid, '');
+  const ukeys = await listKeys(kv, uPrefix);
+  const uvals = await getTextMany(kv, ukeys);
+  const uparts = [];
+  ukeys.forEach((k, i) => { if (uvals[i]) uparts.push(JSON.stringify(k.slice(uPrefix.length)) + ':' + uvals[i]); });
+  if (old.length) { try { await Promise.all(old.slice(0, 50).map(k => kv.delete(k))); } catch (e) {} }
+  return { keys, uRaw: '{' + uparts.join(',') + '}' };
+}
+export const PART_MAX = 25;
+export async function loadPartRaw(kv, keys) {
+  const ok = (Array.isArray(keys) ? keys : []).filter(k => typeof k === 'string' && /^b_[A-Za-z0-9_]{1,150}$/.test(k)).slice(0, PART_MAX);
+  const vals = await getTextMany(kv, ok);
+  const parts = [];
+  ok.forEach((k, i) => { if (vals[i]) parts.push(JSON.stringify(k) + ':' + vals[i]); });
+  return '{"b":{' + parts.join(',') + '}}';
+}
+
 // changes: [{ s, bk, k, v (null = delete), ver, c }]
 export async function applyChanges(kv, changes, actor) {
   const byBucket = new Map();
