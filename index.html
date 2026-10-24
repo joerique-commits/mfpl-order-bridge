@@ -1082,7 +1082,11 @@ OB.expPublish = async function(redraw){
       if (typeof v === 'object'){ var o = {}, n = 0; Object.keys(v).forEach(function(k){ if (k === '_k') return; var x = strip(v[k]); if (x !== undefined){ o[k] = x; n++; } }); return n ? o : undefined; } return v; };
     try { Object.keys(base).forEach(function(st){ if (NOT_WORK.test(st)) return; var recs = base[st] || {};
       Object.keys(recs).forEach(function(k){ var r = recs[k], v = null; try { v = r && r.j ? JSON.parse(r.j) : null; } catch(e){} var m = strip(v); if (m !== undefined) savedText += k + ' ' + JSON.stringify(m) + '\n'; }); }); } catch(e){}
-    var res = window.OBBuild.build(files, { keepText:savedText }), d = res.data;
+    // approved SO Revision Requests: PO lines still on the old SO move to the new SO(s) (not when the POs are being cancelled)
+    var remap = [];
+    try { var rv = base.ob_so_revisions || {}; Object.keys(rv).forEach(function(k){ var r = null; try { r = JSON.parse(rv[k].j); } catch(e){}
+      (Array.isArray(r) ? r : [r]).forEach(function(x){ if (!x || x.status !== 'approved' || x.poCancellation === 'Yes' || !x.so) return; (x.newSos || []).forEach(function(n){ if (n && n.so && n.so !== x.so) remap.push([x.so, n.so]); }); }); }); } catch(e){}
+    var res = window.OBBuild.build(files, { keepText:savedText, remap:remap }), d = res.data;
     // store the new exports first: the data file below is built from them
     var entries = [];
     for (var i = 0; i < use.length; i++){
@@ -1100,6 +1104,9 @@ OB.expPublish = async function(redraw){
     var of = d.openFilter;
     ex.msg = 'Published: ' + d.orders.length + ' order lines, ' + d.dpi.length + ' SOs, ' + d.soLines.length + ' SO lines, built from ' + files.length + ' export(s).'
       + (of ? ' Open SOs list (as on ' + of.asOn + '): ' + of.removedSos + ' closed SO(s) left out' + (of.keptForSavedWork ? ', ' + of.keptForSavedWork + ' kept because they have saved work' : '') + (of.listedNotInDataCount ? '; ' + of.listedNotInDataCount + ' listed SO(s) not found in the exports: ' + of.listedNotInData.slice(0, 10).join(', ') + (of.listedNotInDataCount > 10 ? '…' : '') : '') + '.' : '')
+      + (d.carryOver ? (function(c){ return ' Revised SOs: ' + c.movedLines + ' PO line(s) on ' + c.movedPos + ' PO(s) moved to the new SO' + (c.movedWithoutMatchCount ? ' (' + c.movedWithoutMatchCount + ' without a matching article, e.g. fabric)' : '')
+          + (c.unmatchedCount ? '; ' + c.unmatchedCount + ' left on the cancelled SO (no matching article on any of its new SOs): ' + c.unmatched.slice(0, 5).map(function(u){ return u.old + ' / PO ' + u.po + ' ' + u.code; }).join(', ') + (c.unmatchedCount > 5 ? '…' : '') : '')
+          + (c.newSosNotInData.length ? '; new SO(s) not in the exports: ' + c.newSosNotInData.slice(0, 10).join(', ') : '') + '.'; })(d.carryOver) : '')
       + ' Reload to see it here; everyone else gets it the next time they open or reload Order Bridge.';
   } catch(e){ ex.kind = 'error'; ex.msg = 'Not published: ' + (e.message || e); }
   ex.busy = false; redraw();
@@ -1378,6 +1385,20 @@ function openSosFrame(wb, d1904){
   }
   return null;
 }
+// A narrow sheet whose header row (top 8 rows) contains all of `names` (case-insensitive); columns renamed to `names`.
+function narrowFrame(wb, d1904, names){
+  var raw = sheetRows(wb.Sheets[wb.SheetNames[0]], d1904), low = names.map(function(n){ return n.toLowerCase(); });
+  for (var i = 0; i < Math.min(8, raw.length); i++){
+    var cells = raw[i].map(function(v){ return v === null ? '' : String(v).trim().toLowerCase(); });
+    if (low.every(function(n){ return cells.indexOf(n) >= 0; })){
+      var cols = raw[i].map(function(c){ var t = String(c === null ? 'nan' : c).trim(), j = low.indexOf(t.toLowerCase()); return j >= 0 ? names[j] : t; });
+      var rows = raw.slice(i + 1).filter(function(r){ return r.some(function(v){ return v !== null; }); })
+        .map(function(r){ var o = r.slice(0, cols.length); while (o.length < cols.length) o.push(null); return o; });
+      return frame(cols, rows);
+    }
+  }
+  return null;
+}
 function G(f, row, name){ var i = f.idx[name]; return i === undefined ? null : row[i]; }
 function has(f, name){ return name in f.idx; }
 // pandas.concat (outer join on column names, first-seen order)
@@ -1462,7 +1483,7 @@ var SIG = [
   ['dispatch_sheet', ['Delivery Note Number', 'Net Amount', 'Total Discount']],
 ];
 var LABEL = { po_summary:'PO Summary', so_article:'SO Article Breakup', stock:'Stock Summary', so_grn:'SO vs PO vs GRN', po_payable:'PO Payable', po_balance:'PO Balance Payables',
-  so_header:'Daily PI Revenue', collections:'Collections Receipts', payments:'Payment Expenses', verticle_stmt:'Verticle Statement', dispatch_sheet:'Dispatch Sheet', open_sos:'Open SOs list', unknown:'Not recognised' };
+  so_header:'Daily PI Revenue', collections:'Collections Receipts', payments:'Payment Expenses', verticle_stmt:'Verticle Statement', dispatch_sheet:'Dispatch Sheet', open_sos:'Open SOs list', so_remap:'Revised SO mapping', unknown:'Not recognised' };
 var DATE_COLS = { po_summary:'PO Date', so_article:'SO Date', so_header:'PI Date', payments:'Transaction Date', dispatch_sheet:'Delivery Note Date' };
 
 // files: [{ name, wb }] (SheetJS workbooks read with { cellNF:true }). Returns { data, files:[report] }.
@@ -1478,6 +1499,7 @@ function build(files, opts){
     var typ = 'unknown';
     for (var i = 0; i < SIG.length; i++){ if (SIG[i][1].every(function(c){ return has(df, c); })){ typ = SIG[i][0]; break; } }
     if (typ === 'unknown'){ var os = openSosFrame(wb, d1904); if (os && os.rows.length && os.cols.length <= 4){ df = os; typ = 'open_sos'; } }
+    if (typ === 'unknown'){ var rv = narrowFrame(wb, d1904, ['Cancelled SO', 'New SO']); if (rv && rv.rows.length){ df = rv; typ = 'so_remap'; } }
     if (typ === 'stock') df = frame(df.cols, df.rows.filter(function(r){ return G(df, r, 'Site') !== null && G(df, r, 'Article') !== null; }));
     found.push({ file:f.name, type:typ, rows:df.rows.length, sheet:sheet, df:df, wb:wb, d1904:d1904 });
   });
@@ -1542,6 +1564,11 @@ function build(files, opts){
       name:s_(g('Article Name')), uom:s_(g('UOM')), qty:num1(g('PO Qty')), cp:num1(g('CP')), nsv:num1(g('Net Selling Value (Before taxes)')), supplier:cleanName(g('Suppllier')), supplierCode:code(g('Suppllier')),
       furniture:/furniture/i.test(s_(g('Vertical'))) });
   });
+  // Revised SOs (25 Oct): PO lines still on a cancelled SO move to its new SO(s) when the article matches a line on the
+  // new SO (exact code, then base code, then article name; with several new SOs, the one with the most of it still to cover).
+  // Pairs come from the "Revised SO mapping" sheet and from approved SO Revision Requests (opts.remap). A line with no article match follows the new SO when there is only one; otherwise it stays.
+  var carry = carryOver(DPI, poLines, cat('so_article'), remapPairs(by.so_remap.length ? cat('so_remap') : null, opts.remap || []));
+
   dpi.forEach(function(h){ h.linked = false; });
   poLines.forEach(function(l){ if (l.linkSo) DPI[l.linkSo].linked = true; });
 
@@ -1549,7 +1576,7 @@ function build(files, opts){
   var lines = new Map();
   poLines.forEach(function(l){
     var so = l.linkSo || l.so, k = JSON.stringify([so, l.po, l.code]);
-    if (!lines.has(k)) lines.set(k, { so:so, po:l.po, sku:l.code, article:l.name, uom:l.uom, qty:0.0, poDate:l.poDate, customer:l.customer, vertical:vlabel(l.vertical), supplier:l.supplier, dpiLinked:!!l.linkSo });
+    if (!lines.has(k)) lines.set(k, { so:so, po:l.po, sku:l.code, article:l.name, uom:l.uom, qty:0.0, poDate:l.poDate, customer:l.customer, vertical:vlabel(l.vertical), supplier:l.supplier, dpiLinked:!!l.linkSo, carriedFrom:l.carriedFrom || '' });
     lines.get(k).qty += l.qty;
   });
   var orders = [], used = {};
@@ -1563,6 +1590,7 @@ function build(files, opts){
       lifecycle:'po_confirmed', submittedAt:L.poDate ? L.poDate + 'T00:00:00Z' : null, submittedBy:'PO Summary',
       poRaisedDate:L.poDate, poConfirmedBy:'PO Summary', poConfirmedAt:L.poDate ? L.poDate + 'T00:00:00Z' : null,
       clarifications:[], productionDeadline:null, productionDeadlineSetBy:null, productionDeadlineSetAt:null, pendingDeadlineChange:null, deadlineHistory:[], customerDeliveryDetails:null });
+    if (L.carriedFrom) orders[orders.length - 1].carriedFrom = L.carriedFrom;
   });
   var okey = function(o){ return [o.soDate || o.poRaisedDate || '0000', o.so, o.po]; };
   orders.sort(function(a, b){ var x = okey(a), y = okey(b); for (var i = 0; i < 3; i++){ if (x[i] < y[i]) return 1; if (x[i] > y[i]) return -1; } return 0; });
@@ -1704,6 +1732,7 @@ function build(files, opts){
   var data = { builtAt:(opts.now || new Date()).toISOString().slice(0, 19) + 'Z', sourceFiles:sourceFiles, orders:orders, soHeaders:soHeaders, dpi:dpi, poLines:poLines, soLines:soLines,
     stock:stock, warehouses:warehouses, payables:payables, payablesCutoff:PAYABLES_CUTOFF, openingPayables:openingPayables, payments:payments, allocations:allocations,
     allocSkippedRows:allocSkipped, dispatches:dispatches, standardUpholstery:standardUpholstery, standardFinishes:standardFinishes, standardStone:standardStone, coverage:cov };
+  if (carry) data.carryOver = carry;
 
   // Open SOs list (25 Oct): keep only SOs on the list, SOs dated after the list date, SOs with a PO dated after the
   // payables cut-off (vendor payables need those POs) and SOs with saved work (opts.keepSos). Same rule as build_from_folder.py.
@@ -1754,6 +1783,36 @@ function applyOpenFilter(data, listed, asOn, keepSos, keepText){
   return { asOn:asOn, listed:Object.keys(listed).length, keptSos:data.dpi.length, removedSos:before.sos - data.dpi.length,
     removedPoLines:before.poLines - data.poLines.length, removedSoLines:before.soLines - data.soLines.length, keptForSavedWork:savedKept, listedNotInData:notFound.slice(0, 200), listedNotInDataCount:notFound.length };
 }
+// Cancelled SO -> new SO pairs from the mapping sheet and approved revisions: { old: [new, ...] }
+function remapPairs(df, extra){
+  var m = {};
+  var add = function(a, b){ a = s_(a).replace(/^'+/, ''); b = s_(b).replace(/^'+/, ''); if (!a || !b || a === b) return; m[a] = m[a] || []; if (m[a].indexOf(b) < 0) m[a].push(b); };
+  if (df) df.rows.forEach(function(r){ add(G(df, r, 'Cancelled SO'), G(df, r, 'New SO')); });
+  (extra || []).forEach(function(p){ add(p[0], p[1]); });
+  return m;
+}
+function carryOver(DPI, poLines, sart, pairs){
+  var olds = Object.keys(pairs); if (!olds.length) return null;
+  var bc = function(c){ c = s_(c).toUpperCase(); c = c.replace(/^(FP|LP)-?/, ''); var mt = /^(A\d{5})-F\d+$/.exec(c); if (mt) return mt[1]; c = c.replace(/(FIN|PCS)$/, ''); return c.length > 4 ? c.replace(/(F\d*P\d*|P\d+|F\d+|F)$/, '') : c; };
+  var nk = function(v){ return s_(v).toUpperCase().replace(/[^A-Z0-9]/g, ''); };
+  var need = {};   // new SO -> [{code, base, name, q}]
+  if (sart && sart.rows.length) sart.rows.forEach(function(r){ var so = s_(G(sart, r, 'SO Number')); (need[so] = need[so] || []).push({ code:s_(G(sart, r, 'Article Code')), base:bc(G(sart, r, 'Article Code')), name:nk(G(sart, r, 'Article Name')), q:num1(G(sart, r, 'SO Qty')) + num1(G(sart, r, 'FOC Qty')) }); });
+  var moved = 0, movedPos = {}, unmatched = [], noMatch = [], missingNew = {};
+  poLines.forEach(function(l){
+    var old = l.linkSo || l.so, targets = pairs[old]; if (!targets) return;
+    var cands = targets.filter(function(t){ if (!DPI[t]) { missingNew[t] = 1; return false; } return true; });
+    var pick = null;
+    [function(x){ return x.code === l.code; }, function(x){ return x.base === bc(l.code); }, function(x){ return x.name && x.name === nk(l.name); }].some(function(f){
+      var best = null, bestQ = -1;
+      cands.forEach(function(t){ (need[t] || []).forEach(function(x){ if (f(x) && x.q > bestQ){ best = { t:t, x:x }; bestQ = x.q; } }); });
+      if (best){ pick = best; return true; } return false;
+    });
+    if (!pick && cands.length === 1){ l.carriedFrom = old; l.linkSo = cands[0]; l.customer = DPI[cands[0]].customer; moved++; movedPos[l.po] = 1; noMatch.push({ old:old, new:cands[0], po:l.po, code:l.code, name:l.name }); return; }   // one new SO only: the line follows it (fabric, add-ons)
+    if (!pick){ unmatched.push({ old:old, po:l.po, code:l.code, name:l.name }); return; }
+    pick.x.q -= l.qty; l.carriedFrom = old; l.linkSo = pick.t; l.customer = DPI[pick.t].customer; moved++; movedPos[l.po] = 1;
+  });
+  return { pairs:olds.length, movedLines:moved, movedPos:Object.keys(movedPos).length, unmatchedCount:unmatched.length, unmatched:unmatched.slice(0, 300), movedWithoutMatchCount:noMatch.length, movedWithoutMatch:noMatch.slice(0, 300), newSosNotInData:Object.keys(missingNew).sort() };
+}
 // One file on its own: what it is, how many rows, its data dates and the storage slot it fills.
 // Slot = one stored copy per export (a new upload of the same export replaces the old one):
 // the export type; Stock Summary per warehouse; workbooks used only for named sheets by those sheets.
@@ -1763,6 +1822,7 @@ function classify(name, wb){
   var df = frameFrom(sheetRows(wb.Sheets[sheet], d1904), 4), typ = 'unknown';
   for (var i = 0; i < SIG.length; i++){ if (SIG[i][1].every(function(c){ return has(df, c); })){ typ = SIG[i][0]; break; } }
   if (typ === 'unknown'){ var os = openSosFrame(wb, d1904); if (os && os.rows.length && os.cols.length <= 4){ df = os; typ = 'open_sos'; } }
+  if (typ === 'unknown'){ var rv = narrowFrame(wb, d1904, ['Cancelled SO', 'New SO']); if (rv && rv.rows.length){ df = rv; typ = 'so_remap'; } }
   if (typ === 'stock') df = frame(df.cols, df.rows.filter(function(r){ return G(df, r, 'Site') !== null && G(df, r, 'Article') !== null; }));
   var named = ['InvoicedOS', 'PI_Datasheet', 'Standard_Upholstery', 'Standard_Finishes', 'Standard_Stone'].filter(function(sn){ return wb.SheetNames.indexOf(sn) >= 0; });
   var slot = null, label = LABEL[typ];
