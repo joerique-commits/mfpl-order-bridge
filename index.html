@@ -1075,7 +1075,14 @@ OB.expPublish = async function(redraw){
     }
     say('Building the data from ' + files.length + ' export(s)…');
     await new Promise(function(r){ setTimeout(r, 30); });
-    var res = window.OBBuild.build(files), d = res.data;
+    // SOs with saved work are never trimmed by the Open SOs list: pass the saved stores' text (SO numbers are long and unique)
+    var savedText = '', NOT_WORK = /^ob_(activity|act_parts|permissions|slot_settings|approvers|fab_locations|risk_golive)$/;
+    // only records with a real value count: the blank placeholder detail every PO line gets doesn't
+    var strip = function(v){ if (v === null || v === '' || v === false) return undefined; if (Array.isArray(v)){ var a = v.map(strip).filter(function(x){ return x !== undefined; }); return a.length ? a : undefined; }
+      if (typeof v === 'object'){ var o = {}, n = 0; Object.keys(v).forEach(function(k){ if (k === '_k') return; var x = strip(v[k]); if (x !== undefined){ o[k] = x; n++; } }); return n ? o : undefined; } return v; };
+    try { Object.keys(base).forEach(function(st){ if (NOT_WORK.test(st)) return; var recs = base[st] || {};
+      Object.keys(recs).forEach(function(k){ var r = recs[k], v = null; try { v = r && r.j ? JSON.parse(r.j) : null; } catch(e){} var m = strip(v); if (m !== undefined) savedText += k + ' ' + JSON.stringify(m) + '\n'; }); }); } catch(e){}
+    var res = window.OBBuild.build(files, { keepText:savedText }), d = res.data;
     // store the new exports first: the data file below is built from them
     var entries = [];
     for (var i = 0; i < use.length; i++){
@@ -1090,7 +1097,10 @@ OB.expPublish = async function(redraw){
     var text = JSON.stringify(d);
     await publishDataText(text, d, function(n, t){ say('Publishing the data… ' + Math.round(n * 100 / t) + '%'); });
     ex.picked = []; ex.kind = 'ok';
-    ex.msg = 'Published: ' + d.orders.length + ' order lines, ' + d.dpi.length + ' SOs, ' + d.soLines.length + ' SO lines, built from ' + files.length + ' export(s). Reload to see it here; everyone else gets it the next time they open or reload Order Bridge.';
+    var of = d.openFilter;
+    ex.msg = 'Published: ' + d.orders.length + ' order lines, ' + d.dpi.length + ' SOs, ' + d.soLines.length + ' SO lines, built from ' + files.length + ' export(s).'
+      + (of ? ' Open SOs list (as on ' + of.asOn + '): ' + of.removedSos + ' closed SO(s) left out' + (of.keptForSavedWork ? ', ' + of.keptForSavedWork + ' kept because they have saved work' : '') + (of.listedNotInDataCount ? '; ' + of.listedNotInDataCount + ' listed SO(s) not found in the exports: ' + of.listedNotInData.slice(0, 10).join(', ') + (of.listedNotInDataCount > 10 ? '…' : '') : '') + '.' : '')
+      + ' Reload to see it here; everyone else gets it the next time they open or reload Order Bridge.';
   } catch(e){ ex.kind = 'error'; ex.msg = 'Not published: ' + (e.message || e); }
   ex.busy = false; redraw();
 };
@@ -1355,6 +1365,19 @@ function frameFrom(raw, thresh){
     .map(function(r){ var o = r.slice(0, cols.length); while (o.length < cols.length) o.push(null); return o; });
   return frame(cols, rows);
 }
+// A narrow list (e.g. one "SO Number" column): header = first of the top 8 rows that has an "SO Number" cell.
+function openSosFrame(wb, d1904){
+  var raw = sheetRows(wb.Sheets[wb.SheetNames[0]], d1904);
+  for (var i = 0; i < Math.min(8, raw.length); i++){
+    if (raw[i].some(function(v){ return v !== null && String(v).trim().toLowerCase() === 'so number'; })){
+      var cols = raw[i].map(function(c){ return String(c === null ? 'nan' : c).trim(); }).map(function(c){ return c.toLowerCase() === 'so number' ? 'SO Number' : c; });
+      var rows = raw.slice(i + 1).filter(function(r){ return r.some(function(v){ return v !== null; }); })
+        .map(function(r){ var o = r.slice(0, cols.length); while (o.length < cols.length) o.push(null); return o; });
+      return frame(cols, rows);
+    }
+  }
+  return null;
+}
 function G(f, row, name){ var i = f.idx[name]; return i === undefined ? null : row[i]; }
 function has(f, name){ return name in f.idx; }
 // pandas.concat (outer join on column names, first-seen order)
@@ -1439,7 +1462,7 @@ var SIG = [
   ['dispatch_sheet', ['Delivery Note Number', 'Net Amount', 'Total Discount']],
 ];
 var LABEL = { po_summary:'PO Summary', so_article:'SO Article Breakup', stock:'Stock Summary', so_grn:'SO vs PO vs GRN', po_payable:'PO Payable', po_balance:'PO Balance Payables',
-  so_header:'Daily PI Revenue', collections:'Collections Receipts', payments:'Payment Expenses', verticle_stmt:'Verticle Statement', dispatch_sheet:'Dispatch Sheet', unknown:'Not recognised' };
+  so_header:'Daily PI Revenue', collections:'Collections Receipts', payments:'Payment Expenses', verticle_stmt:'Verticle Statement', dispatch_sheet:'Dispatch Sheet', open_sos:'Open SOs list', unknown:'Not recognised' };
 var DATE_COLS = { po_summary:'PO Date', so_article:'SO Date', so_header:'PI Date', payments:'Transaction Date', dispatch_sheet:'Delivery Note Date' };
 
 // files: [{ name, wb }] (SheetJS workbooks read with { cellNF:true }). Returns { data, files:[report] }.
@@ -1454,6 +1477,7 @@ function build(files, opts){
     var df = frameFrom(sheetRows(wb.Sheets[sheet], d1904), 4);
     var typ = 'unknown';
     for (var i = 0; i < SIG.length; i++){ if (SIG[i][1].every(function(c){ return has(df, c); })){ typ = SIG[i][0]; break; } }
+    if (typ === 'unknown'){ var os = openSosFrame(wb, d1904); if (os && os.rows.length && os.cols.length <= 4){ df = os; typ = 'open_sos'; } }
     if (typ === 'stock') df = frame(df.cols, df.rows.filter(function(r){ return G(df, r, 'Site') !== null && G(df, r, 'Article') !== null; }));
     found.push({ file:f.name, type:typ, rows:df.rows.length, sheet:sheet, df:df, wb:wb, d1904:d1904 });
   });
@@ -1681,6 +1705,16 @@ function build(files, opts){
     stock:stock, warehouses:warehouses, payables:payables, payablesCutoff:PAYABLES_CUTOFF, openingPayables:openingPayables, payments:payments, allocations:allocations,
     allocSkippedRows:allocSkipped, dispatches:dispatches, standardUpholstery:standardUpholstery, standardFinishes:standardFinishes, standardStone:standardStone, coverage:cov };
 
+  // Open SOs list (25 Oct): keep only SOs on the list, SOs dated after the list date, SOs with a PO dated after the
+  // payables cut-off (vendor payables need those POs) and SOs with saved work (opts.keepSos). Same rule as build_from_folder.py.
+  if (by.open_sos.length){
+    var osDf = cat('open_sos'), listed = {};
+    osDf.rows.forEach(function(r){ var so = s_(G(osDf, r, 'SO Number')); if (so) listed[so] = 1; });
+    var asOn = null;
+    by.open_sos.forEach(function(x){ var d = asOnFromName(x.file); if (d && (!asOn || d > asOn)) asOn = d; });
+    data.openFilter = applyOpenFilter(data, listed, asOn, opts.keepSos || [], opts.keepText || '');
+  }
+
   // per-file report: what each file was read as, and the newest date in it
   var report = found.map(function(x){
     var dc = DATE_COLS[x.type], newest = null, oldest = null;
@@ -1688,6 +1722,37 @@ function build(files, opts){
     return { file:x.file, type:x.type, label:LABEL[x.type] + (extra[x.file] && x.type === 'unknown' ? ' (named sheets used)' : ''), rows:x.rows, sheet:x.sheet, used:(x.type !== 'unknown' && x.rows > 0) || !!extra[x.file], oldest:oldest, newest:newest };
   });
   return { data:data, files:report, matchStats:matchStats };
+}
+// "Open SOs as on 29-Oct-2026.xlsx" / "... 2026-10-29 ..." -> '2026-10-29' (null if the name has no date)
+var AS_ON_MON = { jan:1, feb:2, mar:3, apr:4, may:5, jun:6, jul:7, aug:8, sep:9, oct:10, nov:11, dec:12 };
+function asOnFromName(name){
+  var n = String(name || ''), m = /(\d{4})-(\d{1,2})-(\d{1,2})/.exec(n);
+  if (m) return m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
+  m = /(\d{1,2})[-_ .]([A-Za-z]{3})[A-Za-z]*[-_ .](\d{4})/.exec(n);
+  if (m && AS_ON_MON[m[2].toLowerCase()]) return m[3] + '-' + ('0' + AS_ON_MON[m[2].toLowerCase()]).slice(-2) + '-' + ('0' + m[1]).slice(-2);
+  m = /(\d{1,2})[-_.](\d{1,2})[-_.](\d{4})/.exec(n);
+  if (m) return m[3] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[1]).slice(-2);
+  return null;
+}
+// The trim itself. Mutates data; returns a summary for the Daily exports card.
+function applyOpenFilter(data, listed, asOn, keepSos, keepText){
+  var keep = {}; Object.keys(listed).forEach(function(so){ keep[so] = 1; }); (keepSos || []).forEach(function(so){ if (so) keep[so] = 1; });
+  var savedKept = 0;
+  if (keepText) data.dpi.forEach(function(h){ if (!keep[h.so] && h.so && String(h.so).length >= 6 && keepText.indexOf(h.so) >= 0){ keep[h.so] = 1; savedKept++; } });
+  if (!asOn){ data.dpi.forEach(function(h){ if (listed[h.so] && h.date && (!asOn || h.date > asOn)) asOn = h.date; }); }
+  data.dpi.forEach(function(h){ if (asOn && h.date && h.date > asOn) keep[h.so] = 1; });
+  var cut = data.payablesCutoff || '';
+  data.poLines.forEach(function(l){ var so = l.linkSo || l.so; if (so && l.poDate && l.poDate > cut) keep[so] = 1; });
+  var soOf = function(x){ return x.linkSo || x.so; };
+  var before = { sos:data.dpi.length, poLines:data.poLines.length, soLines:data.soLines.length, orders:data.orders.length };
+  data.dpi = data.dpi.filter(function(h){ return keep[h.so]; });
+  data.soLines = data.soLines.filter(function(r){ return keep[r.so]; });
+  data.poLines = data.poLines.filter(function(l){ var so = soOf(l); return !so || keep[so]; });
+  data.orders = data.orders.filter(function(o){ return !o.so || keep[o.so]; });
+  var sh = {}; Object.keys(data.soHeaders).forEach(function(so){ if (keep[so]) sh[so] = data.soHeaders[so]; }); data.soHeaders = sh;
+  var notFound = Object.keys(listed).filter(function(so){ return !sh[so]; }).sort();
+  return { asOn:asOn, listed:Object.keys(listed).length, keptSos:data.dpi.length, removedSos:before.sos - data.dpi.length,
+    removedPoLines:before.poLines - data.poLines.length, removedSoLines:before.soLines - data.soLines.length, keptForSavedWork:savedKept, listedNotInData:notFound.slice(0, 200), listedNotInDataCount:notFound.length };
 }
 // One file on its own: what it is, how many rows, its data dates and the storage slot it fills.
 // Slot = one stored copy per export (a new upload of the same export replaces the old one):
@@ -1697,6 +1762,7 @@ function classify(name, wb){
   var sheet = wb.SheetNames.indexOf('All Sites') >= 0 ? 'All Sites' : wb.SheetNames[0];
   var df = frameFrom(sheetRows(wb.Sheets[sheet], d1904), 4), typ = 'unknown';
   for (var i = 0; i < SIG.length; i++){ if (SIG[i][1].every(function(c){ return has(df, c); })){ typ = SIG[i][0]; break; } }
+  if (typ === 'unknown'){ var os = openSosFrame(wb, d1904); if (os && os.rows.length && os.cols.length <= 4){ df = os; typ = 'open_sos'; } }
   if (typ === 'stock') df = frame(df.cols, df.rows.filter(function(r){ return G(df, r, 'Site') !== null && G(df, r, 'Article') !== null; }));
   var named = ['InvoicedOS', 'PI_Datasheet', 'Standard_Upholstery', 'Standard_Finishes', 'Standard_Stone'].filter(function(sn){ return wb.SheetNames.indexOf(sn) >= 0; });
   var slot = null, label = LABEL[typ];
@@ -1707,7 +1773,7 @@ function classify(name, wb){
   if (dc && has(df, dc)) df.rows.forEach(function(r){ var x = iso(G(df, r, dc)); if (x){ if (!newest || x > newest) newest = x; if (!oldest || x < oldest) oldest = x; } });
   return { file:name, type:typ, label:label, rows:df.rows.length, slot:slot, named:named, oldest:oldest, newest:newest };
 }
-root.OBBuild = { build:build, classify:classify, version:'2026-10-21' };
+root.OBBuild = { build:build, classify:classify, applyOpenFilter:applyOpenFilter, asOnFromName:asOnFromName, version:'2026-10-25' };
 })(typeof window !== 'undefined' ? window : globalThis);
 </script>
 <script type="text/x-ob-app">
