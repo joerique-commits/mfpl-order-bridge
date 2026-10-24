@@ -14285,6 +14285,79 @@ extraWiring.push(() => {
   const pc = document.getElementById('xu_pw_cancel'); if (pc) pc.addEventListener('click', () => { state.xPwFor = null; renderAll(); });
 });
 
+// ---------------------------------------------------------------- Warehouse Tag Station: zone at receipt (JK, 25 Oct)
+// Supply types the warehouse zone each package goes into when confirming receipt. Required; an "apply to all" box
+// fills every tag in the consignment. Stored on the tag (t.zone, t.zoneHistory) and on its receipt record; shown in
+// the Warehouse log and its CSV; supply/admin can change it later in the log. Not on the QR code, tag or prints.
+state.xZone = state.xZone || {};
+const xZoneCanEdit = () => ['supply', 'admin'].includes(state.role);
+const _rwrZone = renderWarehouseReceipt;
+renderWarehouseReceipt = function(){
+  let h = _rwrZone.apply(this, arguments);
+  if (!state.whReceiveCart.size) return h;
+  h = h.replace(/(<button class="btn-text" data-wh-receive-cart-remove="([^"]+)">Remove<\/button>)/g, (m, btn, id) =>
+    `<input data-xzone="${id}" value="${xe(state.xZone[id] || '')}" placeholder="Zone *" aria-label="Warehouse zone" style="width:130px;margin-right:8px;">${btn}`);
+  const anchor = '<div style="display:flex;gap:9px;margin-top:14px;">\n        <button class="btn btn-primary" id="submitWhReceive">';
+  if (h.includes(anchor)) h = h.replace(anchor, `<div class="field" style="margin-top:12px;max-width:360px;"><label>Warehouse zone for all tags (optional shortcut)</label>
+      <div style="display:flex;gap:8px;"><input id="xZoneAll" placeholder="e.g. Rack B2" value="${xe(state.xZoneAllDraft || '')}"><button class="btn btn-ghost btn-sm" id="xZoneApply" type="button">Apply to all</button></div>
+      <div class="cell-sub">Each tag needs a zone before receipt can be confirmed. You can still change a single tag above.</div></div>
+      ${state.xZoneErr ? `<div class="scan-error" style="margin-top:8px;">${xe(state.xZoneErr)}</div>` : ''}` + anchor);
+  return h;
+};
+const _rwlZone = renderWarehouseLog;
+renderWarehouseLog = function(){
+  const h = _rwlZone.apply(this, arguments);
+  const t = document.createElement('template'); t.innerHTML = h;
+  const table = [...t.content.querySelectorAll('table')].find(tb => [...tb.querySelectorAll('thead th')].some(th => th.textContent.trim() === 'Received'));
+  if (!table) return h;
+  const ths = [...table.querySelectorAll('thead th')]; const ri = ths.findIndex(th => th.textContent.trim() === 'Received');
+  const nth = document.createElement('th'); nth.textContent = 'Zone'; ths[ri].after(nth);
+  const can = xZoneCanEdit();
+  table.querySelectorAll('tbody tr').forEach(tr => {
+    const cells = tr.children; if (cells.length < ri + 1) return;
+    const tagNo = (tr.querySelector('td.mono') || {}).textContent; const tag = tagNo && WAREHOUSE_TAGS.find(x => x.tagNo === tagNo.trim());
+    const td = document.createElement('td');
+    if (tag && tag.receipts && tag.receipts.length){
+      const hist = (tag.zoneHistory || []).length > 1 ? `<div class="cell-sub">was ${xe(tag.zoneHistory[tag.zoneHistory.length - 2].zone)}</div>` : '';
+      td.innerHTML = can ? `<input data-xzone-edit="${tag.id}" value="${xe(tag.zone || '')}" placeholder="Zone" style="width:110px;">${hist}` : `${xe(tag.zone || '—')}${hist}`;
+    } else td.innerHTML = '<span class="cell-sub">—</span>';
+    cells[ri].after(td);
+  });
+  return t.innerHTML;
+};
+function xSetZone(tag, zone, how){
+  zone = String(zone || '').trim(); if (!zone || zone === tag.zone) return;
+  tag.zone = zone; tag.zoneHistory = (tag.zoneHistory || []).concat([{ zone, at: nowIso(), by: actingUserName(), how }]);
+}
+extraWiring.push(() => {
+  document.querySelectorAll('[data-xzone]').forEach(el => el.addEventListener('input', () => { state.xZone[el.dataset.xzone] = el.value; state.xZoneErr = ''; }));
+  const za = document.getElementById('xZoneAll'); if (za) za.addEventListener('input', () => { state.xZoneAllDraft = za.value; });
+  const ap = document.getElementById('xZoneApply');
+  if (ap) ap.addEventListener('click', () => { const v = (state.xZoneAllDraft || '').trim(); if (!v) return; state.whReceiveCart.forEach(id => { state.xZone[id] = v; }); state.xZoneErr = ''; renderAll(); });
+  const sub = document.getElementById('submitWhReceive');
+  if (sub){ const nb = sub.cloneNode(true); sub.replaceWith(nb); nb.addEventListener('click', () => {
+    const ids = [...state.whReceiveCart]; if (!ids.length) return;
+    const tags = ids.map(id => WAREHOUSE_TAGS.find(t => t.id === id)).filter(Boolean);
+    const missing = tags.filter(t => !String(state.xZone[t.id] || '').trim());
+    if (missing.length){ state.xZoneErr = `Enter the warehouse zone for ${missing.map(t => t.tagNo).join(', ')}.`; return renderAll(); }
+    const receiptBatchNo = 'WRC-' + Math.floor(10000 + Math.random() * 90000), at = nowIso();
+    tags.forEach(t => { const zone = String(state.xZone[t.id]).trim();
+      t.receipts.push({ receivedAt: at, receivedBy: actingUserName(), receiptBatchNo, zone });
+      xSetZone(t, zone, 'receipt'); delete state.xZone[t.id]; });
+    state.whReceiveCart = new Set(); state.whReceiveScanError = ''; state.xZoneErr = ''; state.xZoneAllDraft = '';
+    renderAll();
+  }); }
+  document.querySelectorAll('[data-xzone-edit]').forEach(el => el.addEventListener('change', () => {
+    const tag = WAREHOUSE_TAGS.find(t => t.id === el.dataset.xzoneEdit); if (tag && xZoneCanEdit()){ xSetZone(tag, el.value, 'log'); renderAll(); }
+  }));
+  const csv = document.getElementById('whLogDownloadCsv');
+  if (csv){ const nb = csv.cloneNode(true); csv.replaceWith(nb); nb.addEventListener('click', () => {
+    const headers = ['Tag','Article','SKU','SO','PO','Qty','Unit','Packed','Received','Zone','Status'];
+    const rows = WAREHOUSE_TAGS.map(t => { const lr = (t.receipts || [])[t.receipts.length - 1]; return [t.tagNo, t.article, t.sku, t.so, t.po, t.qty, t.uom, t.packedAt || '', lr ? lr.receivedAt : '', t.zone || '', warehouseTagStatus(t)]; });
+    downloadCsv('warehouse-tag-log.csv', [headers, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n'));
+  }); }
+});
+
 // ---------------------------------------------------------------- "User guide" link in the menu (22 Oct)
 // Opens /guide.html (the same file as the shared guide) on the signed-in person's own manual.
 extraWiring.push(() => {
