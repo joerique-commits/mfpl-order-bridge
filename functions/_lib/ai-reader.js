@@ -60,6 +60,7 @@ export function buildPrompt() {
     '  "factoryRemarks": string,    // "Factory Remarks" line(s), "" if blank\n' +
     '  "designTeamRemarks": string, // "Design team Remarks" line(s), "" if blank\n' +
     '  "materials": [ { "slNo": string, "material": string, "qty": string } ],  // rows of the "Material Used" table that have anything written, skip fully blank rows\n' +
+    '  "rmBlocked": boolean,        // true only if the card has a ticked box or a written note saying all raw material (RM) is available and blocked (e.g. "All RM available & blocked", "RM blocked"); false if absent or unticked\n' +
     '  "uncertainFields": [string]  // field names (dot-path, e.g. "stages.1.startDate") you are genuinely unsure you read correctly. Empty array if nothing is uncertain.\n' +
     '}\n\n' +
     'Rules: always return exactly 7 entries in "stages", one per printed row, in the fixed key order above, even if a row is ' +
@@ -111,6 +112,7 @@ export function normalizeExtracted(data) {
     deadlineDateRaw: toStr(data.deadlineDate), deadlineDateISO: parseDateToISO(data.deadlineDate),
     workOrderNumber: toStr(data.workOrderNumber), productCode: toStr(data.productCode), qty: toStr(data.qty),
     stages, factoryRemarks: toStr(data.factoryRemarks), designTeamRemarks: toStr(data.designTeamRemarks), materials,
+    rmBlocked: toBool(data.rmBlocked),
     uncertainFields: Array.isArray(data.uncertainFields) ? data.uncertainFields.map(toStr).filter(Boolean) : [],
   };
 }

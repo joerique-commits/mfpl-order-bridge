@@ -14679,6 +14679,252 @@ extraWiring.push(() => {
   const cr = $('xaiClearRest'); if (cr) cr.addEventListener('click', () => xAiCall({ action:'clearRest' }));
 });
 
+// ---------------------------------------------------------------- Material readiness C0–C4 (JK, 25 Oct)
+// Admin-only preview until after go-live (xCatOn). Per MFPL factory SKU line (PO line):
+//   C0 no job card · C1 RM confirmed + every listed fabric has a received tag (or no fabric)
+//   C2 RM confirmed, fabric pending · C3 RM not confirmed, fabric pending · C4 RM not confirmed, fabric received / not needed
+// "RM confirmed" = the job card tick "All raw material (except fabric) available & blocked" (factory / admin;
+// a scan can pre-tick it, the person saving confirms it; can be unticked; history kept).
+// A PO / SO takes its worst open line (packed lines don't count). Worst → best: C0, C3, C2, C4, C1.
+const xCatOn = () => !!(window.__OB && window.__OB.user && window.__OB.user.role === 'admin');
+const XCAT_ORDER = ['C0', 'C3', 'C2', 'C4', 'C1'];
+const XCAT_INFO = {
+  C0:{ sev:'critical', label:'No job card' },
+  C3:{ sev:'critical', label:'RM not confirmed · fabric pending' },
+  C2:{ sev:'warn', label:'RM confirmed · fabric pending' },
+  C4:{ sev:'warn', label:'RM not confirmed · fabric in' },
+  C1:{ sev:'good', label:'RM confirmed · fabric in' },
+};
+const xRmCanEdit = () => ['production', 'admin'].includes(state.role);
+const xNk = v => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+function xFabState(o){
+  const d = o.detail ? ensureDetailShape(o) : { fabrics:[] };
+  const fabs = (d.fabrics || []).filter(f => f && f.type && f.type !== 'na');
+  if (!fabs.length){
+    const na = (d.fabrics || []).some(f => f && f.type === 'na');
+    return na ? { ok:true, items:[], note:'No fabric on this line (NA)' } : { ok:false, items:[], note:'Fabric not filled in on the order line' };
+  }
+  const tags = FABRIC_ENTRIES.filter(e => e.po && e.po === o.po && (!e.productCode || e.productCode === o.sku));
+  const catalogSkus = new Set(fabs.filter(f => f.type === 'catalog' && f.fabricSku).map(f => f.fabricSku));
+  const used = new Set();
+  const items = fabs.map(f => {
+    const sku = f.type === 'catalog' ? (f.fabricSku || '') : '';
+    const nm = xNk(f.type === 'other' ? f.otherFabricName : f.fabricName);
+    let cand = tags.filter(e => !used.has(e.id) && ((sku && e.sku === sku) || (nm && xNk(e.fabricName) === nm)));
+    // client / other fabric: a tag on this PO line that no catalog fabric of the line claims
+    if (!cand.length && f.type !== 'catalog') cand = tags.filter(e => !used.has(e.id) && !catalogSkus.has(e.sku));
+    const t = cand.find(e => entryStatus(e) === 'received') || cand[0] || null;
+    if (t) used.add(t.id);
+    return { name:fabricDisplayName(f) || sku || 'Fabric', sku, tag:t ? t.id : '', status:t ? entryStatus(t) : 'no_tag' };
+  });
+  return { ok:items.every(i => i.status === 'received'), items };
+}
+let XCAT_CACHE = null;
+function xCatIndex(){
+  if (XCAT_CACHE) return XCAT_CACHE;
+  const byLine = new Map(), byPo = {}, bySo = {};
+  ORDERS.forEach(o => {
+    if (o.lifecycle !== 'po_confirmed' || !o.po || !isFactoryLine(o)) return;
+    const h = DPI_BY_SO[o.so]; if (h && h.cancelled) return;
+    const jc = jobCardOf(o), fab = xFabState(o);
+    const rm = !!(jc && jc.rmBlocked && jc.rmBlocked.on);
+    const packing = jc && (jc.stages || []).find(s => s.key === 'packing');
+    const packed = !!(packing && packing.endDateISO);
+    const c = !jc ? 'C0' : rm ? (fab.ok ? 'C1' : 'C2') : (fab.ok ? 'C4' : 'C3');
+    const r = { o, c, jc, rm, fab, packed };
+    byLine.set(o.id, r);
+    if (!packed){ (byPo[o.po] = byPo[o.po] || []).push(r); (bySo[o.so] = bySo[o.so] || []).push(r); }
+  });
+  const worst = rs => rs.reduce((w, r) => XCAT_ORDER.indexOf(r.c) < XCAT_ORDER.indexOf(w) ? r.c : w, 'C1');
+  const soCat = {}, poCat = {};
+  Object.keys(bySo).forEach(so => soCat[so] = worst(bySo[so]));
+  Object.keys(byPo).forEach(po => poCat[po] = worst(byPo[po]));
+  return XCAT_CACHE = { byLine, byPo, bySo, soCat, poCat };
+}
+const xCatPill = (c, extra) => `<span class="pill ${XCAT_INFO[c].sev}" title="${xe(XCAT_INFO[c].label + (extra ? ' — ' + extra : ''))}"><span class="dot"></span>${c}</span>`;
+function xCatReason(r){
+  if (!r.jc) return 'No job card linked to this PO line yet';
+  const rm = r.rm ? `RM confirmed${r.jc.rmBlocked.by ? ' by ' + r.jc.rmBlocked.by : ''}` : 'RM not confirmed on job card ' + r.jc.jobCardNumber;
+  const fab = r.fab.note || r.fab.items.map(i => i.name + ': ' + (i.status === 'received' ? 'received' : i.status === 'in_transit' ? 'in transit' : i.status === 'awaiting_dispatch' ? 'tagged, not dispatched' : 'no tag')).join('; ');
+  return rm + ' · ' + fab;
+}
+function xSetRm(jc, on, how){
+  const cur = jc.rmBlocked || { on:false, history:[] };
+  if (!!cur.on === !!on) return false;
+  const ev = { on:!!on, by:actingUserName(), at:nowIso(), how };
+  jc.rmBlocked = Object.assign({}, ev, { history:(cur.history || []).concat([ev]) });
+  return true;
+}
+const _raCat = renderAll; renderAll = function(){ XCAT_CACHE = null; return _raCat.apply(this, arguments); };
+
+// ---- pills in the PO Progress Tracker (SO row and each line)
+const _soRiskPillCat = soRiskPill;
+soRiskPill = function(so){
+  const h = _soRiskPillCat.apply(this, arguments);
+  if (!xCatOn()) return h;
+  const c = xCatIndex().soCat[so]; return c ? h + ' ' + xCatPill(c, 'worst open SKU line on this SO') : h;
+};
+const _lcPillCat = lifecyclePill;
+lifecyclePill = o => { const h = _lcPillCat(o); if (!xCatOn()) return h; const r = xCatIndex().byLine.get(o.id);
+  return r ? h + ' ' + (r.packed ? '<span class="pill neutral" title="Packing done on the job card"><span class="dot"></span>Packed</span>' : xCatPill(r.c, xCatReason(r))) : h; };
+
+// ---- readiness view: PO Progress Tracker › "Readiness C0–C4" chip
+const _rolCat = renderOrdersList;
+renderOrdersList = function(){
+  if (!xCatOn()){ if (state.xPoFilter === 'xcat') state.xPoFilter = 'all'; return _rolCat.apply(this, arguments); }
+  if (state.xPoFilter !== 'xcat'){
+    const h = _rolCat.apply(this, arguments);
+    return h.replace('<div class="filter-row">', `<div class="filter-row"><button class="filter-chip" data-xpo-filter="xcat" aria-pressed="false" title="Admin preview until go-live">Readiness C0–C4</button>`);
+  }
+  return xCatView();
+};
+function xCatView(){
+  const X_ = xCatIndex(), cf = state.xCatF || 'all', q = (state.xCatQ || '').trim().toLowerCase();
+  const sos = Object.keys(X_.bySo);
+  const cnt = { all:sos.length }; XCAT_ORDER.forEach(c => cnt[c] = sos.filter(so => X_.soCat[so] === c).length);
+  const lineCnt = {}; XCAT_ORDER.forEach(c => lineCnt[c] = 0); X_.byLine.forEach(r => { if (!r.packed) lineCnt[r.c]++; });
+  let rows = sos.filter(so => cf === 'all' || X_.soCat[so] === cf).map(so => ({ so, h:DPI_BY_SO[so] || { so, customer:(X_.bySo[so][0].o.customer || ''), date:'' }, rs:X_.bySo[so] }));
+  if (q) rows = rows.filter(x => (x.so + ' ' + x.h.customer).toLowerCase().includes(q) || x.rs.some(r => (r.o.po + ' ' + r.o.sku + ' ' + r.o.article + ' ' + (r.jc ? r.jc.jobCardNumber : '')).toLowerCase().includes(q)));
+  rows.sort((a, b) => XCAT_ORDER.indexOf(X_.soCat[a.so]) - XCAT_ORDER.indexOf(X_.soCat[b.so]) || (b.h.date || '').localeCompare(a.h.date || ''));
+  const open = state.xCatOpen || (state.xCatOpen = new Set());
+  const lim = state.xCatLimit || 100, shown = rows.slice(0, lim);
+  const fabTxt = r => r.fab.note ? xe(r.fab.note) : r.fab.items.map(i => `${xe(i.name)} <span class="cell-sub">${i.status === 'received' ? '✓ received' : i.status === 'in_transit' ? 'in transit' : i.status === 'awaiting_dispatch' ? 'tagged, not dispatched' : 'no tag'}</span>`).join('<br>');
+  return `
+    <div class="preview-banner">${icon('check')} <div><strong>Material readiness — admin preview until go-live.</strong> One category per open MFPL factory SKU line; a PO or SO shows its worst line (packed lines left out). Worst first: ${XCAT_ORDER.map(c => `<b>${c}</b> ${XCAT_INFO[c].label}`).join(' · ')}. "RM confirmed" is the job card tick <i>All raw material (except fabric) available &amp; blocked</i>; fabric counts as in when every fabric listed on the order line has a received tag in the Furnishings Tag Station.</div></div>
+    <div class="toolbar" style="margin-top:18px;">
+      <div class="search">${icon('grid')}<input id="xCatQ" placeholder="Search SO, customer, PO, SKU or job card #" value="${xe(state.xCatQ || '')}"></div>
+      <div class="filter-row">
+        <button class="filter-chip" data-xpo-filter="all" aria-pressed="false">← PO tracker</button>
+        ${['all'].concat(XCAT_ORDER).map(c => `<button class="filter-chip" data-xcat-f="${c}" aria-pressed="${cf === c}" ${c !== 'all' ? `title="${xe(XCAT_INFO[c].label)}"` : ''}>${c === 'all' ? 'All SOs' : c} (${cnt[c]})</button>`).join('')}
+      </div>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin:-6px 0 10px;flex-wrap:wrap;"><span class="cell-sub">Open SKU lines: ${XCAT_ORDER.map(c => `${c} ${lineCnt[c]}`).join(' · ')}</span><button class="btn btn-ghost btn-sm" id="xCatCsv">Download lines CSV</button></div>
+    <div class="card table-wrap"><table class="grid-table">
+      <thead><tr><th></th><th>Sales order / Customer</th><th>SO date</th><th>Category</th><th>Open SKU lines</th></tr></thead>
+      <tbody>${shown.map(({ so, h, rs }) => {
+        const isOpen = open.has(so), per = {}; rs.forEach(r => per[r.c] = (per[r.c] || 0) + 1);
+        return `<tr class="clickable" data-xcat-toggle="${xe(so)}"><td class="mono">${isOpen ? '−' : '+'}</td>
+          <td><div class="cell-primary">${xe(so)}</div><div class="cell-sub">${xe(h.customer || '')}</div></td><td>${h.date ? fmtDate(h.date) : '—'}</td>
+          <td>${xCatPill(X_.soCat[so], XCAT_INFO[X_.soCat[so]].label)} <span class="cell-sub">${xe(XCAT_INFO[X_.soCat[so]].label)}</span></td>
+          <td>${XCAT_ORDER.filter(c => per[c]).map(c => `${c} × ${per[c]}`).join(' · ')}</td></tr>
+          ${isOpen ? `<tr><td colspan="5" style="padding:0;"><table class="grid-table" style="background:var(--surface-sunken);">
+            <thead><tr><th style="padding-left:34px;">PO / SKU</th><th>Job card</th><th>RM (except fabric)</th><th>Fabric</th><th>Category</th></tr></thead>
+            <tbody>${rs.slice().sort((a, b) => a.o.po.localeCompare(b.o.po) || XCAT_ORDER.indexOf(a.c) - XCAT_ORDER.indexOf(b.c)).map(r => `<tr>
+              <td style="padding-left:34px;"><div class="cell-primary"><button class="btn-text" data-open="${xe(r.o.id)}">${xe(r.o.article || r.o.sku)}</button></div><div class="cell-sub mono">${xe(r.o.po)} · ${xe(r.o.sku)} · PO ${X_.poCat[r.o.po] || '—'}</div></td>
+              <td>${r.jc ? `<button class="btn-text" data-xcat-jc="${xe(r.jc.id)}">${xe(r.jc.jobCardNumber)}</button>` : '<span class="cell-sub">none</span>'}</td>
+              <td>${r.jc ? (r.rm ? `✓ <span class="cell-sub">${xe(r.jc.rmBlocked.by || '')}${r.jc.rmBlocked.at ? ', ' + fmtDate(r.jc.rmBlocked.at.slice(0, 10)) : ''}${r.jc.rmBlocked.how ? ' (' + xe(r.jc.rmBlocked.how) + ')' : ''}</span>` : 'Not confirmed') : '—'}</td>
+              <td>${fabTxt(r)}</td><td>${xCatPill(r.c, xCatReason(r))}</td></tr>`).join('')}</tbody></table></td></tr>` : ''}`;
+      }).join('') || `<tr><td colspan="5"><div class="empty-note">No sales orders match.</div></td></tr>`}</tbody>
+    </table></div>
+    ${rows.length > lim ? `<div style="margin-top:10px;display:flex;gap:10px;align-items:center;"><span class="cell-sub">Showing ${lim} of ${rows.length}.</span><button class="btn btn-ghost btn-sm" id="xCatMore">Show 100 more</button></div>` : ''}`;
+}
+function xCatCsv(){
+  const X_ = xCatIndex(), q = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+  const head = ['SO Number', 'Customer', 'SO Category', 'PO Number', 'PO Category', 'Article Code', 'Article Name', 'Line Category', 'Packed', 'Job Card #', 'RM (except fabric) available & blocked', 'RM confirmed by', 'RM confirmed on', 'RM how', 'Fabrics', 'Reason'];
+  const lines = [head.map(q).join(',')];
+  X_.byLine.forEach(r => { const o = r.o, b = r.jc && r.jc.rmBlocked;
+    lines.push([o.so, o.customer, X_.soCat[o.so] || '', o.po, X_.poCat[o.po] || '', o.sku, o.article, r.packed ? '' : r.c, r.packed ? 'Yes' : '', r.jc ? r.jc.jobCardNumber : '', r.rm ? 'Yes' : 'No', r.rm ? b.by : '', r.rm && b.at ? b.at.slice(0, 10) : '', r.rm ? b.how : '',
+      r.fab.note || r.fab.items.map(i => i.name + ' (' + i.status.replace('_', ' ') + ')').join('; '), xCatReason(r)].map(q).join(',')); });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + lines.join('\r\n')], { type:'text/csv' }));
+  a.download = 'Material readiness C0-C4 ' + todayStr() + '.csv'; document.body.appendChild(a); a.click(); a.remove();
+}
+
+// ---- order line detail: category card
+const _rodCat = renderOrderDetail;
+renderOrderDetail = function(orderId){
+  const h = _rodCat.apply(this, arguments);
+  if (!xCatOn()) return h;
+  const r = xCatIndex().byLine.get(orderId); if (!r) return h;
+  const box = `<div class="readonly-banner" style="margin-bottom:12px;display:block;">${r.packed ? '<b>Packed</b> — left out of the C0–C4 categories.' : `${xCatPill(r.c)} <b>${xe(XCAT_INFO[r.c].label)}</b> <span class="cell-sub">(admin preview)</span>`}<div class="cell-sub" style="margin-top:4px;">${xe(xCatReason(r))}</div></div>`;
+  const i = h.indexOf('<div class="card'); return i < 0 ? box + h : h.slice(0, i) + box + h.slice(i);
+};
+
+// ---- Job Card Station: the tick on the capture form and on the card's page
+const _rjcCat = renderJobCardCapture;
+renderJobCardCapture = function(){
+  let h = _rjcCat.apply(this, arguments);
+  const d = state.jobcardDraft; if (!d || !xCatOn()) return h;
+  const amber = d.rmFromScan && !d.rmTouched;
+  const sec = `<div class="form-section"><div class="fs-head"><h3>Raw material</h3></div>
+      <label style="display:flex;gap:10px;align-items:flex-start;${amber ? 'outline:2px solid var(--warn);outline-offset:4px;border-radius:4px;' : ''}">
+        <input type="checkbox" id="xRmBlocked" ${d.rmBlocked ? 'checked' : ''} ${xRmCanEdit() ? '' : 'disabled'} style="margin-top:3px;">
+        <span><b>All raw material (except fabric) available &amp; blocked</b><div class="cell-sub">${amber ? 'Ticked because the card says so — check the photo; saving confirms it.' : xRmCanEdit() ? 'Tick when the card says so, or when the factory confirms it. Fabric is tracked separately by its tags.' : 'Only factory or admin can change this.'}${d.rmPrev ? ' Currently confirmed on the saved card.' : ''}</div></span>
+      </label></div>`;
+  return h.replace(/<div class="form-section">\s*<div class="fs-head"><h3>Production stages<\/h3>/, m => sec + m);
+};
+const _rjcdCat = renderJobCardDetail;
+renderJobCardDetail = function(id){
+  const h = _rjcdCat.apply(this, arguments);
+  const jc = JOB_CARDS.find(x => x.id === id); if (!jc || !xCatOn()) return h;
+  const b = jc.rmBlocked, on = !!(b && b.on);
+  const hist = ((b && b.history) || []).slice().reverse().map(e => `${e.on ? 'Ticked' : 'Unticked'} by ${xe(e.by)} · ${fmtDT(e.at)} (${xe(e.how)})`).join('<br>');
+  const fact = `<div><div class="f-k">All RM (except fabric) available &amp; blocked</div><div class="f-v">${on ? 'Yes' : 'No'}${xRmCanEdit() ? ` <button class="btn-text" data-xrm-toggle="${xe(jc.id)}">${on ? 'Untick' : 'Tick'}</button>` : ''}</div>${hist ? `<div class="cell-sub" style="margin-top:4px;">${hist}</div>` : ''}</div>`;
+  return h.replace('<div class="order-facts">', '<div class="order-facts">' + fact);
+};
+
+// scan: the reader's rmBlocked pre-ticks the box (never unticks a saved card); a rescan keeps the saved tick
+const _xJcApplyCat = xJcApply;
+xJcApply = function(R){
+  const cur = state.jobcardDraft || {};
+  const out = _xJcApplyCat.apply(this, arguments);
+  const d = state.jobcardDraft, num = (d.jobCardNumber || '').trim().toLowerCase();
+  const ex = num && JOB_CARDS.find(j => String(j.jobCardNumber).trim().toLowerCase() === num);
+  const saved = !!(ex && ex.rmBlocked && ex.rmBlocked.on), read = !!(R && R.rmBlocked);
+  d.rmPrev = saved; d.rmBlocked = cur.rmTouched ? !!cur.rmBlocked : (saved || read); d.rmTouched = !!cur.rmTouched; d.rmFromScan = read && !saved && !cur.rmTouched;
+  if (d.rmFromScan && xCatOn()) out.unsure.push('All raw material available & blocked (ticked from the card)');
+  // keep the exact PO line picked (a PO can have several SKUs)
+  d.linkedCode = cur.linkedCode || (ex && ex.linkedPo === d.linkedPo ? ex.linkedArticleCode : '') || '';
+  return out;
+};
+const _sjdCat = saveJobcardDraft;
+saveJobcardDraft = function(){
+  const d = state.jobcardDraft;
+  const num = d && (d.jobCardNumber || '').trim().toLowerCase();
+  _sjdCat.apply(this, arguments);
+  const jc = num && JOB_CARDS.find(j => String(j.jobCardNumber).trim().toLowerCase() === num);
+  if (!jc || !d) return;
+  // the PO line picked, not the first line of that PO
+  const row = d.linkedPo && d.linkedCode ? JOBCARD_ORDERS.find(r => r.po === d.linkedPo && r.articleCode === d.linkedCode) : null;
+  if (row){ jc.linkedArticleCode = row.articleCode; jc.linkedArticleName = row.articleName; jc.linkedCustomerName = row.customer; }
+  if (xCatOn() && xRmCanEdit() && (d.rmTouched || d.rmFromScan)) xSetRm(jc, !!d.rmBlocked, d.rmTouched ? 'manual' : 'from the card, confirmed on save');
+};
+// the linked-order chip shows the PO line picked
+const _rjccfCat = renderJobCardCaptureForm;
+renderJobCardCaptureForm = function(d){
+  const h = _rjccfCat.apply(this, arguments);
+  if (!d || !d.linkedPo || !d.linkedCode) return h;
+  const first = JOBCARD_ORDERS.find(r => r.po === d.linkedPo), row = JOBCARD_ORDERS.find(r => r.po === d.linkedPo && r.articleCode === d.linkedCode);
+  if (!first || !row || first === row) return h;
+  return h.replace(`${first.articleName} <span class="mono">(${first.po})</span>`, `${row.articleName} <span class="mono">(${row.po} · ${xe(row.articleCode)})</span>`);
+};
+
+extraWiring.push(() => {
+  // PO line pick in Job Card capture: remember the article as well as the PO (runs before the app's own click handler)
+  const lr = document.querySelector('.link-results');
+  if (lr && state.jobcardDraft) lr.addEventListener('click', e => {
+    const el = e.target.closest('[data-jc-link-pick]'); if (!el) return;
+    const i = [...lr.querySelectorAll('[data-jc-link-pick]')].indexOf(el);
+    const r = jobcardOrderMatches(state.jobcardDraft.linkQuery || '')[i];
+    state.jobcardDraft.linkedCode = r && r.po === el.dataset.jcLinkPick ? r.articleCode : '';
+  }, true);
+  const un = document.getElementById('jcUnlink'); if (un && state.jobcardDraft) un.addEventListener('click', () => { if (state.jobcardDraft) state.jobcardDraft.linkedCode = ''; }, true);
+  if (!xCatOn()) return;
+  const rb = document.getElementById('xRmBlocked');
+  if (rb) rb.addEventListener('change', () => { const d = state.jobcardDraft; if (!d) return; d.rmBlocked = rb.checked; d.rmTouched = true; renderAll(); });
+  document.querySelectorAll('[data-xrm-toggle]').forEach(b => b.addEventListener('click', () => {
+    const jc = JOB_CARDS.find(x => x.id === b.dataset.xrmToggle); if (!jc || !xRmCanEdit()) return;
+    xSetRm(jc, !(jc.rmBlocked && jc.rmBlocked.on), 'manual'); renderAll();
+  }));
+  document.querySelectorAll('[data-xcat-f]').forEach(b => b.addEventListener('click', () => { state.xCatF = b.dataset.xcatF; state.xCatLimit = 100; renderAll(); }));
+  document.querySelectorAll('[data-xcat-toggle]').forEach(b => b.addEventListener('click', () => { const s = state.xCatOpen || (state.xCatOpen = new Set()); const so = b.dataset.xcatToggle; s.has(so) ? s.delete(so) : s.add(so); renderAll(); }));
+  document.querySelectorAll('[data-xcat-jc]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); state.module = 'jobcards'; state.jobcardTab = 'dashboard'; state.jobcardOpenId = b.dataset.xcatJc; renderAll(); }));
+  const q = document.getElementById('xCatQ');
+  if (q) q.addEventListener('input', () => { state.xCatQ = q.value; renderAll(); const el = document.getElementById('xCatQ'); if (el){ el.focus(); el.setSelectionRange(el.value.length, el.value.length); } });
+  const m = document.getElementById('xCatMore'); if (m) m.addEventListener('click', () => { state.xCatLimit = (state.xCatLimit || 100) + 100; renderAll(); });
+  const c = document.getElementById('xCatCsv'); if (c) c.addEventListener('click', xCatCsv);
+});
+window.__xcat = { index:xCatIndex, reason:xCatReason };   // for checks from the console
+
 if (!routePublic() && state.currentUser) renderAll();
 })();
 
