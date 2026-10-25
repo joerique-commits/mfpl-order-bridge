@@ -765,7 +765,8 @@ var STORES = {
   ob_permissions:{ t:'value' },
   ob_fabric_entries:{ t:'list', n:16, dir:'desc' }, ob_fabric_challans:{ t:'list', n:8, dir:'desc' }, ob_fabric_receipts:{ t:'list', n:8, dir:'desc' },
   ob_stock_blocks:{ t:'list', n:8, dir:'desc' }, ob_wh_tags:{ t:'list', n:16, dir:'desc' }, ob_job_cards:{ t:'list', n:16, dir:'desc' },
-  ob_fab_locations:{ t:'value' }
+  ob_fab_locations:{ t:'value' },
+  ob_route_units:{ t:'value' }
 };
 var USER_RE = /^ob_(profiles$|approver_me$|inbox_read_|inbox_seen_|mute_|unfollow_)/;   // kept per signed-in user
 function cfgFor(k){ if (Object.prototype.hasOwnProperty.call(STORES, k)) return STORES[k]; if (USER_RE.test(k) && /^[A-Za-z0-9_]+$/.test(k)) return { t:'user' }; return null; }
@@ -1076,7 +1077,7 @@ OB.expPublish = async function(redraw){
     say('Building the data from ' + files.length + ' export(s)…');
     await new Promise(function(r){ setTimeout(r, 30); });
     // SOs with saved work are never trimmed by the Open SOs list: pass the saved stores' text (SO numbers are long and unique)
-    var savedText = '', NOT_WORK = /^ob_(activity|act_parts|permissions|slot_settings|approvers|fab_locations|risk_golive)$/;
+    var savedText = '', NOT_WORK = /^ob_(activity|act_parts|permissions|slot_settings|approvers|fab_locations|risk_golive|route_units)$/;
     // only records with a real value count: the blank placeholder detail every PO line gets doesn't
     var strip = function(v){ if (v === null || v === '' || v === false) return undefined; if (Array.isArray(v)){ var a = v.map(strip).filter(function(x){ return x !== undefined; }); return a.length ? a : undefined; }
       if (typeof v === 'object'){ var o = {}, n = 0; Object.keys(v).forEach(function(k){ if (k === '_k') return; var x = strip(v[k]); if (x !== undefined){ o[k] = x; n++; } }); return n ? o : undefined; } return v; };
@@ -15081,6 +15082,166 @@ extraWiring.push(() => {
   const c = document.getElementById('xpCsv'); if (c) c.addEventListener('click', xpCsv);
 });
 window.__xproj = { compute:xProjCompute };   // for checks from the console
+
+// ---------------------------------------------------------------- Last Mile Ops › Route simulator (JK, 26 Oct)
+// Admin-only preview until after go-live (xCatOn, from block_cat.js). Advisory only: it never moves a booking,
+// and any-date booking stays as it is. Settings below are JK's; they can be tried out here without saving.
+//   Fleet: 2 milk-run trucks (12×7×9 ft) of about 15 armchair boxes each, 3 drops per truck per day, Bangalore only,
+//   dispatch days Mon / Thu / Fri. A client accepts delivery up to 2 days earlier or 1 day later than booked.
+//   Load: armchair 1, 2-seater 2, 3-seater 3, bed 2, dining table 3, storage 3, dining / study chair 0.5 (per piece).
+//   A drop bigger than one truck goes on a hired vehicle and is left out of the plan.
+// Units per SKU the name doesn't give away are set by admin in the simulator (shared store ob_route_units).
+const XR_DEF = { trucks:2, cap:15, drops:3, days:[1, 4, 5], early:2, late:1, weeks:4, unbooked:false };
+const XR_RULES = [
+  [/dining\s*tables?|\b\d+(\.\d+)?\s*(ft|feet|seater)\b.*\b(top|granite|marble|wood|stone|glass)\b|\b(stone|marble|granite|glass|wood)\s*top\b|\bgranite\b/i, 3, 'Dining table'],
+  [/\b(dining|study)\s*chairs?\b/i, 0.5, 'Dining / study chair'],
+  [/\barm\s*chairs?\b|\blounge\s*chairs?\b|\baccent\s*chairs?\b|\brecliners?\b|\b(1|one|single)\s*-?\s*seat(er)?\b|(_|\b)1S\b/i, 1, 'Armchair'],
+  [/\b(3|three)\s*-?\s*seat(er)?s?\b|(_|\b)3S\b/i, 3, '3-seater'],
+  [/\b(2|two)\s*-?\s*seat(er)?s?\b|(_|\b)2S\b/i, 2, '2-seater'],
+  [/\bbeds?\b|\b(king|queen)\b/i, 2, 'Bed'],
+  [/\bsideboards?\b|\bcabinets?\b|\bwardrobes?\b|\bstorage\b|\bchests?\b|\bdrawers?\b|\bbook\s*(shelf|shelves|case)\b|\bshelf\b|\btv\s*units?\b|\bcrockery\b|\bbuffet\b|\bdresser\b/i, 3, 'Storage'],
+];
+const xrDay = d => new Date(d + 'T00:00:00Z').getUTCDay();
+const XR_DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function xrSet(){ return state.xr || (state.xr = JSON.parse(JSON.stringify(XR_DEF))); }
+function xrUnitsMap(){ try { return JSON.parse(localStorage.getItem('ob_route_units') || '{}') || {}; } catch(e){ return {}; } }
+function xrUnits(sku, name, map){
+  const m = map[sku]; if (m && m.u != null) return { u:Number(m.u), how:'set', label:m.label || 'Set by admin' };
+  const r = XR_RULES.find(([re]) => re.test(name || '') || re.test(sku || ''));
+  return r ? { u:r[1], how:'rule', label:r[2] } : { u:1, how:'unknown', label:'Not known — counted as 1' };
+}
+function xrSim(){
+  const S = xrSet(), today = todayStr(), end = addD(today, S.weeks * 7), map = xrUnitsMap();
+  const drops = [], out = [], unknown = {};
+  const unitsOf = items => items.reduce((s, i) => { const k = xrUnits(i.sku, i.article, map); if (k.how === 'unknown'){ const x = unknown[i.sku] = unknown[i.sku] || { sku:i.sku, name:i.article, qty:0, sos:new Set() }; x.qty += Number(i.qty) || 0; x.sos.add(i.so); }
+    return s + k.u * (Number(i.qty) || 0); }, 0);
+  const booked = new Set();
+  SLOT_BOOKINGS.forEach(b => {
+    if (b.type !== 'dispatch' || !b.date) return;
+    (b.items || []).forEach(i => i.orderId && booked.add(i.orderId)); if (b.orderId) booked.add(b.orderId);
+    if (!['requested', 'confirmed', 'approved'].includes(b.status)) return;
+    if (b.date < today || b.date > end) return;
+    const h = DPI_BY_SO[b.so] || {};
+    const d = { id:b.id, so:b.so, customer:h.customer || '', want:b.date, status:b.status, vendor:b.vendor || '', items:(b.items || []).map(i => Object.assign({ so:b.so }, i)), booked:true };
+    if (h.city !== 'BNG'){ out.push(Object.assign(d, { why:'Outside Bangalore (' + (h.city || '?') + ')' })); return; }
+    d.units = unitsOf(d.items); drops.push(d);
+  });
+  if (S.unbooked){   // lines not booked yet, on their factory date + 5 working days; one drop per SO per date
+    const g = {};
+    ORDERS.forEach(o => { if (booked.has(o.id) || o.lifecycle !== 'po_confirmed' || !effF(o)) return; const h = DPI_BY_SO[o.so]; if (!h || h.cancelled || h.city !== 'BNG') return;
+      const want = xpWorkDays(effF(o), 5); if (want < today || want > end) return;
+      const k = o.so + '|' + want; (g[k] = g[k] || { id:'(not booked)', so:o.so, customer:h.customer, want, status:'not booked', vendor:'', items:[], booked:false }).items.push({ so:o.so, sku:o.sku, article:o.article, qty:o.qty || 1, orderId:o.id }); });
+    Object.values(g).forEach(d => { d.units = unitsOf(d.items); drops.push(d); });
+  }
+  // dispatch days in range
+  const runs = {};   // date -> [ {t, load, drops:[]} ]
+  const runFor = date => runs[date] || (runs[date] = Array.from({ length:S.trucks }, (_, t) => ({ t:t + 1, load:0, drops:[] })));
+  const shifts = [0]; for (let k = 1; k <= Math.max(S.early, S.late); k++){ if (k <= S.early) shifts.push(-k); if (k <= S.late) shifts.push(k); }   // 0, −1, +1, −2 …
+  const hired = [], noRoom = [];
+  drops.sort((a, b) => a.want.localeCompare(b.want) || b.units - a.units);
+  drops.forEach(d => {
+    if (d.units > S.cap){ hired.push(d); return; }
+    for (const s of shifts){
+      const day = addD(d.want, s); if (day < today || !S.days.includes(xrDay(day))) continue;
+      const fit = runFor(day).filter(r => r.drops.length < S.drops && r.load + d.units <= S.cap + 1e-9).sort((a, b) => (S.cap - a.load - d.units) - (S.cap - b.load - d.units))[0];
+      if (fit){ fit.drops.push(d); fit.load += d.units; d.day = day; d.shift = s; d.truck = fit.t; return; }
+    }
+    noRoom.push(d);
+  });
+  Object.keys(runs).forEach(k => { if (!runs[k].some(r => r.drops.length)) delete runs[k]; });
+  const placed = drops.filter(d => d.day);
+  return { S, today, end, drops, placed, moved:placed.filter(d => d.shift), hired, noRoom, out, runs, unknown:Object.values(unknown).map(x => Object.assign(x, { sos:[...x.sos] })) };
+}
+function xrView(){
+  const R = xrSim(), S = R.S, map = xrUnitsMap();
+  const used = Object.values(R.runs).flat().filter(r => r.drops.length);
+  const util = used.length ? Math.round(100 * used.reduce((s, r) => s + r.load, 0) / (used.length * S.cap)) : 0;
+  const num = (k, v, w) => `<input type="number" data-xr-n="${k}" value="${v}" min="0" step="${k === 'cap' ? '0.5' : '1'}" style="width:${w || 64}px;">`;
+  const shiftTxt = s => s ? `${s < 0 ? '' : '+'}${s} day${Math.abs(s) > 1 ? 's' : ''}` : 'as booked';
+  const dropTxt = d => `<div style="margin:2px 0;"><b>${xe(d.customer || d.so)}</b> <span class="cell-sub">${xe(d.so)} · ${d.units % 1 ? d.units.toFixed(1) : d.units} unit(s) · ${d.booked ? xe(d.id) : 'not booked yet'}${d.shift ? ` · <span style="color:var(--warn);">${shiftTxt(d.shift)} (booked ${fmtDate(d.want)})</span>` : ''}</span></div>`;
+  const days = Object.keys(R.runs).sort();
+  const listRow = (d, extra) => `<tr><td>${xe(d.booked ? d.id : 'not booked')}</td><td><div class="cell-primary">${xe(d.so)}</div><div class="cell-sub">${xe(d.customer)}</div></td><td>${fmtDate(d.want)}</td><td class="num">${d.units != null ? (d.units % 1 ? d.units.toFixed(1) : d.units) : '—'}</td><td>${extra}</td></tr>`;
+  const tbl = (title, rows, head) => rows.length ? `<h3 style="margin:22px 0 8px;">${title} (${rows.length})</h3><div class="card table-wrap"><table class="grid-table"><thead><tr><th>Booking</th><th>SO / Customer</th><th>Booked for</th><th class="num">Units</th><th>${head}</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>` : '';
+  return `
+    <div class="preview-banner">${icon('truck')} <div><strong>Route simulator — admin preview until go-live.</strong> Fits the open Bangalore dispatch bookings onto the milk-run trucks and shows which ones would move, which need a hired vehicle and which don't fit. Nothing here changes a booking, and bookings can still be made for any date. Change the settings to try out other fleets; they aren't saved.</div></div>
+    <div class="card" style="padding:14px 16px;margin-bottom:14px;">
+      <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:end;">
+        <div class="field"><label>Trucks</label>${num('trucks', S.trucks)}</div>
+        <div class="field"><label>Units per truck</label>${num('cap', S.cap)}</div>
+        <div class="field"><label>Drops per truck per day</label>${num('drops', S.drops)}</div>
+        <div class="field"><label>Dispatch days</label><div style="display:flex;gap:6px;">${[1, 2, 3, 4, 5, 6].map(d => `<label style="display:flex;gap:3px;align-items:center;font-weight:500;"><input type="checkbox" data-xr-day="${d}" ${S.days.includes(d) ? 'checked' : ''}>${XR_DOW[d]}</label>`).join('')}</div></div>
+        <div class="field"><label>Client accepts (days)</label><div style="display:flex;gap:6px;align-items:center;">−${num('early', S.early, 48)} / +${num('late', S.late, 48)}</div></div>
+        <div class="field"><label>Weeks ahead</label>${num('weeks', S.weeks, 56)}</div>
+        <label style="display:flex;gap:6px;align-items:center;font-weight:500;"><input type="checkbox" id="xrUnbooked" ${S.unbooked ? 'checked' : ''}> Add lines not booked yet (factory date + 5 working days)</label>
+        <button class="btn-text" id="xrReset">Back to the standard settings</button>
+      </div>
+      <div class="cell-sub" style="margin-top:8px;">Load per piece: armchair 1 · 2-seater 2 · 3-seater 3 · bed 2 · dining table 3 · storage 3 · dining / study chair 0.5. Read from the article name; anything else is set below.</div>
+    </div>
+    <div class="card" style="padding:14px 16px;margin-bottom:14px;display:flex;gap:26px;flex-wrap:wrap;">
+      ${[['Drops planned', R.placed.length + ' of ' + R.drops.length], ['Moved from the booked date', R.moved.length], ['Hired vehicle (over ' + S.cap + ' units)', R.hired.length], ["Don't fit", R.noRoom.length], ['Truck runs', used.length + ' · ' + util + '% full'], ['Left out (not Bangalore)', R.out.length]].map(([l, v]) => `<div><div class="cell-sub">${l}</div><div style="font-size:20px;font-weight:650;">${v}</div></div>`).join('')}
+      <div style="margin-left:auto;align-self:center;"><button class="btn btn-ghost btn-sm" id="xrCsv">Download plan CSV</button></div>
+    </div>
+    <div class="card table-wrap"><table class="grid-table">
+      <thead><tr><th>Dispatch day</th>${Array.from({ length:S.trucks }, (_, i) => `<th>Truck ${i + 1}</th>`).join('')}</tr></thead>
+      <tbody>${days.map(day => `<tr><td><b>${XR_DOW[xrDay(day)]}</b> ${fmtDate(day)}</td>${R.runs[day].map(r => `<td style="vertical-align:top;">${r.drops.length ? `<div class="cell-sub" style="margin-bottom:4px;">${r.drops.length} drop(s) · ${r.load % 1 ? r.load.toFixed(1) : r.load} / ${S.cap} units</div><div style="height:5px;background:var(--surface-sunken);border-radius:3px;margin-bottom:6px;"><div style="height:5px;width:${Math.min(100, Math.round(100 * r.load / S.cap))}%;background:var(--accent, #2f6f5e);border-radius:3px;"></div></div>${r.drops.map(dropTxt).join('')}` : '<span class="cell-sub">—</span>'}</td>`).join('')}</tr>`).join('') || `<tr><td colspan="${S.trucks + 1}"><div class="empty-note">No open Bangalore dispatch bookings between ${fmtDate(R.today)} and ${fmtDate(R.end)}.</div></td></tr>`}</tbody></table></div>
+    ${tbl('Moved from the booked date', R.moved.map(d => listRow(d, `${fmtDate(d.day)} (${shiftTxt(d.shift)}), truck ${d.truck}`)), 'Planned')}
+    ${tbl('Hired vehicle — left out of the plan', R.hired.map(d => listRow(d, d.vendor ? 'Booked with ' + xe(d.vendor) : 'More than one truck')), 'Note')}
+    ${tbl("Don't fit on the trucks", R.noRoom.map(d => listRow(d, 'No room on a dispatch day from −' + S.early + ' to +' + S.late + ' days: hired vehicle or an extra run')), 'Note')}
+    ${tbl('Left out — not Bangalore', R.out.map(d => listRow(d, xe(d.why))), 'Why')}
+    <h3 style="margin:22px 0 8px;">Load units per SKU</h3>
+    <div class="cell-sub" style="margin-bottom:8px;">SKUs in these drops that the name doesn't place in a category count as 1 unit until you set them. What you set here is saved for everyone and used from then on.</div>
+    <div class="card table-wrap"><table class="grid-table"><thead><tr><th>SKU</th><th>Article</th><th class="num">Qty in drops</th><th>Units per piece</th><th></th></tr></thead><tbody>
+      ${R.unknown.map(x => `<tr><td class="mono">${xe(x.sku)}</td><td>${xe(x.name || '')}</td><td class="num">${x.qty}</td><td><select data-xr-u="${xe(x.sku)}"><option value="">Choose…</option>${[['Armchair', 1], ['2-seater', 2], ['3-seater', 3], ['Bed', 2], ['Dining table', 3], ['Storage', 3], ['Dining / study chair', 0.5]].map(([l, u]) => `<option value="${u}|${l}">${l} (${u})</option>`).join('')}<option value="custom">Other — type units…</option></select></td><td><button class="btn btn-ghost btn-sm" data-xr-usave="${xe(x.sku)}">Save</button></td></tr>`).join('') || '<tr><td colspan="5"><div class="empty-note">Every SKU in these drops has a load.</div></td></tr>'}
+      ${Object.keys(map).length ? `<tr><td colspan="5" class="cell-sub">Set so far: ${Object.keys(map).sort().map(k => `<span class="mono">${xe(k)}</span> ${map[k].u} <button class="btn-text" data-xr-uclear="${xe(k)}">clear</button>`).join(' · ')}</td></tr>` : ''}
+    </tbody></table></div>`;
+}
+function xrCsv(){
+  const R = xrSim(), q = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+  const L = [['Plan', 'Dispatch day', 'Truck', 'Booking', 'SO Number', 'Customer', 'Booked for', 'Shift (days)', 'Units', 'Items'].map(q).join(',')];
+  const row = (plan, d) => L.push([plan, d.day || '', d.truck || '', d.booked ? d.id : 'not booked', d.so, d.customer, d.want, d.shift || 0, d.units, d.items.map(i => i.sku + ' × ' + i.qty).join('; ')].map(q).join(','));
+  R.placed.slice().sort((a, b) => a.day.localeCompare(b.day) || a.truck - b.truck).forEach(d => row('Truck', d));
+  R.hired.forEach(d => row('Hired vehicle', d)); R.noRoom.forEach(d => row("Doesn't fit", d)); R.out.forEach(d => row('Not Bangalore', d));
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + L.join('\r\n')], { type:'text/csv' }));
+  a.download = 'Route simulator ' + todayStr() + '.csv'; document.body.appendChild(a); a.click(); a.remove();
+}
+const _rlmRoute = renderLastMileOps;
+renderLastMileOps = function(){
+  if (!xCatOn()){ if (state.lastMileTab === 'xroute') state.lastMileTab = null; return _rlmRoute.apply(this, arguments); }
+  const mine = state.lastMileTab === 'xroute';
+  if (mine) state.lastMileTab = 'calendar';
+  let h = _rlmRoute.apply(this, arguments);
+  if (mine) state.lastMileTab = 'xroute';
+  const i = h.indexOf('<div class="subtabs">'); if (i < 0) return h;
+  const j = h.indexOf('</div>', i);
+  let tabs = h.slice(i, j); if (mine) tabs = tabs.replace(/aria-pressed="true"/g, 'aria-pressed="false"');
+  tabs += `<button data-lmtab="xroute" aria-pressed="${mine}">Route simulator <span class="cell-sub">(admin)</span></button>`;
+  return h.slice(0, i) + tabs + '</div>' + (mine ? xrView() : h.slice(j + 6));
+};
+extraWiring.push(() => {
+  if (!xCatOn() || state.module !== 'slots' || state.lastMileTab !== 'xroute') return;
+  const S = xrSet();
+  document.querySelectorAll('[data-xr-n]').forEach(el => el.addEventListener('change', () => { const v = Number(el.value); if (Number.isFinite(v) && v >= 0){ S[el.dataset.xrN] = el.dataset.xrN === 'cap' ? v : Math.round(v); } renderAll(); }));
+  document.querySelectorAll('[data-xr-day]').forEach(el => el.addEventListener('change', () => { const d = Number(el.dataset.xrDay); S.days = el.checked ? [...new Set(S.days.concat([d]))].sort() : S.days.filter(x => x !== d); renderAll(); }));
+  const ub = document.getElementById('xrUnbooked'); if (ub) ub.addEventListener('change', () => { S.unbooked = ub.checked; renderAll(); });
+  const rs = document.getElementById('xrReset'); if (rs) rs.addEventListener('click', () => { state.xr = null; renderAll(); });
+  const c = document.getElementById('xrCsv'); if (c) c.addEventListener('click', xrCsv);
+  document.querySelectorAll('[data-xr-usave]').forEach(b => b.addEventListener('click', () => {
+    const sku = b.dataset.xrUsave, sel = document.querySelector(`[data-xr-u="${CSS.escape(sku)}"]`); if (!sel || !sel.value) return;
+    let u, label;
+    if (sel.value === 'custom'){ u = Number((window.__xrCustom || {})[sku]); label = 'Other'; if (!(window.__xrCustom || {})[sku]) return; }
+    else { [u, label] = sel.value.split('|'); u = Number(u); }
+    if (!Number.isFinite(u) || u < 0) return;
+    const m = xrUnitsMap(); m[sku] = { u, label, by:actingUserName(), at:nowIso() }; localStorage.setItem('ob_route_units', JSON.stringify(m)); renderAll();
+  }));
+  document.querySelectorAll('[data-xr-u]').forEach(sel => sel.addEventListener('change', () => {
+    if (sel.value !== 'custom') return;
+    const td = sel.parentElement; if (td.querySelector('input')) return;
+    const inp = document.createElement('input'); inp.type = 'number'; inp.min = '0'; inp.step = '0.5'; inp.placeholder = 'units'; inp.style.cssText = 'width:70px;margin-left:6px;';
+    inp.addEventListener('input', () => { (window.__xrCustom = window.__xrCustom || {})[sel.dataset.xrU] = inp.value; }); td.appendChild(inp); inp.focus();
+  }));
+  document.querySelectorAll('[data-xr-uclear]').forEach(b => b.addEventListener('click', () => { const m = xrUnitsMap(); delete m[b.dataset.xrUclear]; localStorage.setItem('ob_route_units', JSON.stringify(m)); renderAll(); }));
+});
+window.__xroute = { sim:xrSim, units:xrUnits };   // for checks from the console
 
 if (!routePublic() && state.currentUser) renderAll();
 })();
