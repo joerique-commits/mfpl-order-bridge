@@ -14685,14 +14685,14 @@ extraWiring.push(() => {
 //   C2 RM confirmed, fabric pending · C3 RM not confirmed, fabric pending · C4 RM not confirmed, fabric received / not needed
 // "RM confirmed" = the job card tick "All raw material (except fabric) available & blocked" (factory / admin;
 // a scan can pre-tick it, the person saving confirms it; can be unticked; history kept).
-// A PO / SO takes its worst open line (packed lines don't count). Worst → best: C0, C3, C2, C4, C1.
+// A PO / SO takes its worst open line (packed lines don't count). Worst → best: C4, C0, C3, C2, C1 (JK 26 Oct).
 const xCatOn = () => !!(window.__OB && window.__OB.user && window.__OB.user.role === 'admin');
-const XCAT_ORDER = ['C0', 'C3', 'C2', 'C4', 'C1'];
+const XCAT_ORDER = ['C4', 'C0', 'C3', 'C2', 'C1'];   // JK 26 Oct: C4 is the worst
 const XCAT_INFO = {
   C0:{ sev:'critical', label:'No job card' },
   C3:{ sev:'critical', label:'RM not confirmed · fabric pending' },
   C2:{ sev:'warn', label:'RM confirmed · fabric pending' },
-  C4:{ sev:'warn', label:'RM not confirmed · fabric in' },
+  C4:{ sev:'critical', label:'RM not confirmed · fabric in' },
   C1:{ sev:'good', label:'RM confirmed · fabric in' },
 };
 const xRmCanEdit = () => ['production', 'admin'].includes(state.role);
@@ -14924,6 +14924,163 @@ extraWiring.push(() => {
   const c = document.getElementById('xCatCsv'); if (c) c.addEventListener('click', xCatCsv);
 });
 window.__xcat = { index:xCatIndex, reason:xCatReason };   // for checks from the console
+
+// ---------------------------------------------------------------- Payables & Flushout › Projection Analysis (JK, 26 Oct)
+// Admin-only preview until after go-live (xCatOn, from block_cat.js). Pre-GST throughout.
+// Money out, for POs raised after the payables cutoff (older debt sits in the InvoicedOS opening balances):
+//   Fabric  — balance on each fabric PO for a furniture SO is due 30 days after the SO's furniture (MFPL) PO;
+//             once that has passed, by 21 days before the factory date; once that has passed too, overdue.
+//   MFPL    — at least 50% of each MFPL PO paid by 30 days before its factory date; the rest when the PO flushes out.
+//             MFPL payments (Payment Expenses Report, after the cutoff) are allocated oldest PO first.
+// Money in (flushout = dispatch to the client, part or full):
+//   each open SO's value still to dispatch (SO value − Dispatch Sheet value), spread over its PO lines by cost;
+//   a line flushes on its Last Mile dispatch booking date, else factory date + 5 working days (Mon–Sat).
+const XP_FAB_UOM = /^(MTR|MTRS|METER|METRE|SQFT|SQ\.? ?FT)$/i;
+const xpNk = v => String(v || '').toUpperCase().replace(/^[A-Z0-9]+-->/, '').replace(/[^A-Z0-9]/g, '');
+const xpWorkDays = (d, n) => { let x = d, k = 0; while (k < n){ x = addD(x, 1); if (new Date(x + 'T00:00:00Z').getUTCDay() !== 0) k++; } return x; };
+const xpMonday = d => { const x = new Date(d + 'T00:00:00Z'); const w = (x.getUTCDay() + 6) % 7; return addD(d, -w); };
+let XP_CACHE = null;
+function xProjCompute(){
+  if (XP_CACHE) return XP_CACHE;
+  const today = todayStr(), cut = X.payablesCutoff || '2026-08-31';
+  const openSo = so => { const h = DPI_BY_SO[so]; return !!h && !h.cancelled && !h.ic; };
+  const items = [];   // { kind:'fabric'|'mfpl50'|'mfplBal'|'flush', dir:-1|1, so, po, vendor, amount, date|null, overdue, basis }
+  const cpBy = {}, poMeta = {};
+  X.poLines.forEach(l => { const k = l.po + '|' + l.code; cpBy[k] = (cpBy[k] || 0) + (l.cp || 0);
+    const p = poMeta[l.po] = poMeta[l.po] || { po:l.po, date:l.poDate, supplier:l.supplier, code:l.supplierCode, so:l.linkSo || l.so, cp:0, fabCp:0, uoms:{} };
+    p.cp += l.cp || 0; p.uoms[String(l.uom || '').toUpperCase()] = 1; if (XP_FAB_UOM.test(String(l.uom || '').trim())) p.fabCp += l.cp || 0; });
+  const paidByPo = {}; (X.payments || []).forEach(p => { if (p.po) paidByPo[p.po] = (paidByPo[p.po] || 0) + (p.beforeTax || 0); });
+  // order lines and their dates
+  const linesBySo = {}; ORDERS.forEach(o => { if (o.lifecycle === 'po_confirmed' && o.po && openSo(o.so)) (linesBySo[o.so] = linesBySo[o.so] || []).push(o); });
+  const book = {}; (SLOT_BOOKINGS || []).forEach(b => { if (b.type !== 'dispatch' || /reject|cancel/i.test(b.status || '') || !b.date) return;
+    (b.items || []).map(i => i.orderId).concat(b.orderId ? [b.orderId] : []).forEach(id => { if (id && (!book[id] || b.date < book[id])) book[id] = b.date; }); });
+  const flushDate = o => book[o.id] ? { d:book[o.id], how:'dispatch booking' } : effF(o) ? { d:xpWorkDays(effF(o), 5), how:'factory date + 5 working days' } : null;
+  const soF = {}, soMfplDate = {};
+  Object.keys(linesBySo).forEach(so => { linesBySo[so].forEach(o => { const f = effF(o); if (f && (!soF[so] || f < soF[so])) soF[so] = f;
+    if (MFPL_POS.has(o.po)){ const d = (poMeta[o.po] || {}).date; if (d && (!soMfplDate[so] || d < soMfplDate[so])) soMfplDate[so] = d; } }); });
+  const due = (d, basis) => !d ? { date:null, overdue:false, basis } : d < today ? { date:today, overdue:true, basis:basis + ' — was ' + fmtDate(d) } : { date:d, overdue:false, basis };
+  // ---- MFPL: oldest-first allocation of post-cutoff payments
+  const mfplOpening = (X.openingPayables || []).filter(v => MFPL_CODES.has(v.code) || /MFPL|MAGARI FURNITURE/i.test(v.vendor || '')).reduce((s, v) => s + (v.closingTaxable || 0), 0);
+  let pool = (X.payments || []).filter(p => MFPL_CODES.has(p.supplierCode) && (p.date || '') > cut).reduce((s, p) => s + (p.beforeTax || 0), 0);
+  const mfplPoolTotal = pool; pool = Math.max(0, pool - mfplOpening);
+  const mfplPos = Object.values(poMeta).filter(p => MFPL_CODES.has(p.code) && (p.date || '') > cut).sort((a, b) => (a.date || '').localeCompare(b.date || '') || a.po.localeCompare(b.po));
+  mfplPos.forEach(p => { p.paid = Math.min(p.cp, pool); pool -= p.paid; });
+  const mfplUnallocated = pool;
+  mfplPos.forEach(p => {
+    if (!openSo(p.so)) return;
+    const ls = (linesBySo[p.so] || []).filter(o => o.po === p.po);
+    const fds = ls.map(effF).filter(Boolean).sort(), fd = fds[0] || null;
+    const fls = ls.map(flushDate).filter(Boolean).map(x => x.d).sort(), flushLast = ls.length && fls.length === ls.length ? fls[fls.length - 1] : null;
+    const half = Math.max(0, 0.5 * p.cp - p.paid), bal = Math.max(0, p.cp - p.paid - half);
+    const base = { so:p.so, po:p.po, vendor:p.supplier, poDate:p.date, poValue:p.cp, paid:p.paid, factory:fd };
+    if (half > 0.5) items.push(Object.assign({ kind:'mfpl50', dir:-1, amount:half }, base, fd ? due(addD(fd, -30), '50% by 30 days before the factory date ' + fmtDate(fd)) : { date:null, overdue:false, basis:'No factory date yet' }));
+    if (bal > 0.5) items.push(Object.assign({ kind:'mfplBal', dir:-1, amount:bal }, base, flushLast ? due(flushLast, 'Balance when the PO flushes out') : { date:null, overdue:false, basis:'Flushout date not known for every line yet' }));
+  });
+  // ---- fabric POs for furniture SOs: fabric vendors (InvoicedOS "Furniture Fabrics"), lines in metres / sq ft
+  const fabVendors = new Set((X.openingPayables || []).filter(v => /fabric/i.test(v.vertical || '')).map(v => xpNk(v.vendor)));
+  const fabPos = Object.values(poMeta).filter(p => fabVendors.has(xpNk(p.supplier)) && p.fabCp > 0 && (p.date || '') > cut && openSo(p.so) && soMfplDate[p.so]);
+  fabPos.forEach(p => {
+    const bal = Math.max(0, p.fabCp - (paidByPo[p.po] || 0)); if (bal <= 0.5) return;
+    const t30 = addD(soMfplDate[p.so], 30), fd = soF[p.so] || null, t21 = fd ? addD(fd, -21) : null;
+    const d = t30 >= today ? { date:t30, overdue:false, basis:'30 days after the furniture PO (' + fmtDate(soMfplDate[p.so]) + ')' }
+      : t21 && t21 >= today ? { date:t21, overdue:false, basis:'30-day date passed (' + fmtDate(t30) + '); 21 days before the factory date ' + fmtDate(fd) }
+      : { date:today, overdue:true, basis:'30-day date ' + fmtDate(t30) + (t21 ? ' and factory − 21 date ' + fmtDate(t21) : ' passed, no factory date') + ' passed' };
+    items.push(Object.assign({ kind:'fabric', dir:-1, amount:bal, so:p.so, po:p.po, vendor:p.supplier, poDate:p.date, poValue:p.fabCp, paid:paidByPo[p.po] || 0, factory:fd }, d));
+  });
+  // ---- flushout (money in)
+  const dispBy = {}; (X.dispatches || []).forEach(d => { if (!/cancel|reject/i.test(d.status || '')) dispBy[d.so] = (dispBy[d.so] || 0) + (d.grossPreGst || 0); });
+  Object.keys(linesBySo).forEach(so => {
+    const h = DPI_BY_SO[so], rem = Math.max(0, (h.value || 0) - (dispBy[so] || 0)); if (rem <= 0.5) return;
+    const ls = linesBySo[so], w = ls.map(o => cpBy[o.po + '|' + o.sku] || 0), tw = w.reduce((a, b) => a + b, 0);
+    const groups = {};
+    ls.forEach((o, i) => { const f = flushDate(o), key = f ? f.d : ''; const g = groups[key] = groups[key] || { d:f ? f.d : null, how:f ? f.how : 'No dispatch booking or factory date yet', share:0, pos:new Set() };
+      g.share += tw ? w[i] / tw : 1 / ls.length; g.pos.add(o.po); });
+    Object.values(groups).forEach(g => items.push(Object.assign({ kind:'flush', dir:1, amount:rem * g.share, so, po:[...g.pos].join(', '), vendor:'', soValue:h.value, dispatched:dispBy[so] || 0, factory:soF[so] || null },
+      g.d ? due(g.d, g.how) : { date:null, overdue:false, basis:g.how })));
+  });
+  const fabOpening = (X.openingPayables || []).filter(v => /fabric/i.test(v.vertical || '')).reduce((s, v) => s + (v.closingTaxable || 0), 0);
+  return XP_CACHE = { items, today, cut, mfplPoolTotal, mfplOpening, mfplUnallocated, fabOpening, fabVendorCount:fabVendors.size };
+}
+const _raProj = renderAll; renderAll = function(){ XP_CACHE = null; return _raProj.apply(this, arguments); };
+const XP_KIND = { fabric:'Fabric vendors', mfpl50:'MFPL — 50% advance', mfplBal:'MFPL — balance', flush:'Flushout (in)' };
+function xpBuckets(C, mode){
+  const t = C.today, B = [{ k:'overdue', label:'Overdue (due now)' }];
+  if (mode === 'month'){ const m0 = t.slice(0, 7); for (let i = 0; i < 6; i++){ const d = new Date(m0 + '-01T00:00:00Z'); d.setUTCMonth(d.getUTCMonth() + i); const k = d.toISOString().slice(0, 7);
+      B.push({ k, label:d.toLocaleString('en-IN', { month:'short', year:'numeric', timeZone:'UTC' }), test:x => x.date.slice(0, 7) === k }); } }
+  else { const w0 = xpMonday(t); for (let i = 0; i < 13; i++){ const a = addD(w0, 7 * i), b = addD(a, 6); B.push({ k:a, label:'Wk of ' + fmtDate(a), test:x => x.date >= a && x.date <= b }); } }
+  B.push({ k:'later', label:'Later' }, { k:'nodate', label:'No date yet' });
+  const of = x => { if (!x.date) return 'nodate'; if (x.overdue) return 'overdue'; const b = B.find(b => b.test && b.test(x)); return b ? b.k : (x.date < t ? 'overdue' : 'later'); };
+  return { B, of };
+}
+function xProjView(){
+  const C = xProjCompute(), mode = state.xpMode || 'week', { B, of } = xpBuckets(C, mode);
+  const q = (state.xpQ || '').trim().toLowerCase(), sel = state.xpBucket || '', kind = state.xpKind || '';
+  const rows = B.map(b => ({ b, fabric:0, mfpl50:0, mfplBal:0, flush:0 }));
+  const idx = {}; rows.forEach(r => idx[r.b.k] = r);
+  C.items.forEach(x => { x.bucket = of(x); idx[x.bucket][x.kind] += x.amount; });
+  let cum = 0;
+  const R = v => v ? fmtRupees(Math.round(v)) : '—';
+  const tr = rows.map(r => { const out = r.fabric + r.mfpl50 + r.mfplBal, net = r.flush - out; if (r.b.k !== 'nodate') cum += net;
+    return `<tr class="clickable" data-xp-bucket="${r.b.k}" ${sel === r.b.k ? 'style="background:var(--surface-sunken);"' : ''}><td>${xe(r.b.label)}</td><td class="num">${R(r.fabric)}</td><td class="num">${R(r.mfpl50)}</td><td class="num">${R(r.mfplBal)}</td><td class="num"><b>${R(out)}</b></td><td class="num">${R(r.flush)}</td><td class="num" style="color:${net < 0 ? 'var(--critical)' : 'inherit'}">${net ? (net < 0 ? '−' : '') + fmtRupees(Math.abs(Math.round(net))) : '—'}</td><td class="num cell-sub">${r.b.k === 'nodate' ? '' : (cum < 0 ? '−' : '') + fmtRupees(Math.abs(Math.round(cum)))}</td></tr>`; }).join('');
+  const tot = k => C.items.filter(x => x.kind === k).reduce((s, x) => s + x.amount, 0);
+  let list = C.items.filter(x => (!sel || x.bucket === sel) && (!kind || x.kind === kind) && (!q || (x.so + ' ' + x.po + ' ' + (x.vendor || '') + ' ' + ((DPI_BY_SO[x.so] || {}).customer || '')).toLowerCase().includes(q)));
+  list.sort((a, b) => (a.date || '9999').localeCompare(b.date || '9999') || b.amount - a.amount);
+  state.xpList = list;
+  const lim = state.xpLimit || 50;
+  return `
+    <div class="preview-banner">${icon('coin')} <div><strong>Projection Analysis — admin preview until go-live.</strong> When money is due out to fabric vendors and MFPL, and when it comes back in as flushout (dispatch to the client, part or full). Pre-GST. Covers POs raised after ${fmtDate(C.cut)}; older debt is in the opening balances. Click a row to list what's in it.</div></div>
+    <div class="card" style="padding:14px 16px;margin-bottom:12px;">
+      <div style="display:flex;gap:16px;flex-wrap:wrap;">
+        ${[['fabric', 'Fabric vendors to pay'], ['mfpl50', 'MFPL 50% advance to pay'], ['mfplBal', 'MFPL balance to pay'], ['flush', 'Flushout to come in']].map(([k, l]) => `<div style="min-width:160px;"><div class="cell-sub">${l}</div><div style="font-size:20px;font-weight:650;">${fmtRupees(Math.round(tot(k)))}</div></div>`).join('')}
+      </div>
+      <div class="cell-sub" style="margin-top:8px;">MFPL payments after ${fmtDate(C.cut)}: ${fmtRupees(Math.round(C.mfplPoolTotal))}, allocated oldest PO first${C.mfplOpening ? ` (after the opening balance ${fmtRupees(Math.round(C.mfplOpening))})` : ''}${C.mfplUnallocated > 0.5 ? `; ${fmtRupees(Math.round(C.mfplUnallocated))} more than every PO since then` : ''}. Fabric vendors' opening balance (not scheduled here): ${fmtRupees(Math.round(C.fabOpening))} across ${C.fabVendorCount} vendor(s).</div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
+      <button class="filter-chip" data-xp-mode="week" aria-pressed="${mode === 'week'}">By week (13)</button><button class="filter-chip" data-xp-mode="month" aria-pressed="${mode === 'month'}">By month (6)</button>
+    </div>
+    <div class="card table-wrap"><table class="grid-table">
+      <thead><tr><th>Period</th><th class="num">Fabric</th><th class="num">MFPL 50%</th><th class="num">MFPL balance</th><th class="num">Total out</th><th class="num">Flushout in</th><th class="num">Net</th><th class="num">Running net</th></tr></thead>
+      <tbody>${tr}</tbody></table></div>
+    <div class="toolbar" style="margin-top:18px;">
+      <div class="search">${icon('grid')}<input id="xpQ" placeholder="Search SO, PO, vendor or customer" value="${xe(state.xpQ || '')}"></div>
+      <div class="filter-row">${[['', 'All'], ['fabric', 'Fabric'], ['mfpl50', 'MFPL 50%'], ['mfplBal', 'MFPL balance'], ['flush', 'Flushout']].map(([k, l]) => `<button class="filter-chip" data-xp-kind="${k}" aria-pressed="${kind === k}">${l}</button>`).join('')}
+        ${sel ? `<button class="filter-chip" data-xp-bucket="" aria-pressed="true">${xe((B.find(b => b.k === sel) || {}).label || '')} ✕</button>` : ''}</div>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:-6px 0 10px;"><span class="cell-sub">${list.length} item(s) · ${fmtRupees(Math.round(list.reduce((s, x) => s + x.amount * x.dir, 0)))} net</span><button class="btn btn-ghost btn-sm" id="xpCsv">Download CSV</button></div>
+    <div class="card table-wrap"><table class="grid-table">
+      <thead><tr><th>Due</th><th>Type</th><th>SO / Customer</th><th>PO</th><th>Vendor</th><th class="num">Amount</th><th>Why this date</th></tr></thead>
+      <tbody>${list.slice(0, lim).map(x => `<tr><td>${x.date ? fmtDate(x.date) : '—'}${x.overdue ? ' <span class="pill critical"><span class="dot"></span>Overdue</span>' : ''}</td><td>${XP_KIND[x.kind]}</td>
+        <td><div class="cell-primary">${xe(x.so)}</div><div class="cell-sub">${xe((DPI_BY_SO[x.so] || {}).customer || '')}</div></td><td class="mono">${xe(x.po)}</td><td>${xe(x.vendor || '')}</td>
+        <td class="num">${x.dir < 0 ? '−' : ''}${fmtRupees(Math.round(x.amount))}</td><td class="cell-sub">${xe(x.basis)}</td></tr>`).join('') || '<tr><td colspan="7"><div class="empty-note">Nothing here.</div></td></tr>'}</tbody></table></div>
+    ${list.length > lim ? `<div style="margin-top:10px;display:flex;gap:10px;align-items:center;"><span class="cell-sub">Showing ${lim} of ${list.length}.</span><button class="btn btn-ghost btn-sm" id="xpMore">Show 50 more</button></div>` : ''}
+    <div class="cell-sub" style="margin-top:14px;line-height:1.6;"><b>Rules.</b> Fabric: POs from fabric vendors (InvoicedOS "Furniture Fabrics") in metres or sq ft, on an SO that has an MFPL PO; balance = PO value − payments against that PO; due 30 days after the SO's first MFPL PO; once that has passed, 21 days before the factory date; then overdue. MFPL: each PO's payments allocated oldest PO first; at least 50% due 30 days before its earliest factory date; the rest when its last line flushes out. Flushout: SO value (pre-GST) less what the Dispatch Sheet shows dispatched, spread over the SO's PO lines by PO cost; each line flushes on its Last Mile dispatch booking date, otherwise factory date + 5 working days (Mon–Sat). Lines with neither are under "No date yet".</div>`;
+}
+function xpCsv(){
+  const q = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+  const head = ['Type', 'Direction', 'Due date', 'Overdue', 'SO Number', 'Customer', 'PO Number', 'Vendor', 'PO date', 'PO / SO value', 'Paid / dispatched', 'Amount (pre-GST)', 'Factory date', 'Why this date'];
+  const L = [head.map(q).join(',')].concat((state.xpList || []).map(x => [XP_KIND[x.kind], x.dir < 0 ? 'Out' : 'In', x.date || '', x.overdue ? 'Yes' : '', x.so, (DPI_BY_SO[x.so] || {}).customer || '', x.po, x.vendor || '', x.poDate || '',
+    Math.round(x.poValue != null ? x.poValue : x.soValue || 0), Math.round(x.paid != null ? x.paid : x.dispatched || 0), Math.round(x.amount), x.factory || '', x.basis].map(q).join(',')));
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + L.join('\r\n')], { type:'text/csv' }));
+  a.download = 'Projection Analysis ' + todayStr() + '.csv'; document.body.appendChild(a); a.click(); a.remove();
+}
+const _rppProj = renderPayablesPreview;
+renderPayablesPreview = function(){
+  if (!xCatOn()) return _rppProj.apply(this, arguments);
+  const on = !!state.xpOn;
+  const tabs = `<div class="subtabs" style="margin-bottom:14px;"><button data-xp-tab="0" aria-pressed="${!on}">Payables &amp; Flushout</button><button data-xp-tab="1" aria-pressed="${on}">Projection Analysis <span class="cell-sub">(admin preview)</span></button></div>`;
+  return tabs + (on ? xProjView() : _rppProj.apply(this, arguments));
+};
+extraWiring.push(() => {
+  if (!xCatOn() || state.module !== 'payables') return;
+  document.querySelectorAll('[data-xp-tab]').forEach(b => b.addEventListener('click', () => { state.xpOn = b.dataset.xpTab === '1'; renderAll(); }));
+  document.querySelectorAll('[data-xp-mode]').forEach(b => b.addEventListener('click', () => { state.xpMode = b.dataset.xpMode; state.xpBucket = ''; renderAll(); }));
+  document.querySelectorAll('[data-xp-bucket]').forEach(b => b.addEventListener('click', () => { state.xpBucket = state.xpBucket === b.dataset.xpBucket ? '' : b.dataset.xpBucket; state.xpLimit = 50; renderAll(); }));
+  document.querySelectorAll('[data-xp-kind]').forEach(b => b.addEventListener('click', () => { state.xpKind = b.dataset.xpKind; state.xpLimit = 50; renderAll(); }));
+  const q = document.getElementById('xpQ'); if (q) q.addEventListener('input', () => { state.xpQ = q.value; state.xpLimit = 50; renderAll(); const el = document.getElementById('xpQ'); if (el){ el.focus(); el.setSelectionRange(el.value.length, el.value.length); } });
+  const m = document.getElementById('xpMore'); if (m) m.addEventListener('click', () => { state.xpLimit = (state.xpLimit || 50) + 50; renderAll(); });
+  const c = document.getElementById('xpCsv'); if (c) c.addEventListener('click', xpCsv);
+});
+window.__xproj = { compute:xProjCompute };   // for checks from the console
 
 if (!routePublic() && state.currentUser) renderAll();
 })();
