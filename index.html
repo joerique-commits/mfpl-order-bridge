@@ -1739,10 +1739,11 @@ function build(files, opts){
   // payables cut-off (vendor payables need those POs) and SOs with saved work (opts.keepSos). Same rule as build_from_folder.py.
   if (by.open_sos.length){
     var osDf = cat('open_sos'), listed = {};
-    osDf.rows.forEach(function(r){ var so = s_(G(osDf, r, 'SO Number')); if (so) listed[so] = 1; });
+    var listSites = {}, hasSite = osDf.cols.indexOf('Site') >= 0;
+    osDf.rows.forEach(function(r){ var so = s_(G(osDf, r, 'SO Number')); if (so) listed[so] = 1; if (so && hasSite && s_(G(osDf, r, 'Site'))) listSites[s_(G(osDf, r, 'Site')).toUpperCase()] = 1; });
     var asOn = null;
     by.open_sos.forEach(function(x){ var d = asOnFromName(x.file); if (d && (!asOn || d > asOn)) asOn = d; });
-    data.openFilter = applyOpenFilter(data, listed, asOn, opts.keepSos || [], opts.keepText || '');
+    data.openFilter = applyOpenFilter(data, listed, asOn, opts.keepSos || [], opts.keepText || '', Object.keys(listSites));
   }
 
   // per-file report: what each file was read as, and the newest date in it
@@ -1765,7 +1766,7 @@ function asOnFromName(name){
   return null;
 }
 // The trim itself. Mutates data; returns a summary for the Daily exports card.
-function applyOpenFilter(data, listed, asOn, keepSos, keepText){
+function applyOpenFilter(data, listed, asOn, keepSos, keepText, listSites){
   var keep = {}; Object.keys(listed).forEach(function(so){ keep[so] = 1; }); (keepSos || []).forEach(function(so){ if (so) keep[so] = 1; });
   var savedKept = 0;
   if (keepText) data.dpi.forEach(function(h){ if (!keep[h.so] && h.so && String(h.so).length >= 6 && keepText.indexOf(h.so) >= 0){ keep[h.so] = 1; savedKept++; } });
@@ -1773,6 +1774,11 @@ function applyOpenFilter(data, listed, asOn, keepSos, keepText){
   data.dpi.forEach(function(h){ if (asOn && h.date && h.date > asOn) keep[h.so] = 1; });
   var cut = data.payablesCutoff || '';
   data.poLines.forEach(function(l){ var so = l.linkSo || l.so; if (so && l.poDate && l.poDate > cut) keep[so] = 1; });
+  // 26 Oct (JK): a site with no SO on the list (HO, MFPL) isn't trimmed; internal (intercompany) SOs there still are
+  // the sites the list covers: its Site column when it has one, otherwise the sites of the SOs on it
+  var covered = {}; if (listSites && listSites.length) listSites.forEach(function(c){ covered[c] = 1; }); else data.dpi.forEach(function(h){ if (listed[h.so] && h.city) covered[h.city] = 1; });
+  var otherKept = 0, otherSites = {};
+  data.dpi.forEach(function(h){ if (!keep[h.so] && !h.ic && h.city && !covered[h.city]){ keep[h.so] = 1; otherKept++; otherSites[h.city] = 1; } });
   var soOf = function(x){ return x.linkSo || x.so; };
   var before = { sos:data.dpi.length, poLines:data.poLines.length, soLines:data.soLines.length, orders:data.orders.length };
   data.dpi = data.dpi.filter(function(h){ return keep[h.so]; });
@@ -1782,7 +1788,7 @@ function applyOpenFilter(data, listed, asOn, keepSos, keepText){
   var sh = {}; Object.keys(data.soHeaders).forEach(function(so){ if (keep[so]) sh[so] = data.soHeaders[so]; }); data.soHeaders = sh;
   var notFound = Object.keys(listed).filter(function(so){ return !sh[so]; }).sort();
   return { asOn:asOn, listed:Object.keys(listed).length, keptSos:data.dpi.length, removedSos:before.sos - data.dpi.length,
-    removedPoLines:before.poLines - data.poLines.length, removedSoLines:before.soLines - data.soLines.length, keptForSavedWork:savedKept, listedNotInData:notFound.slice(0, 200), listedNotInDataCount:notFound.length };
+    removedPoLines:before.poLines - data.poLines.length, removedSoLines:before.soLines - data.soLines.length, keptForSavedWork:savedKept, sitesOnList:Object.keys(covered).sort(), keptOtherSites:otherKept, otherSites:Object.keys(otherSites).sort(), listedNotInData:notFound.slice(0, 200), listedNotInDataCount:notFound.length };
 }
 // Cancelled SO -> new SO pairs from the mapping sheet and approved revisions: { old: [new, ...] }
 function remapPairs(df, extra){
