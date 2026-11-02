@@ -5327,7 +5327,7 @@ function renderSoLineSubTable(group){
           <td><div class="cell-primary">${o.article}</div><div class="cell-sub">${o.sku}</div></td>
           <td class="mono">${o.po}</td>
           <td class="num">${o.poQty}${o.poQty<o.qty?` / ${o.qty}`:''} ${o.uom}</td>
-          <td>${lifecyclePill(o)}</td>
+          <td>${lifecyclePill(o)}${window.__xJcLine ? window.__xJcLine(o) : ''}</td>
           <td>${actionCell}</td>
         </tr>`;
       }).join('')}</tbody>
@@ -8312,9 +8312,9 @@ function wireContentEvents(){
   if (jcFlaggedOnly) jcFlaggedOnly.addEventListener('change', (e) => { state.jobcardFlaggedOnly = e.target.checked; renderAll(); });
   const jcDownloadCsv = document.getElementById('jcDownloadCsv');
   if (jcDownloadCsv) jcDownloadCsv.addEventListener('click', () => {
-    const headers = ['Job Card #','Client','Linked PO','Article','Qty','Current Stage','Flags','Updated'];
+    const headers = ['Job Card #','Client','Linked PO','Card PO','Work Order','Article','Qty','Current Stage','Flags','Updated'];
     const rows = JOB_CARDS.map(jc => { const st = jobCardStatus(jc); const flags = jobCardStageFlags(jc);
-      return [jc.jobCardNumber, jc.clientName, jc.linkedPo||'unlinked', jc.linkedArticleName||'', jc.qty, st.currentStageLabel, flags.length?flags.join(' | '):'Clean', fmtDT(jc.updatedAt)]; });
+      return [jc.jobCardNumber, jc.clientName, jc.linkedPo||'unlinked', (String(jc.workOrderNumber||'').replace(/\D/g,'') ? '242001000' + String(jc.workOrderNumber).replace(/\D/g,'') : ''), jc.workOrderNumber||'', jc.linkedArticleName||'', jc.qty, st.currentStageLabel, flags.length?flags.join(' | '):'Clean', fmtDT(jc.updatedAt)]; });
     downloadCsv('job-cards.csv', [headers, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n'));
   });
 
@@ -9159,7 +9159,7 @@ renderOrdersList = function(){
   rows = rows.slice().sort((a,b) => (b.h.date||'').localeCompare(a.h.date||''));
   const limit = state.xPoLimit || 100;
   const shown = rows.slice(0, limit);
-  state.xCsvSos = rows.map(x => x.h.so).filter(so => requestLines(so).length);
+  state.xCsvSos = rows.map(x => x.h.so).filter(so => requestLines(so).length); state.xPoViewSos = rows.map(x => x.h.so);
   return `
     <div class="preview-banner">${icon('check')} <div><strong>Sales orders from Daily PI Revenue, tied to their POs in PO Summary.</strong> Articles on a matched PO are PO Confirmed. Expand an SO to see the SKUs on it (from SO Article Breakup) that are still to raise on a PO. Sales start the PO request from that SKU with the committed date (and, for furniture, fabric, finish, stone and design detail); supply raises it in the ERP and marks it raised — the PO number, date and supplier then come from PO Summary on the next data refresh and link automatically. Supply can also link a SKU to a PO line from PO Summary, or mark it as not needing a PO (e.g. supplied from stock). Anything not on the SO goes through SO Revision.</div></div>
     <div class="toolbar" style="margin-top:18px;">
@@ -9187,7 +9187,7 @@ renderOrdersList = function(){
           <td><div class="cell-primary">${h.so}</div><div class="cell-sub">${xe(h.customer)}${h.rep ? ' · ' + xe(h.rep) : ''}${cds.length ? ' · ' + 'committed ' + fmtCv(cds[0]) : ''}</div></td>
           <td>${fmtDate(h.date)}</td><td>${h.city}</td><td class="num">${fmtRupees(h.value)}</td><td>${status}${soRiskPill(h.so)}${canRequestCsv() && requestLines(h.so).length ? `<div style="margin-top:4px;"><button class="btn-text" data-xcsv-so="${h.so}" title="Fabric, finish, stone, design and site details sales filled in for this SO">⤓ Details CSV (${requestLines(h.so).length} line${requestLines(h.so).length > 1 ? 's' : ''})</button></div>` : ''}</td></tr>
           ${open ? `<tr><td colspan="6" style="padding:0;">
-            ${pos.length ? `<div class="cell-sub" style="padding:10px 34px 0;">${pos.map(p => { const l = POL_BY_PO[p] ? POL_BY_PO[p][0] : null; return `<span class="mono">${p}</span>${l ? ` raised ${fmtDate(l.poDate)} on ${xe(l.supplier)}` : ' (confirmed by supply)'}`; }).join(' &nbsp;·&nbsp; ')}</div>` : ''}
+            ${pos.length ? `<div class="cell-sub" style="padding:10px 34px 0;">${pos.map(p => { const l = POL_BY_PO[p] ? POL_BY_PO[p][0] : null; return `<span class="mono">${p}</span>${l ? ` raised ${fmtDate(l.poDate)} on ${xe(l.supplier)}` : ' (confirmed by supply)'}${xDlLeftTxt(p)}`; }).join(' &nbsp;·&nbsp; ')}</div>` : ''}
             ${lines.length ? renderSoLineSubTable(lines) : (SOL_BY_SO[h.so] ? '' : `<div class="empty-note" style="padding:12px 34px;">No PO in PO Summary for this SO, and the SO isn't in SO Article Breakup. Daily PI Revenue lists ${h.nArt} article(s), ${h.qArt} qty in total, but not which articles.</div>`)}
             ${!h.cancelled ? soLinePanel(h, canSales) : ''}
             ${canSales && !h.cancelled && lines.length ? `<div style="background:var(--surface-sunken);padding:4px 34px 14px;display:flex;gap:8px;align-items:end;">
@@ -9256,7 +9256,7 @@ const uq = a => [...new Set(a)];
 const SRC = { REQ:'ob_po_requests', OPS:'ob_order_ops', LINKS:'ob_po_links' };
 const srcGet = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch(e){ return d; } };
 const srcSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch(e){ return false; } };
-const OPS_FIELDS = ['committedDeadline','committedRule','detail','clarifications','productionDeadline','productionDeadlineSetBy','productionDeadlineSetAt','factoryDateSource','deadlineNeg','deadlineNegHistory','deadlineHistory','pendingDeadlineChange','requestId','linkedFrom','soLineKey'];
+const OPS_FIELDS = ['qcReport','qcTicksBy','factoryOverPo','committedDeadline','committedRule','detail','clarifications','productionDeadline','productionDeadlineSetBy','productionDeadlineSetAt','factoryDateSource','deadlineNeg','deadlineNegHistory','deadlineHistory','pendingDeadlineChange','requestId','linkedFrom','soLineKey'];
 const opsJson = o => JSON.stringify(OPS_FIELDS.map(k => o[k] === undefined ? null : o[k]));
 const PRISTINE = {}; ORDERS.forEach(o => { if (!o.appNative) PRISTINE[o.id] = opsJson(o); });
 const ORDER_BY_ID = {}; ORDERS.forEach(o => { ORDER_BY_ID[o.id] = o; });
@@ -9305,7 +9305,7 @@ function unapplyLink(k){
 }
 LINKS.filter(k => k.kind === 'manual').forEach(applyLink);
 // 4 · sales' PO requests, then automatic linking to PO lines that arrived after the request
-const REQ_COPY = ['committedDeadline','committedRule','detail','clarifications','productionDeadline','productionDeadlineSetBy','productionDeadlineSetAt','factoryDateSource','deadlineNeg','deadlineNegHistory','deadlineHistory'];
+const REQ_COPY = ['qcReport','qcTicksBy','factoryOverPo','committedDeadline','committedRule','detail','clarifications','productionDeadline','productionDeadlineSetBy','productionDeadlineSetAt','factoryDateSource','deadlineNeg','deadlineNegHistory','deadlineHistory'];
 const emptyOps = v => v == null || v === '' || (Array.isArray(v) && !v.length) || (typeof v === 'object' && !Array.isArray(v) && !Object.values(v).some(x => x && String(x).trim()));
 function dropFromOrders(r){ const i = ORDERS.indexOf(r); if (i >= 0) ORDERS.splice(i, 1); const L = LINES_BY_SO[r.so] || []; const j = L.indexOf(r); if (j >= 0) L.splice(j, 1); }
 function linkReq(r, o, how){
@@ -9607,10 +9607,10 @@ renderStockBlockStation = function(){
   const code = artCode === '__other' ? otherCode : artCode;
   const artName = code ? ((arts.find(a => a.code === code) || {}).name || STOCK_NAME[code] || '') : '';
   const inHand = code && wh ? stockInHand(code, wh) : null;
-  const blockedHere = code && wh ? STOCK_BLOCK_REQUESTS.filter(r => r.sku === code && r.warehouse === wh && r.status === 'approved').reduce((s,r) => s + (r.qtyRequested || 0), 0) : 0;
+  const blockedHere = code && wh ? STOCK_BLOCK_REQUESTS.filter(r => r.sku === code && r.warehouse === wh && r.status === 'approved' && !xFinOf(r)).reduce((s,r) => s + (r.qtyRequested || 0), 0) : 0;
   const whStock = wh ? X.stock.filter(s => s.wh === wh && s.qty > 0) : [];
   const rows = STOCK_BLOCK_REQUESTS.slice().sort((a,b) => b.requestedAt.localeCompare(a.requestedAt));
-  const approved = STOCK_BLOCK_REQUESTS.filter(r => r.status === 'approved');
+  const approved = STOCK_BLOCK_REQUESTS.filter(r => r.status === 'approved' && !xFinOf(r));
   return `
     <div class="preview-banner dashed">${icon('box')} <div><strong>Block warehouse stock against a sales order.</strong> Sales or production raise the request; supply approves it. Stock shows as blocked only after supply approves.</div></div>
     ${canRequest ? `
@@ -9662,9 +9662,9 @@ renderStockBlockStation = function(){
           <td>${whLabel(r.warehouse)}</td><td class="num">${r.qtyRequested} ${xe(r.uom)}</td>
           <td><div class="cell-primary">${xe(r.requestedBy)}</div><div class="cell-sub">${ROLES[r.requestedByRole]?.label||r.requestedByRole} · ${fmtDT(r.requestedAt)}</div></td>
           <td>${xe(r.reason)}${r.notes?`<div class="cell-sub" style="margin-top:4px;">${xe(r.notes)}</div>`:''}</td>
-          <td>${stockBlockStatusPill(r.status)}${r.decidedBy?`<div class="cell-sub">by ${xe(r.decidedBy)} · ${fmtDT(r.decidedAt)}</div>`:''}</td>
+          <td>${xFinOf(r) ? xFinPill(r, xFinOf(r)) : stockBlockStatusPill(r.status)}${r.decidedBy?`<div class="cell-sub">by ${xe(r.decidedBy)} · ${fmtDT(r.decidedAt)}</div>`:''}</td>
           ${canDecide ? `<td>${r.status==='requested' ? `<button class="btn-text" data-xsb-approve="${r.id}">Approve</button> · <button class="btn-text" data-xsb-reject="${r.id}">Reject</button>`
-            : r.status==='approved' ? `<button class="btn-text" data-xsb-release="${r.id}">Release</button>` : ''}</td>` : ''}
+            : r.status==='approved' && !xFinOf(r) ? `<button class="btn-text" data-xsb-release="${r.id}">Release</button>` : ''}</td>` : ''}
         </tr>`).join('') : `<tr><td colspan="${canDecide?7:6}"><div class="empty-note">No stock block requests yet.</div></td></tr>`}</tbody>
     </table></div>`;
 };
@@ -9691,7 +9691,7 @@ extraWiring.push(() => {
     if (!reason) return fail('Enter a reason.');
     const a = arts.find(x => x.code === code) || { name: STOCK_NAME[code] || code, uom: 'PCS' };
     const inHand = stockInHand(code, wh);
-    const blocked = STOCK_BLOCK_REQUESTS.filter(r => r.sku === code && r.warehouse === wh && r.status === 'approved').reduce((s,r) => s + (r.qtyRequested||0), 0);
+    const blocked = STOCK_BLOCK_REQUESTS.filter(r => r.sku === code && r.warehouse === wh && r.status === 'approved' && !xFinOf(r)).reduce((s,r) => s + (r.qtyRequested||0), 0);
     const note = inHand === null ? 'Article not in this warehouse\'s stock file' : (qty > inHand - blocked ? `Requested ${qty} but only ${inHand - blocked} free at request time` : '');
     STOCK_BLOCK_REQUESTS.unshift({ id:'SBR-' + Math.floor(1000 + Math.random()*9000), so, customer: customerForSo(so), po: posForSo(so).join(', '), article: a.name, sku: code, qtyRequested: qty, uom: a.uom || 'PCS',
       warehouse: wh, requestedBy: actingUserName(), byKey: userKey(), requestedByRole: state.role, requestedAt: nowIso(), reason, status:'requested', decidedBy:'', decidedAt:'', notes: note });
@@ -9939,7 +9939,8 @@ const PO_DL = {};                                  // po → { id, po, so, first
 Object.assign(PO_DL, srcGet('ob_po_dl', {}));   // whole-PO factory dates are operational data — kept across reloads and refreshes
 const poRec = po => PO_DL[po] = PO_DL[po] || { id:po, po, so:'', firstId:'', date:null, source:'', setBy:'', setAt:'', neg:null, negHistory:[] };
 const factoryLine = o => !!o && o.lifecycle === 'po_confirmed' && !!o.po && isFactoryLine(o);
-const effF = o => { if (!factoryLine(o)) return null; const a = o.productionDeadline || null, b = (PO_DL[o.po] || {}).date || null; return a && b ? (a < b ? a : b) : (a || b); };
+const effF = o => { if (!factoryLine(o)) return null; const a = o.productionDeadline || null, b = (PO_DL[o.po] || {}).date || null; if (a && o.factoryOverPo) return a;   // JK 2 Nov: approved later SKU date
+  return a && b ? (a < b ? a : b) : (a || b); };
 const dlPoDate = o => poDateOf(o);
 const dlAge = o => dlPoDate(o) ? dDiff(todayStr(), dlPoDate(o) < '2026-11-02' ? '2026-11-02' : dlPoDate(o)) : 0;   // go-live 2 Nov: older POs count from go-live
 const dlInScope = o => factoryLine(o) && o.dpiLinked && (dlPoDate(o) || '') >= riskGoLive() && !(DPI_BY_SO[o.so] || {}).cancelled;
@@ -10052,8 +10053,9 @@ function dlStatusPill(o){
   if (!factoryLine(o)) return '<span class="pill neutral"><span class="dot"></span>Not a factory line</span>';
   const n = o.deadlineNeg || (PO_DL[o.po] || {}).neg;
   if (n) return `<span class="pill warn"><span class="dot"></span>${n.status === 'awaiting_sales' ? 'With sales' : 'With factory'}${n.kind === 'deviation' ? ' · deviation' : n.kind === 'admin' ? ' · admin revision' : ''}</span>`;
-  if (effF(o)) { const src = (PO_DL[o.po] || {}).date && (!o.productionDeadline || PO_DL[o.po].date <= o.productionDeadline) ? 'PO limit' : ({ auto:'20-day rule', agreed:'agreed', negotiated:'negotiated' })[o.factoryDateSource] || 'confirmed'; return `<span class="pill good"><span class="dot"></span>Confirmed · ${src}</span>`; }
-  return '<span class="pill neutral"><span class="dot"></span>Awaiting factory</span>';
+  if (effF(o)) { const src = o.factoryOverPo && o.productionDeadline ? 'own date, after the PO date' : (PO_DL[o.po] || {}).date && (!o.productionDeadline || PO_DL[o.po].date <= o.productionDeadline) ? 'PO limit' : ({ auto:'20-day rule', agreed:'agreed', negotiated:'negotiated' })[o.factoryDateSource] || 'confirmed'; return `<span class="pill good"><span class="dot"></span>Confirmed · ${src}</span>`; }
+  const lf = dlInScope(o) ? DL_WINDOW - dlAge(o) : null;
+  return `<span class="pill neutral"><span class="dot"></span>Awaiting factory${lf != null && lf >= 0 ? ' · ' + lf + ' day(s) left' : ''}</span>`;
 }
 // date a line shows on in the list/calendar for this role: the confirmed factory date, else the client date (both role-shifted)
 const dlDateOf = o => effF(o) ? viewF(effF(o)) : (o.committedDeadline ? viewC(o.committedDeadline) : null);
@@ -10064,7 +10066,7 @@ renderDeadlineLineSubTable = function(group){
       <thead><tr><th>Article / SKU</th><th>Job card stage</th><th>${cLabel()}</th><th>${fLabel()}</th><th>Status</th><th>Delay risk</th><th style="min-width:280px;">Action</th></tr></thead>
       <tbody>${group.map(o => { const t = tSku(o); const showH = state.xNegHist.has(t.key); return `<tr>
           <td><div class="cell-primary">${xe(o.article)}</div><div class="cell-sub">${xe(o.sku)}</div></td>
-          <td>${factoryLine(o) ? jobCardStageForOrder(o) : '<span class="cell-sub">—</span>'}</td>
+          <td>${factoryLine(o) ? jobCardStageForOrder(o) : '<span class="cell-sub">—</span>'}${xQcCell(o)}</td>
           <td>${o.committedDeadline ? fmtCv(o.committedDeadline) : '<span class="cell-sub">Not set</span>'}</td>
           <td>${effF(o) ? fmtFv(effF(o)) + ((PO_DL[o.po] || {}).date && effF(o) === PO_DL[o.po].date && o.productionDeadline !== effF(o) ? ' <span class="cell-sub">(PO limit)</span>' : '') : '<span class="cell-sub">—</span>'}</td>
           <td>${dlStatusPill(o)}</td>
@@ -10222,13 +10224,11 @@ extraWiring.push(() => {
     if (mode === 'propose'){
       if (!reason) return fail('Give a reason for sales.');
       const can = dlCanStart(t); if (!can || can === 'locked') return fail('A proposal is not possible here.');
-      if (t.type === 'sku'){ const lim = (PO_DL[t.po] || {}).date; if (lim && d > lim) return fail(`The PO's outer limit is ${fmtDate(viewF(lim))} — a SKU date can't be later.`); }
       setNeg(t, { kind: can === 'admin' ? 'admin' : can === 'deviation' ? 'deviation' : 'proposal', status:'awaiting_sales', openedAt:nowIso(), rounds:[Object.assign({ side: state.role === 'admin' ? 'admin' : 'factory', act:'propose', date:d, reason }, me)] });
     } else if (mode === 'second'){
       const n = negOf(t); if (!n || n.status !== 'awaiting_factory') return;
       if (!reason) return fail('Give a reason for sales.');
       if (d === lastCounter(n).date) return fail("That's sales' date — use Accept instead.");
-      if (t.type === 'sku'){ const lim = (PO_DL[t.po] || {}).date; if (lim && d > lim) return fail(`The PO's outer limit is ${fmtDate(viewF(lim))}.`); }
       n.rounds.push(Object.assign({ side: state.role === 'admin' ? 'admin' : 'factory', act:'propose2', date:d, reason }, me)); n.status = 'awaiting_sales';
     } else if (mode === 'counter'){
       const n = negOf(t); if (!n || n.status !== 'awaiting_sales') return;
@@ -10500,7 +10500,8 @@ renderWarehouseIntake = function(){
   const so = poOk ? (seq && seq.a ? seq.a.so : poSo(d.po)) : '';
   const customer = poOk ? ((seq && seq.a && seq.a.customer) || poCustomer(d.po)) : '';
   const packets = parseInt(d.packets, 10);
-  const canSubmit = poOk && seq && seq.next && packets > 0;
+  const qcB = d.sku ? xQcBlocks(d.po, d.sku) : null;
+  const canSubmit = poOk && seq && seq.next && packets > 0 && !qcB;
   const inst = d.sku ? (d.install == null ? whInstallDefault(d.po, d.sku) : d.install) : false;
   const hint = d.sku && seq && seq.a ? whInstallHint(so, seq.a.name) : '';
   const preview = { po: poOk ? d.po : '', sku: d.sku, article: seq && seq.a ? seq.a.name : '', seq: seq ? seq.next : 0, seqTotal: seq ? seq.total : 0, packets: packets > 0 ? packets : '', so, customer, installRequired:inst };
@@ -10528,6 +10529,7 @@ renderWarehouseIntake = function(){
         ${seq && !seq.next ? `<div class="cell-sub" style="color:var(--critical);margin-top:8px;">Every piece of this article on this PO already has a tag (${seq.total} of ${seq.total}). A sequence can't be used twice.</div>` : ''}
         ${seq && seq.used.size && seq.next ? `<div class="cell-sub" style="margin-top:8px;">Already tagged: ${[...seq.used].sort((a,b)=>a-b).join(', ')} of ${seq.total}.</div>` : ''}
         ${seq && seq.fractional ? `<div class="cell-sub" style="color:var(--warn);margin-top:4px;">PO qty is ${seq.a.qty} ${xe(seq.a.uom)} — not a whole number of pieces; the sequence uses ${seq.total}.</div>` : ''}
+        ${qcB ? '<div class="cell-sub" style="color:var(--critical);margin-top:8px;">QC report not confirmed yet — supply ticks “QC report generated” for this SKU in Order Deadlines (after packing) before its warehouse tags can be made.</div>' : ''}
         <button class="btn btn-primary" id="x_wh_submit" style="margin-top:14px;" ${canSubmit?'':'disabled'}>Generate tag &amp; log intake</button>
       </div>
       <div class="wts-preview"><div class="card" style="padding:20px 22px;">
@@ -10560,7 +10562,7 @@ extraWiring.push(() => {
   const sub = document.getElementById('x_wh_submit');
   if (sub) sub.addEventListener('click', () => {
     const d = whDraft(); const seq = whSeqInfo(d.po, d.sku); const packets = parseInt(d.packets, 10);
-    if (!seq.a || !seq.next || !(packets > 0)) return;
+    if (!seq.a || !seq.next || !(packets > 0) || xQcBlocks(d.po, d.sku)) return;
     if (WAREHOUSE_TAGS.some(t => t.po === d.po && t.sku === d.sku && t.seq === seq.next)) return;   // hard guard: a sequence can't repeat
     const n = 'WHT-' + Math.floor(10000 + Math.random()*90000);
     const t = { id:n, tagNo:n, po:d.po, sku:d.sku, article:seq.a.name, so: seq.a.so, customer: seq.a.customer, qty:1, uom:seq.a.uom || 'PCS', seq: seq.next, seqTotal: seq.total, packets,
@@ -10645,13 +10647,17 @@ function lmReady(so, a, date, need){
   const good = [], bad = [];
   if (tags.length){ if (rcv > 0 && rcv >= Math.min(need, tags.length) && rcv >= need) good.push(`${rcv} of ${tags.length} tagged piece(s) received at the warehouse`); else bad.push(`${rcv} of ${tags.length} tagged piece(s) received at the warehouse`); }
   if (stock > 0){ if (stock >= need) good.push(`${stock} in stock (${STOCK_DATE} stock files)`); else bad.push(`only ${stock} in stock (${STOCK_DATE} stock files)`); }
+  let qcMiss = false;   // JK 2 Nov: a furniture factory SKU is ready only once supply ticks "QC report generated"
   lmLinesOf(so, a).filter(factoryLine).forEach(o => {
     const jc = jobCardOf(o); const pk = jc && (jc.stages || []).find(s => s.key === 'packing');
+    if (xQcNeed(o)){ if (xQcOk(o)){ good.push(`QC report generated ${fmtDate(String(o.qcReport.at || '').slice(0, 10))}`); return; }
+      qcMiss = true; bad.unshift(pk && pk.endDateISO ? `packed ${fmtDate(pk.endDateISO)} — QC report not yet ticked by supply` : jc ? `factory stage: ${stageNow(jc)} — QC report pending` : 'no job card — QC report not yet ticked by supply'); return; }
     if (pk && pk.endDateISO) { (good.length ? good : bad).push(`packed at the factory ${fmtDate(pk.endDateISO)}${good.length ? '' : ', not yet at the warehouse'}`); return; }
     bad.push(jc ? `factory stage: ${stageNow(jc)}` : 'no job card yet');
     const f = effF(o); const ready = f ? addD(f, DL_BUF) : null;
     if (ready && date && date < ready) bad.push(`factory date ${fmtFv(f)} is after this slot`);
   });
+  if (qcMiss) return { state:'notready', why:bad };
   if (good.length) return { state:'ready', why:good.concat(bad.filter(x => /after this slot/.test(x))), late:bad.some(x => /after this slot/.test(x)) };
   if (bad.length) return { state:'notready', why:bad };
   return { state:'unknown', why:['no stock, warehouse-tag or job-card record yet'] };
@@ -10676,7 +10682,7 @@ function liftHtml(so, codes, nameOf){
   if (!c.lift) return { c, html:`<div class="cell-sub">Lift-fit check: waiting for the customer's lift size${c.rows.some(r => r.dim) ? '' : ' and the SO dimensions'}.</div>` };
   const withDim = c.rows.filter(r => r.dim);
   if (!withDim.length) return { c, html:`<div class="cell-sub">Lift ${c.lift.map(cm).join(' × ')} cm. No dimensions on the scanned SO for these items, so they aren't checked.</div>` };
-  return { c, html:`<div class="x-lift"><div class="cell-sub">Lift ${c.lift.map(cm).join(' × ')} cm (customer, ${xe(c.f.liftUom || 'Feet')})</div>${withDim.map(r => `<div>${r.fits ? '✅' : '❌'} ${nm(r.code)} <span class="cell-sub">${r.mm.map(cm).join(' × ')} cm${r.fits ? '' : ' — larger than the lift'}</span></div>`).join('')}</div>` };
+  return { c, html:`<div class="x-lift"><div class="cell-sub">Lift ${c.lift.map(cm).join(' × ')} cm (customer, ${xe(c.f.liftUom || 'Feet')})</div>${withDim.map(r => `<div>${r.fits ? '✅' : '❌'} ${nm(r.code)} <span class="cell-sub">${r.mm.map(cm).join(' × ')} cm${r.fits ? '' : ' — too large for the lift / stairs'}</span></div>`).join('')}</div>` };
 }
 // ---- status
 function lmStatus(b){
@@ -11131,7 +11137,7 @@ function renderDispatchForm(){
         ${late ? `<div class="field span2"><div class="x-warn">This date is after the client committed date (${fmtCv(C)}). Say why <span class="req">*</span></div><input id="x_lm2_lateReason_dispatch" placeholder="e.g. customer asked for a later date, site not ready" value="${xe(f.lateReason)}"></div>` : ''}
         ${addrFieldsHtml(type, f)}
         <div class="field span2"><label>Lift-fit check</label>${sel.length ? lh.html : '<div class="cell-sub">Choose items to check them against the lift.</div>'}
-          ${lh.c.flagged.length && sel.length ? `<div class="x-warn" style="margin-top:6px;">${lh.c.flagged.length} item(s) are larger than the lift. Leave them out, or override with a reason (at least 3 words) — supply sees it until delivery.</div>
+          ${lh.c.flagged.length && sel.length ? `<div class="x-warn" style="margin-top:6px;">${lh.c.flagged.length} item(s) are too large for the lift / stairs. Leave them out, or override with a reason (at least 3 words) — supply sees it until delivery.</div>
             <input id="x_lm2_liftRemarks_dispatch" style="margin-top:4px;" placeholder="e.g. large sofa goes by the stairs, ground floor" value="${xe(f.liftRemarks)}">` : ''}</div>
         <div class="field span2"><label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" id="x_lm2_install" style="width:auto;margin:0;" ${inst ? 'checked' : ''}> Installation required for this dispatch</label>
           <div class="cell-sub">${flaggedSel.length ? `Ticked because the factory flagged ${flaggedSel.map(r => xe(r.a.name)).join(', ')} for installation.` : soInstallCharge(so).length ? 'Ticked because the SO has an installation charge.' : 'Tick if the products need fitting at the site.'}${f.install != null && f.install !== autoInstall ? ' <b>(changed by you)</b>' : ''}</div>
@@ -11192,7 +11198,7 @@ function lmDetailHtml(b){
     if (b.status !== 'delivered' && b.status !== 'completed' && !['rejected','cancelled'].includes(b.status)){
       const c = liftCheck(b.so, codes);
       if (c.flagged.length){ const ok = overrideValid(b, c);
-        out.push(`<div class="${ok ? 'cell-sub' : 'x-warn'}">${ok ? '⚠ Lift override' : '❌ Larger than the lift'}: ${xe(c.flagged.join(', '))}${b.liftOverride ? ` — "${xe(b.liftOverride.remarks)}" (${xe(b.liftOverride.by)}, ${fmtDT(b.liftOverride.at)})${ok ? '' : ' — no longer covers the flagged items; sales must re-confirm'}` : ''}</div>`); }
+        out.push(`<div class="${ok ? 'cell-sub' : 'x-warn'}">${ok ? '⚠ Lift override' : '❌ Too large for the lift / stairs'}: ${xe(c.flagged.join(', '))}${b.liftOverride ? ` — "${xe(b.liftOverride.remarks)}" (${xe(b.liftOverride.by)}, ${fmtDT(b.liftOverride.at)})${ok ? '' : ' — no longer covers the flagged items; sales must re-confirm'}` : ''}</div>`); }
     }
     if (b.installRequired) out.push(`<div class="cell-sub">Installation required${b.installPo ? ' · PO ' + xe(b.installPo) : ''}</div>`);
   }
@@ -11207,7 +11213,7 @@ function lmActionHtml(b){
   const lab = b.type === 'dispatch' ? 'vendor' : 'installation crew';
   if (b.status === 'requested') return `<select data-xlm2-ap="${b.id}:vendor" style="width:100%;" onchange="var o=this.parentNode.querySelector('[data-xlm2-other]'); if (o) o.style.display = this.value === 'Other' ? '' : 'none';"><option value="">Choose ${lab}…</option>${vendorsForType(b.type).map(v => `<option value="${xe(v)}" ${a.vendor === v ? 'selected' : ''}>${xe(v)}</option>`).join('')}</select>
     <input data-xlm2-ap="${b.id}:vendorOther" data-xlm2-other="1" placeholder="Name of the ${lab}" value="${xe(a.vendorOther || '')}" style="width:100%;margin-top:4px;${a.vendor === 'Other' ? '' : 'display:none;'}">
-    <input data-xlm2-ap="${b.id}:tracking" placeholder="Tracking link" value="${xe(a.tracking || '')}" style="width:100%;margin-top:4px;">
+    <input data-xlm2-ap="${b.id}:tracking" placeholder="Tracking link, or NA" value="${xe(a.tracking || '')}" style="width:100%;margin-top:4px;">
     <div class="cell-sub" style="margin-top:2px;">No tracking link? Give the ${b.type === 'dispatch' ? 'transport' : 'crew'} POC:</div>
     <input data-xlm2-ap="${b.id}:pocName" placeholder="POC name" value="${xe(a.pocName || '')}" style="width:100%;margin-top:2px;"><input data-xlm2-ap="${b.id}:pocPhone" placeholder="POC number" value="${xe(a.pocPhone || '')}" style="width:100%;margin-top:4px;">
     ${E}<div style="margin-top:6px;"><button class="btn btn-primary btn-sm" data-xlm2-approve="${b.id}">Approve</button> <button class="btn-text" data-xlm2-reject="${b.id}">Reject</button></div>`;
@@ -11228,7 +11234,7 @@ function lmActionHtml(b){
   return '';
 }
 function lmRowHtml(b, withType, actions){
-  const track = b.trackingLink ? `<a href="${xe(b.trackingLink)}" target="_blank" rel="noopener">Tracking link</a>` : b.transportPocName ? `${xe(b.transportPocName)} · ${xe(b.transportPocPhone)}` : '';
+  const track = b.trackingLink === 'NA' ? 'Tracking: NA' : b.trackingLink ? `<a href="${xe(b.trackingLink)}" target="_blank" rel="noopener">Tracking link</a>` : b.transportPocName ? `${xe(b.transportPocName)} · ${xe(b.transportPocPhone)}` : '';
   const salesFix = state.role === 'sales' || state.role === 'admin';
   const reov = b.type === 'dispatch' && salesFix && ['requested','confirmed','dispatched'].includes(b.status) && (() => { const c = liftCheck(b.so, (b.items || []).filter(i => +i.qty > 0).map(i => i.sku)); return c.flagged.length && !overrideValid(b, c); })();
   return `<tr>${withType ? `<td>${lastMileTypeLabel(b.type)}</td>` : ''}<td><div class="cell-primary" style="white-space:nowrap;">${fmtDate(b.date)}</div><div class="cell-sub" style="white-space:nowrap;">${xe(b.window)}</div></td>
@@ -11447,7 +11453,7 @@ extraWiring.push(() => {
     if (!isPhone(f.pocPhone)) return fail('Enter a valid 10-digit site POC mobile.');
     let liftOverride = null;
     if (type === 'dispatch'){ const c = liftCheck(f.so, items.map(i => i.sku));
-      if (c.flagged.length){ if (words(f.liftRemarks) < 3) return fail(`${c.flagged.join(', ')} ${c.flagged.length > 1 ? 'are' : 'is'} larger than the lift. Leave ${c.flagged.length > 1 ? 'them' : 'it'} out, or give an override reason of at least 3 words.`);
+      if (c.flagged.length){ if (words(f.liftRemarks) < 3) return fail(`${c.flagged.join(', ')} ${c.flagged.length > 1 ? 'are' : 'is'} too large for the lift / stairs. Leave ${c.flagged.length > 1 ? 'them' : 'it'} out, or give an override reason of at least 3 words.`);
         liftOverride = { remarks:f.liftRemarks.trim(), flagged:c.flagged, by:actingUserName(), at:nowIso() }; } }
     const sr = sites()[f.so];
     const autoInstall = items.some(i => flaggedFor(f.so, i.sku) > 0) || soInstallCharge(f.so).length > 0;
@@ -11475,9 +11481,10 @@ extraWiring.push(() => {
     if (!vend) return failA(id, b.type === 'dispatch' ? 'Enter the name of the vendor.' : 'Enter the name of the installation crew.');
     const hasTrack = (a.tracking || '').trim(); const hasPoc = (a.pocName || '').trim() && (a.pocPhone || '').trim();
     if (!hasTrack && !hasPoc) return failA(id, 'Add a tracking link, or the POC name and number.');
-    if (hasTrack && !isUrl(a.tracking)) return failA(id, 'The tracking link should start with http:// or https://');
+    const trNA = /^n\/?a$/i.test(String(a.tracking || '').trim());   // JK 2 Nov: NA is accepted
+    if (hasTrack && !trNA && !isUrl(a.tracking)) return failA(id, 'The tracking link should start with http:// or https:// — or enter NA');
     if (!hasTrack && !isPhone(a.pocPhone)) return failA(id, 'Enter a valid 10-digit POC number.');
-    Object.assign(b, { vendor:vend, trackingLink:hasTrack ? a.tracking.trim() : '', transportPocName:(a.pocName || '').trim(), transportPocPhone:(a.pocPhone || '').trim(), status:'confirmed', approvedBy:actingUserName(), approvedAt:nowIso() });
+    Object.assign(b, { vendor:vend, trackingLink:hasTrack ? (trNA ? 'NA' : a.tracking.trim()) : '', transportPocName:(a.pocName || '').trim(), transportPocPhone:(a.pocPhone || '').trim(), status:'confirmed', approvedBy:actingUserName(), approvedAt:nowIso() });
     okA(id); renderAll(); }));
   document.querySelectorAll('[data-xlm2-reject]').forEach(btn => btn.addEventListener('click', () => { const b = B(btn.dataset.xlm2Reject); if (b){ b.status = 'rejected'; b.approvedBy = actingUserName(); b.approvedAt = nowIso(); } renderAll(); }));
   document.querySelectorAll('[data-xlm2-cancel]').forEach(btn => btn.addEventListener('click', () => { const b = B(btn.dataset.xlm2Cancel); if (b){ b.status = 'cancelled'; b.cancelledBy = actingUserName(); b.cancelledAt = nowIso(); } renderAll(); }));
@@ -12202,7 +12209,7 @@ function inboxItems(){
   if (is('sales')) SLOT_BOOKINGS.filter(b => b.type === 'dispatch' && ['delivered','completed'].includes(b.status) && b.installRequired && !lmInstallDone(b) && !SLOT_BOOKINGS.some(x => x.type === 'installation' && x.so === b.so && LM_LIVE.includes(x.status)) && (isA || isMine(b, 'bookedBy')))
     .forEach(b => add({ id:'lm-reqins-' + b.id, kind:'action', area:'Installation', title:`Request the installation visit for ${b.so}`, detail:`Delivered ${fmtDate(b.deliveredAt)} · ${customerForSo(b.so) || (DPI_BY_SO[b.so] || {}).customer || ''} · installation pending`, when:b.deliveredAt || null, nav:{ module:'slots', set:() => { state.lastMileTab = 'installation'; const f = lmForm('installation'); if (f.so !== b.so){ state.xLm2.installation = null; const g = lmForm('installation'); g.so = b.so; lmPrefill(g, false); } } } }));
   if (is('sales')) SLOT_BOOKINGS.filter(b => b.type === 'dispatch' && LM_LIVE.includes(b.status) && (isA || isMine(b, 'bookedBy'))).forEach(b => { const c = liftCheck(b.so, (b.items || []).filter(i => +i.qty > 0).map(i => i.sku)); if (!c.flagged.length || overrideValid(b, c)) return;
-    add({ id:'lm-lift-' + b.id + '-' + c.flagged.join('.'), kind:'action', area:'Dispatch', title:`Lift-fit warning on ${b.so} — re-confirm or change the dispatch`, detail:`${c.flagged.join(', ')} larger than the customer's lift`, when:null, nav:{ module:'slots', set:() => { state.lastMileTab = 'dispatch'; } } }); });
+    add({ id:'lm-lift-' + b.id + '-' + c.flagged.join('.'), kind:'action', area:'Dispatch', title:`Lift / stairs warning on ${b.so} — re-confirm or change the dispatch`, detail:`${c.flagged.join(', ')} too large for the customer's lift / stairs`, when:null, nav:{ module:'slots', set:() => { state.lastMileTab = 'dispatch'; } } }); });
   if (is('sales')) ORDERS.forEach(o => (o.clarifications || []).filter(c => c.status === 'open').forEach(c => add({ id:'cl-' + c.id, kind:'action', area:'PO Progress', title:`Respond to a clarification on ${o.article}`, detail:`${o.so} · ${c.question}`, when:c.raisedAt, nav:{ module:'confirmations', set:() => { state.openOrderId = o.id; } } })));
   dlTodos(is).forEach(add);   // deadlines: sales ↔ factory negotiation, 20-day window, missing client dates (supply only tracks)
 
@@ -14863,7 +14870,7 @@ function xCatView(){
     ${rows.length > lim ? `<div style="margin-top:10px;display:flex;gap:10px;align-items:center;"><span class="cell-sub">Showing ${lim} of ${rows.length}.</span><button class="btn btn-ghost btn-sm" id="xCatMore">Show 100 more</button></div>` : ''}`;
 }
 function xCatCsv(){
-  const X_ = xCatIndex(), q = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+  const X_ = xCatIndex(), q = v => `"${xlFix(v).replace(/"/g, '""')}"`;
   const head = ['SO Number', 'Customer', 'SO Category', 'PO Number', 'PO Category', 'Article Code', 'Article Name', 'Line Category', 'Packed', 'Job Card #', 'RM (except fabric) available & blocked', 'RM confirmed by', 'RM confirmed on', 'RM how', 'Fabrics', 'Reason'];
   const lines = [head.map(q).join(',')];
   X_.byLine.forEach(r => { const o = r.o, b = r.jc && r.jc.rmBlocked;
@@ -15100,7 +15107,7 @@ function xProjView(){
     <div class="cell-sub" style="margin-top:14px;line-height:1.6;"><b>Rules.</b> Fabric: POs from fabric vendors (InvoicedOS "Furniture Fabrics") in metres or sq ft, on an SO that has an MFPL PO; balance = PO value − payments against that PO; due 30 days after the SO's first MFPL PO; once that has passed, 21 days before the factory date; then overdue. MFPL: each PO's payments allocated oldest PO first; at least 50% due 30 days before its earliest factory date; the rest when its last line flushes out. Flushout: SO value (pre-GST) less what the Dispatch Sheet shows dispatched, spread over the SO's PO lines by PO cost; each line flushes on its Last Mile dispatch booking date, otherwise factory date + 5 working days (Mon–Sat). Lines with neither are under "No date yet".</div>`;
 }
 function xpCsv(){
-  const q = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+  const q = v => `"${xlFix(v).replace(/"/g, '""')}"`;
   const head = ['Type', 'Direction', 'Due date', 'Overdue', 'SO Number', 'Customer', 'PO Number', 'Vendor', 'PO date', 'PO / SO value', 'Paid / dispatched', 'Amount (pre-GST)', 'Factory date', 'Why this date'];
   const L = [head.map(q).join(',')].concat((state.xpList || []).map(x => [XP_KIND[x.kind], x.dir < 0 ? 'Out' : 'In', x.date || '', x.overdue ? 'Yes' : '', x.so, (DPI_BY_SO[x.so] || {}).customer || '', x.po, x.vendor || '', x.poDate || '',
     Math.round(x.poValue != null ? x.poValue : x.soValue || 0), Math.round(x.paid != null ? x.paid : x.dispatched || 0), Math.round(x.amount), x.factory || '', x.basis].map(q).join(',')));
@@ -15239,7 +15246,7 @@ function xrView(){
     </tbody></table></div>`;
 }
 function xrCsv(){
-  const R = xrSim(), q = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+  const R = xrSim(), q = v => `"${xlFix(v).replace(/"/g, '""')}"`;
   const L = [['Plan', 'Dispatch day', 'Truck', 'Booking', 'SO Number', 'Customer', 'Booked for', 'Shift (days)', 'Units', 'Items'].map(q).join(',')];
   const row = (plan, d) => L.push([plan, d.day || '', d.truck || '', d.booked ? d.id : 'not booked', d.so, d.customer, d.want, d.shift || 0, d.units, d.items.map(i => i.sku + ' × ' + i.qty).join('; ')].map(q).join(','));
   R.placed.slice().sort((a, b) => a.day.localeCompare(b.day) || a.truck - b.truck).forEach(d => row('Truck', d));
@@ -15342,6 +15349,215 @@ extraWiring.push(() => {
     renderAll();
   });
 });
+
+// ---------------------------------------------------------------- JK feedback build (2 Nov 2026)
+window.__xfbEval = s => eval(s);   // test/inspection handle (same access as the browser console)
+
+// ---- 10 · CSVs: a long SO / PO number (11+ digits) is written as ="…" so Excel shows and keeps every digit
+function xlFix(v){ const s = v == null ? '' : String(v); return /^\d{11,}$/.test(s) ? '="' + s + '"' : s; }
+const _csvCellFb = csvCell; csvCell = v => _csvCellFb(xlFix(v));   // every downloadCsv() table goes through csvCell
+
+// ---- 1 · a SKU date later than the PO date (proposal or deviation). Sales still accepts or counters.
+// When the negotiation closes on a date after the PO date, the SKU keeps its own date (o.factoryOverPo → effF uses it);
+// the PO date stays the limit for the PO's other SKUs.
+const _closeNegFb = closeNeg;
+closeNeg = function(t, date, how){
+  const r = _closeNegFb.apply(this, arguments);
+  if (t.type === 'sku'){ const lim = (PO_DL[t.po] || {}).date; if (lim && date > lim) t.o.factoryOverPo = true; else delete t.o.factoryOverPo; }
+  return r;
+};
+const _negBoxFb = negBox;
+negBox = function(t){
+  let h = _negBoxFb.apply(this, arguments);
+  if (t.type === 'sku' && h.indexOf('id="x_neg_date"') >= 0){ const lim = (PO_DL[t.po] || {}).date;
+    if (lim) h = h.replace('<textarea id="x_neg_reason"', `<div class="cell-sub">PO date: ${fmtFv(lim)}. A later date for this SKU can be asked for — once sales accepts it, this SKU follows its own date and the PO date stays the limit for the other SKUs.</div><textarea id="x_neg_reason"`); }
+  return h;
+};
+ACT_LABELS.factoryOverPo = 'Factory date later than the PO date';
+
+// ---- 2 · countdown on the PO line (PO Progress Tracker)
+function xDlLeftTxt(po){
+  const ls = linesOfPo(po); const ins = ls.filter(dlInScope); if (!ins.length) return '';
+  const t = tPo(po, ls); if (tConfirmed(t) || negOf(t) || ls.some(x => x.deadlineNeg)) return '';
+  const left = DL_WINDOW - dlAge(ins[0]); return left >= 0 ? ` · <b>factory date due in ${left} day(s)</b>` : '';
+}
+
+// ---- 4 · job card stage shown: the furthest stage with a start date, an end date and at least one signature
+// (display only — delay-risk rules and C0–C4 are unchanged). A line with several cards shows its least advanced card.
+const xJcCards = o => JOB_CARDS.filter(j => j.linkedPo === o.po && (!j.linkedArticleCode || j.linkedArticleCode === o.sku));
+function xJcDone(jc){ let i = -1; (jc.stages || []).forEach((s, k) => { if ((s.startDateISO || s.startDateRaw) && (s.endDateISO || s.endDateRaw) && (s.supervisorSigned || s.managerSigned)) i = k; }); return i; }
+function xJcInfo(o){
+  const cs = xJcCards(o); if (!cs.length) return null;
+  const w = cs.map(j => ({ j, i:xJcDone(j) })).sort((a, b) => a.i - b.i)[0];
+  const lab = w.i < 0 ? 'No stage completed yet' : w.i === (w.j.stages || []).length - 1 ? 'Packing done' : w.j.stages[w.i].label + ' done';
+  return { lab, card:w.j.jobCardNumber, n:cs.length };
+}
+jobCardStageForOrder = function(o){
+  const f = xJcInfo(o); if (!f) return 'Not yet raised';
+  return `${xe(f.lab)}<div class="cell-sub">Job card ${xe(f.card)}${f.n > 1 ? ' · least advanced of ' + f.n : ''}</div>`;
+};
+function xJcShort(o){ const f = xJcInfo(o); return f ? `Job card ${xe(f.card)}: ${xe(f.lab)}${f.n > 1 ? ' (least advanced of ' + f.n + ')' : ''}` : 'No job card yet'; }
+window.__xJcLine = o => factoryLine(o) ? `<div class="cell-sub" style="margin-top:3px;">${xJcShort(o)}</div>` : '';   // used by the PO tracker's line table (main script)
+function xCardPo(jc){ const w = String(jc.workOrderNumber || '').replace(/\D/g, ''); return w ? '242001000' + w : ''; }
+
+// ---- 5 · "QC report generated" — supply's tick on each furniture factory SKU (Order Deadlines), once packing is closed.
+// Only this tick makes the SKU ready for a dispatch / installation slot and lets its warehouse tags be made.
+// A furniture SKU with no job card can be ticked too (it stays not ready until it is).
+function xQcNeed(o){ return factoryLine(o) && isFurn(o); }
+function xQcOk(o){ return !!(o && o.qcReport && o.qcReport.on); }
+function xQcPacked(o){ const jc = jobCardOf(o); const pk = jc && (jc.stages || []).find(s => s.key === 'packing'); return !!(pk && (pk.endDateISO || pk.endDateRaw)); }
+const xQcCanTick = o => xQcNeed(o) && (!jobCardOf(o) || xQcPacked(o));
+function xQcBlocks(po, sku){ const o = ORDERS.find(x => x.po === po && x.sku === sku && x.lifecycle === 'po_confirmed'); return o && xQcNeed(o) && !xQcOk(o) ? o : null; }
+function xQcCell(o){
+  if (!xQcNeed(o)) return '';
+  const q = o.qcReport, ok = xQcOk(o), can = ['supply', 'admin'].includes(state.role);
+  const who = ok ? `<div class="cell-sub">${xe(q.setBy || '')}${q.at ? ', ' + fmtDate(String(q.at).slice(0, 10)) : ''}</div>` : '';
+  if (can && (ok || xQcCanTick(o))) return `<label class="x-qc" style="display:flex;gap:6px;align-items:center;margin-top:6px;font-size:12.5px;"><input type="checkbox" data-xqc="${xe(o.id)}" ${ok ? 'checked' : ''} style="width:auto;margin:0;"> QC report generated</label>${who}${!ok && !jobCardOf(o) ? '<div class="cell-sub">No job card linked</div>' : ''}`;
+  if (ok) return `<div class="cell-sub" style="margin-top:6px;">✓ QC report generated</div>${who}`;
+  return `<div class="cell-sub" style="margin-top:6px;">QC report: ${jobCardOf(o) && !xQcPacked(o) ? 'after packing' : 'pending with supply'}</div>`;
+}
+ACT_LABELS.qcReport = 'QC report generated'; ACT_LABELS['qcReport.on'] = 'QC report generated';
+const _actDiffFb = actDiff; actDiff = function(){ return _actDiffFb.apply(this, arguments).filter(c => c.k !== 'qcTicksBy'); };   // the tick itself is already reported
+extraWiring.push(() => {
+  document.querySelectorAll('[data-xqc]').forEach(c => {
+    c.addEventListener('click', ev => ev.stopPropagation());
+    c.addEventListener('change', () => { const o = ORDER_BY_ID[c.dataset.xqc] || ORDERS.find(x => x.id === c.dataset.xqc); if (!o || !['supply', 'admin'].includes(state.role)) return;
+      const ev = { on:c.checked, setBy:actingUserName(), at:nowIso() };
+      o.qcReport = ev; o.qcTicksBy = (o.qcTicksBy || []).concat([ev]); renderAll(); });   // qcTicksBy: every tick / untick (name keeps it out of the activity diff)
+  });
+});
+
+// ---- 3 · stock block issued to the factory: a PO line on the same SO for the blocked code + "FIN" (AARA → AARAFIN)
+const xNkFb = v => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+function xFinOf(r){
+  if (!r || r.status !== 'approved' || !r.so || !r.sku) return null;
+  const want = xNkFb(r.sku) + 'FIN';
+  return (LINES_BY_SO[r.so] || []).find(o => o.po && o.lifecycle === 'po_confirmed' && xNkFb(o.sku) === want) || null;
+}
+function xFinPill(r, o){ return `<span class="pill good"><span class="dot"></span>Issued to factory — FIN PO ${xe(o.po)}</span>`; }
+blockedQty = function(sku, warehouse){ return STOCK_BLOCK_REQUESTS.filter(r => r.sku === sku && r.warehouse === warehouse && r.status === 'approved' && !xFinOf(r)).reduce((s, r) => s + r.qtyRequested, 0); };
+
+// ---- 2 / 6 / 7 · bell and to-do list
+const xFbDaysAgo = iso => iso ? dDiff(todayStr(), String(iso).slice(0, 10)) : 999;
+const _inbFb = inboxItems;
+inboxItems = function(){
+  let out = _inbFb.apply(this, arguments);
+  const role = state.role;
+  // 7 · Dispatch Day to-dos appear from 48 hours before the dispatch date (the checks can still be done any time).
+  //     Approval links that expire are not held back.
+  try {
+    const early = ddList().filter(r => { const b = ddBooking(r); const d = (b && b.date) || (r.snap || {}).date; return d && dDiff(d, todayStr()) > 2; }).map(r => '-' + r.id + '-');
+    if (early.length) out = out.filter(it => !/^dd-(?!appr-|exp-)/.test(it.id || '') || !early.some(k => (it.id + '-').indexOf(k) > 0));
+  } catch(e){ console.error('dd 48h', e); }
+  // 2 · factory: the 20-day window — new MFPL PO with its countdown, a reminder at 5 days left, and the automatic date
+  let byPo = null;
+  out.forEach(it => { if (!/^dlw-/.test(it.id || '')) return; const po = it.id.slice(4);
+    if (!byPo){ byPo = {}; ORDERS.forEach(x => { if (x.po && !byPo[x.po] && dlInScope(x)) byPo[x.po] = x; }); }
+    const o = byPo[po]; if (!o) return;
+    const left = DL_WINDOW - dlAge(o);
+    if (left <= 5){ it.id = 'dlw5-' + po; it.title = `Reminder: ${left} day(s) left to agree the client date or propose yours for MFPL PO ${po}`; }
+    else it.title = `New MFPL PO ${po} — ${left} day(s) left to agree the client date or propose yours`;
+    it.when = it.when || (dlPoDate(o) ? dlPoDate(o) + 'T00:00:00Z' : null); });
+  if (role === 'production'){
+    const g = {};
+    ORDERS.forEach(o => { if (o.factoryDateSource !== 'auto' || !o.po) return; const h = (o.deadlineHistory || []).filter(x => x.decision === 'auto').pop(); if (!h || xFbDaysAgo(h.decidedAt) > 7) return;
+      (g[o.po] = g[o.po] || { o, h, n:0 }).n++; });
+    Object.keys(g).forEach(po => { const { o, h, n } = g[po];
+      out.push({ id:'dla-' + po, kind:'notice', area:'Order deadlines', title:`Client date taken automatically for PO ${po} — no proposal within ${DL_WINDOW} days`, detail:`SO ${o.so} · ${o.customer} · ${n} SKU(s) · factory date ${fmtFv(h.newValue)}`, when:h.decidedAt, nav:{ module:'deadlines', set:() => { state.openOrderId = o.id; } } }); });
+  }
+  // 6 · sales: fabric tags dispatched to / received at the factory (one notice per challan or receipt per PO, kept 7 days)
+  if (role === 'sales'){
+    const g = {};
+    FABRIC_ENTRIES.forEach(e => {
+      (e.dispatches || []).forEach(d => { if (xFbDaysAgo(d.dispatchedAt) > 7) return; const k = 'd|' + (d.challanNo || String(d.dispatchedAt).slice(0, 16)) + '|' + e.po; (g[k] = g[k] || { kind:'d', e, at:d.dispatchedAt, ref:d.challanNo || '', tags:[] }).tags.push(e); });
+      (e.receipts || []).forEach(d => { if (xFbDaysAgo(d.receivedAt) > 7) return; const k = 'r|' + (d.receiptNo || String(d.receivedAt).slice(0, 16)) + '|' + e.po; (g[k] = g[k] || { kind:'r', e, at:d.receivedAt, ref:d.receiptNo || '', tags:[] }).tags.push(e); });
+    });
+    Object.keys(g).forEach(k => { const x = g[k], e = x.e, so = POL_BY_PO[e.po] ? (poSo(e.po) || '') : '';
+      const names = [...new Set(x.tags.map(t => t.fabricName))].slice(0, 3).join(', ');
+      out.push({ id:'fabn-' + k, kind:'notice', area:'Furnishings', title:`Fabric ${x.kind === 'd' ? 'dispatched to the factory' : 'received at the factory'} — PO ${e.po || '?'}${so ? ', SO ' + so : ''}`,
+        detail:`${x.tags.length} tag(s): ${names}${new Set(x.tags.map(t => t.fabricName)).size > 3 ? '…' : ''} · ${e.customer || ''}${x.ref ? ' · ' + x.ref : ''}`, when:x.at, nav:{ module:'fabric', set:() => { state.fabricTab = 'log'; } } }); });
+  }
+  return out.sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')));
+};
+// notices read as notices, not "Needs action"
+const _rinFb = renderInbox;
+renderInbox = function(){
+  const h = _rinFb.apply(this, arguments);
+  if (h.indexOf('data-xin-open="dla-') < 0 && h.indexOf('data-xin-open="fabn-') < 0) return h;
+  return h.replace(/(data-xin-open="(?:dla-|fabn-)[^"]*">[\s\S]*?)<span class="pill warn">Needs action<\/span>/g, '$1<span class="pill neutral">Notice</span>');
+};
+XUSER_RENDER.inbox = renderInbox;
+
+// ---- 8 · lift and stairs: 5 inches added to every dimension of each piece; a site with no lift is checked against
+// its stairs — the piece's smallest side must pass the stair width and the piece must fit the landing (L × B × H)
+const XL_PAD = 127;   // 5 inches, in mm
+function stairsMm(f){ if (!f || !/^No lift/.test(f.lift || '')) return null; const k = f.stairUom === 'Centimeters' ? 10 : 304.8;
+  const w = +f.stairW, L = [f.landL, f.landB, f.landH].map(Number); if (!(w > 0) || L.some(x => !(x > 0))) return null;
+  return { w:+(w * k).toFixed(1), land:L.map(x => +(x * k).toFixed(1)).sort((a, b) => b - a) }; }
+liftCheck = function(so, codes){
+  const sr = sites()[so]; const f = sr && sr.fields; const lift = liftMm(f); const st = lift ? null : stairsMm(f); const dims = (sr && sr.scan && sr.scan.dims) || [];
+  const rows = codes.map(code => { const ac = artCodes(so, code).map(normCode); const d = dims.find(x => ac.includes(normCode(x.code)));
+    if (!d) return { code, dim:null, fits:null };
+    const mm = [d.l, d.w, d.h].map(v => (+v || 0) + XL_PAD).sort((a, b) => b - a);
+    const fits = lift ? mm.every((v, i) => v <= lift[i]) : st ? (mm[2] <= st.w && mm.every((v, i) => v <= st.land[i])) : null;
+    return { code, dim:d, mm, fits }; });
+  return { lift, stairs:st, f, rows, flagged:rows.filter(r => r.fits === false).map(r => r.code).sort(), noLift: !!(f && /^(No|Ground)/.test(f.lift || '')) && !st };
+};
+liftHtml = function(so, codes, nameOf){
+  const c = liftCheck(so, codes); const nm = code => xe(nameOf ? nameOf(code) : code);
+  if (c.noLift) return { c, html:`<div class="cell-sub">${/^Ground/.test(c.f.lift || '') ? 'Ground floor — no lift or stairs. No size check.' : 'No lift — the stair width and landing size are not on the site form yet, so there is no stairs check.'}${c.f.liftAlt ? ' ' + xe(c.f.liftAlt) : ''}</div>` };
+  if (!c.lift && !c.stairs) return { c, html:`<div class="cell-sub">Lift / stairs check: waiting for the customer's lift size${c.rows.some(r => r.dim) ? '' : ' and the SO dimensions'}.</div>` };
+  const box = c.lift ? `Lift ${c.lift.map(cm).join(' × ')} cm (customer, ${xe(c.f.liftUom || 'Feet')})` : `No lift — stairs ${cm(c.stairs.w)} cm wide, landing ${c.stairs.land.map(cm).join(' × ')} cm (customer, ${xe(c.f.stairUom || 'Feet')})`;
+  const withDim = c.rows.filter(r => r.dim);
+  if (!withDim.length) return { c, html:`<div class="cell-sub">${box}. No dimensions on the scanned SO for these items, so they aren't checked.</div>` };
+  return { c, html:`<div class="x-lift"><div class="cell-sub">${box} · each piece checked with 5 in added to every side</div>${withDim.map(r => `<div>${r.fits ? '✅' : '❌'} ${nm(r.code)} <span class="cell-sub">${r.mm.map(cm).join(' × ')} cm with the allowance${r.fits ? '' : ' — too large for the ' + (c.lift ? 'lift' : 'stairs')}</span></div>`).join('')}</div>` };
+};
+
+// ---- 11 · PO Progress Tracker: lines CSV (one row per SKU line of the SOs on screen — same chip and search)
+function xPoLinesCsv(){
+  const sos = state.xPoViewSos || [];
+  const head = ['SO Number', 'SO Date', 'Customer', 'Site', 'Sales Rep', 'PO Number', 'PO Date', 'Supplier', 'Article Code', 'Article Name', 'SO Qty', 'PO Qty', 'UOM', 'Status']
+    .concat(bothView() ? ['Client Date', 'Factory Target (client - 5)', 'Factory Date', 'Client-ready (factory + 5)'] : [cLabel(), fLabel()])
+    .concat(['MFPL Factory Line', 'Job Card', 'Job Card Stage', 'QC Report Generated', 'Delay Risk']);
+  const LC = { draft:'Draft', submitted:'Sent to supply - PO to raise', po_raised:'Marked raised - waiting for PO Summary', po_confirmed:'PO confirmed' };
+  const rows = [];
+  sos.forEach(so => { const h = DPI_BY_SO[so] || {};
+    (LINES_BY_SO[so] || []).slice().sort((a, b) => (a.po || '~').localeCompare(b.po || '~') || String(a.sku).localeCompare(String(b.sku))).forEach(o => {
+      const c = o.committedDeadline || '', f = effF(o) || '', fl = factoryLine(o), jf = fl ? xJcInfo(o) : null, pl = POL_BY_PO[o.po] ? POL_BY_PO[o.po][0] : null;
+      rows.push([so, h.date || '', h.customer || o.customer || '', h.city || '', h.rep || '', o.po || '', pl ? pl.poDate : (o.poRaisedDate || ''), pl ? pl.supplier : (o.supplier || ''), o.sku, o.article, o.qty, o.poQty, o.uom, LC[o.lifecycle] || o.lifecycle || '']
+        .concat(bothView() ? [c, c ? addD(c, -DL_BUF) : '', f, f ? addD(f, DL_BUF) : ''] : [c ? viewC(c) : '', f ? viewF(f) : ''])
+        .concat([fl ? 'Yes' : '', jf ? jf.card : '', jf ? jf.lab + (jf.n > 1 ? ' (least advanced of ' + jf.n + ')' : '') : (fl ? 'No job card yet' : ''),
+          xQcNeed(o) ? (xQcOk(o) ? 'Yes' : 'No') : '', lineRisks(o).map(r => r.text).join('; ')]));
+    }); });
+  downloadCsv(`PO-progress-lines-${sos.length}-SOs-${todayStr()}.csv`, [head, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n'));
+  return rows.length;
+}
+const _rolFb = renderOrdersList;
+renderOrdersList = function(){
+  const h = _rolFb.apply(this, arguments);
+  if (state.xPoFilter === 'xcat' || state.xPoFilter === 'unmatched') return h;
+  const n = (state.xPoViewSos || []).length;
+  const btn = `<button class="btn btn-ghost btn-sm" id="xPoLinesCsv" ${n ? '' : 'disabled'} title="One row per SKU line of the sales orders in this view">Download lines CSV (${n} SO${n === 1 ? '' : 's'})</button>`;
+  const i = h.indexOf('<button class="btn btn-ghost btn-sm" id="x_csv_all"');
+  if (i >= 0) return h.slice(0, i) + btn + ' ' + h.slice(i);
+  const j = h.indexOf('<div class="card table-wrap"><table class="grid-table">');
+  return j < 0 ? h : h.slice(0, j) + `<div style="display:flex;justify-content:flex-end;margin:-6px 0 10px;">${btn}</div>` + h.slice(j);
+};
+extraWiring.push(() => { const b = document.getElementById('xPoLinesCsv'); if (b) b.addEventListener('click', () => xPoLinesCsv()); });
+
+// ---- 13 · SKU page: supply / admin see both dates; sales only the client-side date (+5); the factory only its date (−5)
+const _rodFb = renderOrderDetail;
+renderOrderDetail = function(orderId){
+  let h = _rodFb.apply(this, arguments);
+  const o = ORDER_BY_ID[orderId] || ORDERS.find(x => x.id === orderId); if (!o) return h;
+  const r = roleNow(), f = effF(o), fx = (k, v, mono) => `<div><div class="f-k">${k}</div><div class="f-v${mono ? ' mono' : ''}">${v}</div></div>`;
+  const facts = bothView() ? fx('Factory date', f ? fmtDate(f) : '—') + fx('Client-ready date', f ? fmtDate(addD(f, DL_BUF)) : '—', true) + `<div><div class="f-k">Earliest dispatch</div><div class="f-v" style="font-weight:500;color:var(--ink-faint);">Factory date + ${DL_BUF} days</div></div>`
+    : r === 'sales' ? fx('Ready for the client', f ? fmtDate(addD(f, DL_BUF)) : '—', true)
+    : fx('Your factory date', f ? fmtDate(f) : '—');
+  h = h.replace(/<div><div class="f-k">Production deadline<\/div><div class="f-v">[^<]*<\/div><\/div>\s*<div><div class="f-k">Sales readiness date<\/div><div class="f-v mono">[^<]*<\/div><\/div>\s*<div><div class="f-k">Earliest dispatch<\/div><div class="f-v"[^>]*>[^<]*<\/div><\/div>/, facts);
+  if (r !== 'sales') h = h.replace(/(<div class="f-k">)Committed deadline(<\/div><div class="f-v">)[^<]*(<\/div>)/, (m, a, b, c) => `${a}${r === 'production' ? 'Committed date' : 'Committed date to client'}${b}${o.committedDeadline ? fmtCv(o.committedDeadline) : '—'}${c}`);
+  return h;
+};
 
 if (!routePublic() && state.currentUser) renderAll();
 })();
