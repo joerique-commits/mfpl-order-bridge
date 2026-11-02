@@ -15286,6 +15286,63 @@ extraWiring.push(() => {
 });
 window.__xroute = { sim:xrSim, units:xrUnits };   // for checks from the console
 
+// ---------------------------------------------------------------- Admin Uploads: import job cards read by Claude (2 Nov)
+// Claude reads job card photos into a JSON file (same record shape as a card saved in Job Card Station).
+// Admin picks the file; new card numbers are added, a card number already here is updated:
+// card fields and stage dates from the file, but a signature or a date already saved is never removed,
+// and the RM tick, scan history and remarks are kept (remarks merged).
+function xJiMerge(ex, r){
+  const keep = Object.assign({}, ex);
+  ['clientName','workOrderNumber','productCode','qty','cardDateRaw','cardDateISO'].forEach(k => { if (r[k] && r[k] !== '—') keep[k] = r[k]; });
+  if (r.linkedPo){ ['linkedOrderId','linkedPo','linkedCustomerName','linkedArticleCode','linkedArticleName'].forEach(k => keep[k] = r[k]); }
+  keep.stages = (ex.stages || []).map((s, i) => { const n = (r.stages || [])[i] || {};
+    return Object.assign({}, s, { startDateISO:n.startDateISO || s.startDateISO, startDateRaw:n.startDateRaw || s.startDateRaw, endDateISO:n.endDateISO || s.endDateISO, endDateRaw:n.endDateRaw || s.endDateRaw,
+      supervisorSigned:!!(s.supervisorSigned || n.supervisorSigned), managerSigned:!!(s.managerSigned || n.managerSigned) }); });
+  keep.factoryRemarks = xJcMergeRemarks(ex.factoryRemarks, r.factoryRemarks);
+  keep.scanHistory = (ex.scanHistory || []).concat(r.scanHistory || []); keep.scanCount = (ex.scanCount || 0) + 1;
+  keep.updatedAt = nowIso(); keep.importedFrom = r.importedFrom; keep.importMatch = r.importMatch; keep.importNote = r.importNote;
+  return keep;
+}
+function xJiCard(){
+  const J = state.xJi = state.xJi || {};
+  return `<div class="card action-card" id="xJiCard">
+    <div class="ac-title">Import job cards read by Claude</div>
+    <div class="ac-sub">Pick the job-cards JSON file Claude saved (from photos of the cards). New card numbers are added; a card already here is updated without removing any date or signature already saved.</div>
+    <div style="margin-top:10px;"><input type="file" id="xJiFile" accept=".json,application/json"></div>
+    ${J.err ? `<div class="scan-error" style="margin-top:8px;">${xe(J.err)}</div>` : ''}
+    ${J.recs ? `<div class="cell-sub" style="margin-top:8px;">${xe(J.name)}: ${J.recs.length} card(s) — ${J.nNew} new, ${J.nUpd} already here (will be updated), ${J.recs.filter(r => r.linkedPo).length} linked to a PO line.</div>
+      <button class="btn btn-primary btn-sm" id="xJiGo" style="margin-top:8px;" ${J.busy ? 'disabled' : ''}>Import ${J.recs.length} job card(s)</button>` : ''}
+    ${J.done ? `<div class="readonly-banner" style="margin-top:8px;">${xe(J.done)}</div>` : ''}
+  </div>`;
+}
+const _rauJi = renderAdminUploads;
+renderAdminUploads = function(){ return _rauJi.apply(this, arguments) + (state.role === 'admin' ? xJiCard() : ''); };
+extraWiring.push(() => {
+  const f = document.getElementById('xJiFile');
+  if (f) f.addEventListener('change', async () => {
+    const J = state.xJi = { name:'' }; const file = f.files && f.files[0]; if (!file) return;
+    try {
+      const recs = JSON.parse(await file.text());
+      if (!Array.isArray(recs) || !recs.every(r => r && r.jobCardNumber && Array.isArray(r.stages) && r.stages.length === 7)) throw new Error("This isn't a job-cards file from Claude.");
+      const have = new Set(JOB_CARDS.map(j => String(j.jobCardNumber).trim().toLowerCase()));
+      Object.assign(J, { name:file.name, recs, nNew:recs.filter(r => !have.has(String(r.jobCardNumber).trim().toLowerCase())).length });
+      J.nUpd = recs.length - J.nNew;
+    } catch (e){ J.err = 'Could not read the file: ' + e.message; }
+    renderAll();
+  });
+  const g = document.getElementById('xJiGo');
+  if (g) g.addEventListener('click', async () => {
+    const J = state.xJi; if (!J || !J.recs) return; J.busy = true; renderAll();
+    let a = 0, u = 0;
+    J.recs.forEach(r => { const i = JOB_CARDS.findIndex(j => String(j.jobCardNumber).trim().toLowerCase() === String(r.jobCardNumber).trim().toLowerCase());
+      if (i >= 0){ JOB_CARDS[i] = xJiMerge(JOB_CARDS[i], r); u++; } else { JOB_CARDS.unshift(r); a++; } });
+    renderAll();
+    try { await window.__OB.flush(); state.xJi = { done:`Imported: ${a} added, ${u} updated. Saved.` }; }
+    catch (e){ state.xJi = { done:`Imported ${a + u} card(s) here, but saving failed (${e.message}). Don't reload; try "Import" again in a minute.`, recs:J.recs, name:J.name, nNew:0, nUpd:J.recs.length }; }
+    renderAll();
+  });
+});
+
 if (!routePublic() && state.currentUser) renderAll();
 })();
 
