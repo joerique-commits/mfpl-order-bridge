@@ -1120,6 +1120,28 @@ OB.expRemove = async function(slot, redraw){
 };
 
 // Admin Uploads > Backup: the whole shared store (as stored, with record versions) + accounts list, as one JSON file.
+// Go-live clean-up (2 Nov 2026): deletes every shared store except `keep`, plus the activity log. Admin, console only.
+// Saving is switched off first and the page reloads after, so nothing held in this page writes the old entries back.
+OB.goLiveClear = async function(keep){
+  if (!OB.user || OB.user.role !== 'admin') throw new Error('Admin only');
+  keep = keep || ['ob_permissions', 'ob_slot_settings', 'ob_approvers', 'ob_fab_locations', 'ob_risk_golive', 'ob_route_units'];
+  if (OB.sync) await OB.flush();
+  OB.sync = false;
+  var keys = [];
+  Object.keys(STORES).forEach(function(st){ if (keep.indexOf(st) >= 0) return; var c = STORES[st];
+    if (c.t === 'value') keys.push('b_' + st + '__v');
+    else if (c.n) for (var h = 0; h < c.n; h++) keys.push('b_' + st + '__h' + h); });
+  var idx = await api('/api/store/keys?nolist=1', { cache:'no-store' });
+  (idx.act || []).forEach(function(k){ if (keys.indexOf(k) < 0) keys.push(k); });
+  for (var d = 0; d < 60; d++){ var k2 = 'b_ob_activity__d' + new Date(Date.now() - d * 864e5).toISOString().slice(0, 10).replace(/-/g, '') + '_' + OB.uidSafe; if (keys.indexOf(k2) < 0) keys.push(k2); }
+  var done = 0;
+  for (var i = 0; i < keys.length; i += 40){
+    var part = keys.slice(i, i + 40), ok = false;
+    for (var a = 0; a < 4 && !ok; a++){ try { await api('/api/admin/store-clear', { body:{ keys:part, dropActIndex:true } }); ok = true; } catch(e){ if (a === 3) throw e; await new Promise(function(r){ setTimeout(r, 2000 * (a + 1)); }); } }
+    done += part.length;
+  }
+  return { deleted:done, kept:keep };
+};
 OB.downloadBackup = async function(redraw){
   OB.backup = { busy:true }; redraw();
   try {
@@ -1484,7 +1506,7 @@ var SIG = [
   ['dispatch_sheet', ['Delivery Note Number', 'Net Amount', 'Total Discount']],
 ];
 var LABEL = { po_summary:'PO Summary', so_article:'SO Article Breakup', stock:'Stock Summary', so_grn:'SO vs PO vs GRN', po_payable:'PO Payable', po_balance:'PO Balance Payables',
-  so_header:'Daily PI Revenue', collections:'Collections Receipts', payments:'Payment Expenses', verticle_stmt:'Verticle Statement', dispatch_sheet:'Dispatch Sheet', open_sos:'Open SOs list', so_remap:'Revised SO mapping', unknown:'Not recognised' };
+  so_header:'Daily PI Revenue', collections:'Collections Receipts', payments:'Payment Expenses', verticle_stmt:'Verticle Statement', dispatch_sheet:'Dispatch Sheet', open_sos:'Open SOs list', so_remap:'Revised SO mapping', so_drop:'Drop SOs list', unknown:'Not recognised' };
 var DATE_COLS = { po_summary:'PO Date', so_article:'SO Date', so_header:'PI Date', payments:'Transaction Date', dispatch_sheet:'Delivery Note Date' };
 
 // files: [{ name, wb }] (SheetJS workbooks read with { cellNF:true }). Returns { data, files:[report] }.
@@ -1501,6 +1523,7 @@ function build(files, opts){
     for (var i = 0; i < SIG.length; i++){ if (SIG[i][1].every(function(c){ return has(df, c); })){ typ = SIG[i][0]; break; } }
     if (typ === 'unknown'){ var os = openSosFrame(wb, d1904); if (os && os.rows.length && os.cols.length <= 4){ df = os; typ = 'open_sos'; } }
     if (typ === 'unknown'){ var rv = narrowFrame(wb, d1904, ['Cancelled SO', 'New SO']); if (rv && rv.rows.length){ df = rv; typ = 'so_remap'; } }
+    if (typ === 'unknown'){ var dr = narrowFrame(wb, d1904, ['Drop SO']); if (dr && dr.rows.length){ df = dr; typ = 'so_drop'; } }
     if (typ === 'stock') df = frame(df.cols, df.rows.filter(function(r){ return G(df, r, 'Site') !== null && G(df, r, 'Article') !== null; }));
     found.push({ file:f.name, type:typ, rows:df.rows.length, sheet:sheet, df:df, wb:wb, d1904:d1904 });
   });
@@ -1716,7 +1739,7 @@ function build(files, opts){
     stockblock:{ status:'partial', label:'Real stock', note:'Stock in hand from the Stock Summary files (' + whText + ', MAGARI Standard Furniture only). Requests and blocks are entered here.' },
     sorevision:{ status:'partial', label:'Real values', note:'SO, customer and value from Daily PI Revenue; PO(s) from PO Summary. Advance collected is not in this folder.' },
     deadlines:{ status:'partial', label:'Structure only', note:'SO > PO > SKU from real data. No file carries committed or production dates.' },
-    fabric:{ status:'partial', label:'Real POs', note:'PO and article pickers come from PO Summary. Tag entries are created here (the live tool\'s existing tags are not loaded).' },
+    fabric:{ status:'partial', label:'Real POs', note:'PO and article pickers come from PO Summary. Tags from the earlier Upholstery Tag Station (15 Sep – 31 Oct) were brought in on 2 Nov 2026; new tags are created here.' },
     warehousetag:{ status:'partial', label:'Real POs', note:'PO, article, SO and customer from PO Summary. Tags are created here.' },
     slots:{ status:'partial', label:'Real SOs', note:'SOs from Daily PI Revenue, SKUs from PO Summary. Bookings are created here.' },
     payables:{ status:'partial', label:(openingPayables.length || payments.length) ? 'Real, two-part' : 'No source in this folder',
@@ -1743,7 +1766,8 @@ function build(files, opts){
     osDf.rows.forEach(function(r){ var so = s_(G(osDf, r, 'SO Number')); if (so) listed[so] = 1; if (so && hasSite && s_(G(osDf, r, 'Site'))) listSites[s_(G(osDf, r, 'Site')).toUpperCase()] = 1; });
     var asOn = null;
     by.open_sos.forEach(function(x){ var d = asOnFromName(x.file); if (d && (!asOn || d > asOn)) asOn = d; });
-    data.openFilter = applyOpenFilter(data, listed, asOn, opts.keepSos || [], opts.keepText || '', Object.keys(listSites));
+    var drops = []; if (by.so_drop.length){ var dDf = cat('so_drop'); dDf.rows.forEach(function(r){ var so = s_(G(dDf, r, 'Drop SO')).replace(/^'+/, ''); if (so) drops.push(so); }); }
+    data.openFilter = applyOpenFilter(data, listed, asOn, opts.keepSos || [], opts.keepText || '', Object.keys(listSites), drops);
   }
 
   // per-file report: what each file was read as, and the newest date in it
@@ -1766,7 +1790,7 @@ function asOnFromName(name){
   return null;
 }
 // The trim itself. Mutates data; returns a summary for the Daily exports card.
-function applyOpenFilter(data, listed, asOn, keepSos, keepText, listSites){
+function applyOpenFilter(data, listed, asOn, keepSos, keepText, listSites, drops){
   var keep = {}; Object.keys(listed).forEach(function(so){ keep[so] = 1; }); (keepSos || []).forEach(function(so){ if (so) keep[so] = 1; });
   var savedKept = 0;
   if (keepText) data.dpi.forEach(function(h){ if (!keep[h.so] && h.so && String(h.so).length >= 6 && keepText.indexOf(h.so) >= 0){ keep[h.so] = 1; savedKept++; } });
@@ -1779,6 +1803,8 @@ function applyOpenFilter(data, listed, asOn, keepSos, keepText, listSites){
   var covered = {}; if (listSites && listSites.length) listSites.forEach(function(c){ covered[c] = 1; }); else data.dpi.forEach(function(h){ if (listed[h.so] && h.city) covered[h.city] = 1; });
   var otherKept = 0, otherSites = {};
   data.dpi.forEach(function(h){ if (!keep[h.so] && !h.ic && h.city && !covered[h.city]){ keep[h.so] = 1; otherKept++; otherSites[h.city] = 1; } });
+  // 2 Nov (JK): SOs on a "Drop SOs" list leave even when another rule would keep them (saved work still keeps them)
+  var dropped = 0; (drops || []).forEach(function(so){ if (keep[so] && !listed[so] && (!keepText || keepText.indexOf(so) < 0)){ delete keep[so]; dropped++; } });
   var soOf = function(x){ return x.linkSo || x.so; };
   var before = { sos:data.dpi.length, poLines:data.poLines.length, soLines:data.soLines.length, orders:data.orders.length };
   data.dpi = data.dpi.filter(function(h){ return keep[h.so]; });
@@ -1788,7 +1814,7 @@ function applyOpenFilter(data, listed, asOn, keepSos, keepText, listSites){
   var sh = {}; Object.keys(data.soHeaders).forEach(function(so){ if (keep[so]) sh[so] = data.soHeaders[so]; }); data.soHeaders = sh;
   var notFound = Object.keys(listed).filter(function(so){ return !sh[so]; }).sort();
   return { asOn:asOn, listed:Object.keys(listed).length, keptSos:data.dpi.length, removedSos:before.sos - data.dpi.length,
-    removedPoLines:before.poLines - data.poLines.length, removedSoLines:before.soLines - data.soLines.length, keptForSavedWork:savedKept, sitesOnList:Object.keys(covered).sort(), keptOtherSites:otherKept, otherSites:Object.keys(otherSites).sort(), listedNotInData:notFound.slice(0, 200), listedNotInDataCount:notFound.length };
+    removedPoLines:before.poLines - data.poLines.length, removedSoLines:before.soLines - data.soLines.length, keptForSavedWork:savedKept, sitesOnList:Object.keys(covered).sort(), keptOtherSites:otherKept, droppedByList:dropped, otherSites:Object.keys(otherSites).sort(), listedNotInData:notFound.slice(0, 200), listedNotInDataCount:notFound.length };
 }
 // Cancelled SO -> new SO pairs from the mapping sheet and approved revisions: { old: [new, ...] }
 function remapPairs(df, extra){
@@ -1830,6 +1856,7 @@ function classify(name, wb){
   for (var i = 0; i < SIG.length; i++){ if (SIG[i][1].every(function(c){ return has(df, c); })){ typ = SIG[i][0]; break; } }
   if (typ === 'unknown'){ var os = openSosFrame(wb, d1904); if (os && os.rows.length && os.cols.length <= 4){ df = os; typ = 'open_sos'; } }
   if (typ === 'unknown'){ var rv = narrowFrame(wb, d1904, ['Cancelled SO', 'New SO']); if (rv && rv.rows.length){ df = rv; typ = 'so_remap'; } }
+  if (typ === 'unknown'){ var dr = narrowFrame(wb, d1904, ['Drop SO']); if (dr && dr.rows.length){ df = dr; typ = 'so_drop'; } }
   if (typ === 'stock') df = frame(df.cols, df.rows.filter(function(r){ return G(df, r, 'Site') !== null && G(df, r, 'Article') !== null; }));
   var named = ['InvoicedOS', 'PI_Datasheet', 'Standard_Upholstery', 'Standard_Finishes', 'Standard_Stone'].filter(function(sn){ return wb.SheetNames.indexOf(sn) >= 0; });
   var slot = null, label = LABEL[typ];
@@ -9756,8 +9783,9 @@ function riskIndex(){
     const packing = jc && (jc.stages || []).find(s => s.key === 'packing');
     if (packing && packing.endDateISO) return;                                // produced
     const rs = [];
-    const age = dDiff(today, pd);
-    if (!jc && age > 15) rs.push({ r:'r1', sev:'warn', text:`No job card ${age} days after the PO (${fmtDate(pd)})` });
+    const pd0 = pd < '2026-11-02' ? '2026-11-02' : pd;   // go-live 2 Nov: older POs count from go-live
+    const age = dDiff(today, pd0);
+    if (!jc && age > 15) rs.push({ r:'r1', sev:'warn', text:`No job card ${age} days after ${pd0 === pd ? 'the PO (' + fmtDate(pd) + ')' : 'go-live (' + fmtDate(pd0) + '; PO ' + fmtDate(pd) + ')'}` });
     const fD = effF(o); const cB = o.committedDeadline ? addD(o.committedDeadline, -DL_BUF) : null;
     const commit = [cB, fD].filter(Boolean).sort()[0];   // factory basis: the earlier of client − 5 and the confirmed factory date
     if (commit){
@@ -9767,7 +9795,7 @@ function riskIndex(){
       else if (left < 15 && !stageStarted(jc, 'factoryQc')) rs.push({ r:'r2', sev:'warn', text:`${left} days to ${fmtFv(commit)} and factory QC not started${pre}` });
       else if (left < 30 && !stageStarted(jc, 'polishingQc')) rs.push({ r:'r2', sev:'warn', text:`${left} days to ${fmtFv(commit)} and polishing not started${pre}` });
     }
-    if (fD){ const span = dDiff(fD, pd); if (span > 75) rs.push({ r:'r3', sev:'warn', text:`Factory date ${fmtFv(fD)} is ${span} days after the PO (limit 75)` }); }
+    if (fD){ const span = dDiff(fD, pd0); if (span > 75) rs.push({ r:'r3', sev:'warn', text:`Factory date ${fmtFv(fD)} is ${span} days after ${pd0 === pd ? 'the PO' : 'go-live'} (limit 75)` }); }
     const fabs = (fabBy[o.po] || []).filter(e => !e.productCode || e.productCode === o.sku);
     const hasDetailFabric = o.detail && ensureDetailShape(o).fabrics.some(f => f && f.type && f.type !== 'na');
     const needsFabric = hasDetailFabric || fabs.length > 0;
@@ -9913,7 +9941,7 @@ const poRec = po => PO_DL[po] = PO_DL[po] || { id:po, po, so:'', firstId:'', dat
 const factoryLine = o => !!o && o.lifecycle === 'po_confirmed' && !!o.po && isFactoryLine(o);
 const effF = o => { if (!factoryLine(o)) return null; const a = o.productionDeadline || null, b = (PO_DL[o.po] || {}).date || null; return a && b ? (a < b ? a : b) : (a || b); };
 const dlPoDate = o => poDateOf(o);
-const dlAge = o => dlPoDate(o) ? dDiff(todayStr(), dlPoDate(o)) : 0;
+const dlAge = o => dlPoDate(o) ? dDiff(todayStr(), dlPoDate(o) < '2026-11-02' ? '2026-11-02' : dlPoDate(o)) : 0;   // go-live 2 Nov: older POs count from go-live
 const dlInScope = o => factoryLine(o) && o.dpiLinked && (dlPoDate(o) || '') >= riskGoLive() && !(DPI_BY_SO[o.so] || {}).cancelled;
 const everNegotiated = o => !!(o.deadlineNeg || (o.deadlineNegHistory || []).length || (PO_DL[o.po] && (PO_DL[o.po].neg || PO_DL[o.po].negHistory.length)));
 readinessDate = o => effF(o) ? addD(effF(o), DL_BUF) : null;      // was "+5 working days"; now one 5-calendar-day buffer everywhere
@@ -14709,7 +14737,16 @@ function xFabState(o){
   const fabs = (d.fabrics || []).filter(f => f && f.type && f.type !== 'na');
   if (!fabs.length){
     const na = (d.fabrics || []).some(f => f && f.type === 'na');
-    return na ? { ok:true, items:[], note:'No fabric on this line (NA)' } : { ok:false, items:[], note:'Fabric not filled in on the order line' };
+    if (na) return { ok:true, items:[], note:'No fabric on this line (NA)' };
+    // 2 Nov (JK): a PO raised before go-live has its details in email, so its fabric is judged by the tags on that PO line:
+    // in when every tag is received; no tag at all = no fabric needed
+    if ((poDateOf(o) || '') < '2026-11-02'){
+      const tg = FABRIC_ENTRIES.filter(e => e.po && e.po === o.po && (!e.productCode || e.productCode === o.sku));
+      if (!tg.length) return { ok:true, items:[], note:'No fabric tags on this PO line (PO raised before go-live: treated as no fabric needed)' };
+      const items = tg.map(e => ({ name:e.fabricName || e.sku || 'Fabric', sku:e.sku || '', tag:e.id, status:entryStatus(e) }));
+      return { ok:items.every(i => i.status === 'received'), items, note:'' };
+    }
+    return { ok:false, items:[], note:'Fabric not filled in on the order line' };
   }
   const tags = FABRIC_ENTRIES.filter(e => e.po && e.po === o.po && (!e.productCode || e.productCode === o.sku));
   const catalogSkus = new Set(fabs.filter(f => f.type === 'catalog' && f.fabricSku).map(f => f.fabricSku));
