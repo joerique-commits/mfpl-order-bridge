@@ -772,18 +772,32 @@ var USER_RE = /^ob_(profiles$|approver_me$|inbox_read_|inbox_seen_|mute_|unfollo
 function cfgFor(k){ if (Object.prototype.hasOwnProperty.call(STORES, k)) return STORES[k]; if (USER_RE.test(k) && /^[A-Za-z0-9_]+$/.test(k)) return { t:'user' }; return null; }
 function djb2(s){ var h = 5381; s = String(s); for (var i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h; }
 
-var base = {}, userBase = {}, pending = {}, pendingUser = {}, blocked = {}, sessionKeys = {};
+var base = {}, userBase = {}, pending = {}, pendingUser = {}, blocked = {}, sessionKeys = {}, mineAt = {};
 var timer = null, inflight = null, failCount = 0, conflictCount = 0;
 
-function seed(snap){
-  var byStore = {};
-  Object.keys(snap.b || {}).forEach(function(key){
-    var m = /^b_(ob_[A-Za-z0-9_]+?)__([A-Za-z0-9_]+)$/.exec(key); if (!m) return;
-    var recs = (snap.b[key] || {}).recs || {};
-    Object.keys(recs).forEach(function(k){ (byStore[m[1]] = byStore[m[1]] || []).push({ k:k, bk:m[2], r:recs[k] }); });
+// snapB: every shared bucket as last known (page load, then own saves and buckets fetched by the live update).
+var snapB = {}, tomb = {}, RX_MS = 15000;
+function itemsOf(store){
+  var out = [];
+  Object.keys(snapB).forEach(function(key){
+    var m = /^b_(ob_[A-Za-z0-9_]+?)__([A-Za-z0-9_]+)$/.exec(key); if (!m || m[1] !== store) return;
+    var recs = (snapB[key] || {}).recs || {};
+    Object.keys(recs).forEach(function(k){ out.push({ k:k, bk:m[2], r:recs[k] }); });
   });
-  Object.keys(STORES).forEach(function(s){
-    var cfg = STORES[s], items = byStore[s] || [], b = base[s] = {}, val;
+  return out;
+}
+function seed(snap){
+  snapB = snap.b || {};
+  Object.keys(STORES).forEach(function(s){ rebuildStore(s, false); });
+  var u = snap.u || {};
+  for (var i = LS.length - 1; i >= 0; i--){ var key = LS.key(i); if (key && USER_RE.test(key) && !Object.prototype.hasOwnProperty.call(u, key)) rawRemove.call(LS, key); }
+  Object.keys(u).forEach(function(k){ if (!cfgFor(k)) return; var j = JSON.stringify(u[k].v); userBase[k] = j; try { rawSet.call(LS, k, j); } catch(e){} });
+}
+// Rebuild one store's localStorage value and save-base from snapB. live = records that came from someone else just now:
+// for RX_MS the app may still write its old copy (it hasn't redrawn yet) — that stale echo is ignored, not saved back.
+function rebuildStore(s, live){
+  {
+    var cfg = STORES[s], items = itemsOf(s), old = base[s] || {}, b = base[s] = {}, val, until = Date.now() + RX_MS;
     items.forEach(function(it){ b[it.k] = { ver:it.r.ver, bk:it.bk, j:null }; });
     if (cfg.t === 'value'){ var one = items.filter(function(x){ return x.k === '_'; })[0]; if (one){ val = one.r.v; b._.j = JSON.stringify(val); } }
     else if (cfg.t === 'map'){ if (items.length){ val = {}; items.forEach(function(it){ val[it.k] = it.r.v; b[it.k].j = JSON.stringify(it.r.v); }); } }
@@ -791,11 +805,14 @@ function seed(snap){
       items.sort(function(x, y){ return cfg.dir === 'desc' ? (y.r.c - x.r.c) : (x.r.c - y.r.c); });
       val = items.map(function(it){ var v = it.r.v; if (cfg.t === 'list' && v && typeof v === 'object' && !Array.isArray(v)) v._k = it.k; b[it.k].j = JSON.stringify(v); return v; });
     }
+    if (live){
+      Object.keys(b).forEach(function(k){ var o = old[k];
+        if (!o){ b[k].rx = until; b[k].prevJ = null; }
+        else if (o.j !== b[k].j){ b[k].rx = until; b[k].prevJ = o.rx && o.rx > Date.now() ? o.prevJ : o.j; } });
+      Object.keys(old).forEach(function(k){ if (!b[k] && old[k].j != null) tomb[s + '|' + k] = { j:old[k].j, until:until }; });
+    }
     try { if (val === undefined) rawRemove.call(LS, s); else rawSet.call(LS, s, JSON.stringify(val)); } catch(e){ console.warn('[Order Bridge] could not cache', s, e); }
-  });
-  var u = snap.u || {};
-  for (var i = LS.length - 1; i >= 0; i--){ var key = LS.key(i); if (key && USER_RE.test(key) && !Object.prototype.hasOwnProperty.call(u, key)) rawRemove.call(LS, key); }
-  Object.keys(u).forEach(function(k){ if (!cfgFor(k)) return; var j = JSON.stringify(u[k].v); userBase[k] = j; try { rawSet.call(LS, k, j); } catch(e){} });
+  }
 }
 
 function recKey(cfg, s, item, idx, seen){
@@ -833,11 +850,13 @@ function diffStore(s, str){
   Object.keys(recs).forEach(function(k){
     if (blocked[s + '|' + k]) return;
     var r = recs[k], j = JSON.stringify(r.v), cur = b[k];
+    if (cur && cur.rx){ if (cur.rx > now && (j === cur.prevJ || j === cur.j)) return; delete cur.rx; delete cur.prevJ; }
+    var tb = tomb[s + '|' + k]; if (!cur && tb){ delete tomb[s + '|' + k]; if (tb.until > now && tb.j === j) return; }
     if (cur && cur.j === j) return;
     changes.push({ s:s, bk: cur ? cur.bk : bucketFor(cfg, k, r.v), k:k, v:r.v, ver: cur ? cur.ver : 0, c:r.c, _j:j });
   });
   if (cfg.t !== 'act') Object.keys(b).forEach(function(k){
-    if (!Object.prototype.hasOwnProperty.call(recs, k) && !blocked[s + '|' + k]) changes.push({ s:s, bk:b[k].bk, k:k, v:null, ver:b[k].ver, _j:null });
+    if (!Object.prototype.hasOwnProperty.call(recs, k) && !blocked[s + '|' + k] && !(b[k].rx > now && b[k].prevJ === null)) changes.push({ s:s, bk:b[k].bk, k:k, v:null, ver:b[k].ver, _j:null });
   });
   return changes;
 }
@@ -877,7 +896,10 @@ function flush(){
         part.forEach(function(ch){ byKey[ch.s + '|' + ch.k] = ch; });
         var res = await api('/api/store', { body:{ changes: part.map(function(ch){ return { s:ch.s, bk:ch.bk, k:ch.k, v:ch.v, ver:ch.ver, c:ch.c }; }), user: i === 0 ? user : [] } });
         (res.ok || []).forEach(function(o){ var ch = byKey[o.s + '|' + o.k]; if (!ch) return; var b = base[o.s] = base[o.s] || {};
-          if (ch.v === null) delete b[o.k]; else b[o.k] = { ver:o.ver, bk:o.bk, j:ch._j }; });
+          if (ch.v === null) delete b[o.k]; else b[o.k] = { ver:o.ver, bk:o.bk, j:ch._j };
+          var bkey = 'b_' + o.s + '__' + o.bk, doc = snapB[bkey] = snapB[bkey] || { recs:{} }; doc.recs = doc.recs || {};
+          if (ch.v === null) delete doc.recs[o.k]; else doc.recs[o.k] = { v:ch.v, ver:o.ver, c:(doc.recs[o.k] && doc.recs[o.k].c) || ch.c || Date.now() };
+          mineAt[bkey + '|' + o.k] = Date.now(); });
         (res.conflicts || []).forEach(function(o){
           var ch = byKey[o.s + '|' + o.k], cfg = STORES[o.s] || {}, b = base[o.s] = base[o.s] || {};
           if (!ch) return;
@@ -904,6 +926,69 @@ function flush(){
 }
 OB.flush = function(){ if (timer){ clearTimeout(timer); timer = null; } return flush(); };
 
+
+// ---------------------------------------------------------------- live updates (3 Nov 2026)
+// Every 2 minutes while the tab is visible (and at once when it becomes visible again after 20 s+), ask the server which
+// buckets changed since the last check (/api/store/changes), fetch only those, merge them into snapB and rebuild the
+// affected stores; the app then refreshes its lists in memory and redraws (window.__obLiveApply). Never while this
+// page has unsaved changes or someone is typing (window.__obLiveBusy); it waits and tries again 15 s later.
+// Stores the app can't refresh in place (PO requests and links reshape the order lines) aren't rebuilt: a bar asks
+// for a refresh instead. A new ERP data upload also shows a bar (it is a large download, so not automatic).
+var LIVE_MS = 120000, LIVE_RETRY_MS = 15000, LIVE_NOT_IN_PLACE = { ob_po_requests:1, ob_po_links:1 };
+var live = { since:null, seen:{}, want:{}, last:0, timer:null, busy:false, stale:false, dataNew:false, fails:0 };
+function liveStart(){
+  if (OB.mode !== 'app' || live.timer) return;
+  live.last = Date.now();
+  live.timer = setInterval(function(){ if (document.visibilityState === 'visible') liveTick(); }, LIVE_MS);
+  document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'visible' && Date.now() - live.last > 20000) liveTick(); });
+}
+async function liveTick(){
+  if (live.busy || !OB.sync || OB.signedOut || OB.mode !== 'app') return;
+  live.busy = true; live.last = Date.now();
+  try {
+    var since = new Date(Date.parse(live.since) - 90000).toISOString();   // overlap: KV takes up to ~60 s to show a write everywhere
+    var r = await api('/api/store/changes?since=' + encodeURIComponent(since), { cache:'no-store' });
+    live.fails = 0; live.since = r.now || live.since;
+    if (r.dataId && OB.dataMeta && r.dataId !== OB.dataMeta.id && !live.dataNew){ live.dataNew = true; bar(); }
+    Object.keys(r.b || {}).forEach(function(k){ var x = r.b[k];
+      if (live.seen[k] === x.t) return; live.seen[k] = x.t;
+      if (x.u && x.u === OB.uidSafe) return;                    // my own save: already here
+      if (!/^b_ob_[A-Za-z0-9_]+__[A-Za-z0-9_]+$/.test(k)) return;
+      live.want[k] = 1; });
+    await liveApply();
+  } catch(e){ if (e.status === 401){ OB.signedOut = true; bar(); } else live.fails++; }
+  finally { live.busy = false; }
+}
+async function liveApply(){
+  var keys = Object.keys(live.want); if (!keys.length) return;
+  var appBusy = false; try { appBusy = !!(window.__obLiveBusy && window.__obLiveBusy()); } catch(e){}
+  if (hasPending() || appBusy){ setTimeout(function(){ if (!live.busy && document.visibilityState === 'visible'){ live.busy = true; liveApply().catch(function(){}).then(function(){ live.busy = false; }); } }, LIVE_RETRY_MS); return; }
+  var got = {};
+  for (var i = 0; i < keys.length; i += 20){
+    var part = JSON.parse(await getText('/api/store/part', { body:{ keys:keys.slice(i, i + 20) } }));
+    Object.assign(got, part.b || {});
+  }
+  if (hasPending()){ return; }   // something was saved while fetching: try again next round (want is kept)
+  var stores = {}, now = Date.now();
+  keys.forEach(function(key){
+    delete live.want[key];
+    var m = /^b_(ob_[A-Za-z0-9_]+?)__([A-Za-z0-9_]+)$/.exec(key); if (!m || !STORES[m[1]]) return;
+    var fresh = (got[key] || { recs:{} }).recs || {}, mine = (snapB[key] || {}).recs || {}, out = {};
+    Object.keys(fresh).forEach(function(k){ var f = fresh[k], l = mine[k]; out[k] = l && (l.ver || 0) > (f.ver || 0) ? l : f; });   // a stale read never undoes my newer save
+    Object.keys(mine).forEach(function(k){ if (!out[k] && now - (mineAt[key + '|' + k] || 0) < 180000) out[k] = mine[k]; });   // saved by me moments ago, not visible yet
+    var before = JSON.stringify(mine), after = JSON.stringify(out);
+    snapB[key] = { recs:out };
+    if (before !== after) stores[m[1]] = 1;
+  });
+  var list = Object.keys(stores); if (!list.length) return;
+  var inPlace = list.filter(function(s){ return !LIVE_NOT_IN_PLACE[s]; });
+  if (list.some(function(s){ return LIVE_NOT_IN_PLACE[s]; }) && !live.stale){ live.stale = true; bar(); }
+  if (!inPlace.length) return;
+  inPlace.forEach(function(s){ rebuildStore(s, true); });
+  try { if (window.__obLiveApply) window.__obLiveApply(inPlace); } catch(e){ console.error('[Order Bridge] live update', e); }
+}
+OB.liveTick = liveTick; OB._live = live;
+
 // status bar: only shown when something needs attention
 function bar(){
   var el = document.getElementById('obSyncBar');
@@ -912,6 +997,8 @@ function bar(){
   else if (OB.signedOut){ msg = 'Your session has ended, so recent changes are not saved. Sign in again to keep working.'; btn = '<button class="btn btn-primary btn-sm" id="obSyncBtn">Sign in again</button>'; }
   else if (conflictCount){ msg = conflictCount + ' change' + (conflictCount === 1 ? ' was' : 's were') + ' not saved because someone else changed the same record at the same time. Reload to see the latest version.'; btn = '<button class="btn btn-primary btn-sm" id="obSyncBtn">Reload</button>'; }
   else if (failCount){ msg = 'Changes are not saved yet (no connection to the server). Retrying…'; }
+  else if (live.dataNew){ msg = 'New ERP data has been published. Refresh to load it.'; btn = '<button class="btn btn-primary btn-sm" id="obSyncBtn">Refresh</button>'; }
+  else if (live.stale){ msg = 'Someone has added or linked PO requests. Refresh to see them.'; btn = '<button class="btn btn-primary btn-sm" id="obSyncBtn">Refresh</button>'; }
   if (!msg){ if (el) el.remove(); return; }
   if (!el){ el = document.createElement('div'); el.id = 'obSyncBar'; el.setAttribute('role', 'status');
     el.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:99999;max-width:min(640px,calc(100vw - 32px));background:#fff7e6;color:#5a3d00;border:1px solid #e0b252;border-radius:8px;padding:10px 14px;box-shadow:0 6px 24px rgba(0,0,0,.15);display:flex;gap:12px;align-items:center;font-size:13px;line-height:1.4;';
@@ -1261,10 +1348,12 @@ async function start(user, pre){
   }
   OB.linkKey = snap.linkKey || '';
   seed(snap);
+  live.since = snap.serverTime || new Date(Date.now() - 120000).toISOString();
   window.__MFPL_REAL_DATA__ = data;
   hideCard();
   OB.sync = true;
   runApp();
+  liveStart();
 }
 // meta and the saved store are fetched while the sign-in is still being checked
 function prefetch(){
@@ -15557,6 +15646,64 @@ renderOrderDetail = function(orderId){
   h = h.replace(/<div><div class="f-k">Production deadline<\/div><div class="f-v">[^<]*<\/div><\/div>\s*<div><div class="f-k">Sales readiness date<\/div><div class="f-v mono">[^<]*<\/div><\/div>\s*<div><div class="f-k">Earliest dispatch<\/div><div class="f-v"[^>]*>[^<]*<\/div><\/div>/, facts);
   if (r !== 'sales') h = h.replace(/(<div class="f-k">)Committed deadline(<\/div><div class="f-v">)[^<]*(<\/div>)/, (m, a, b, c) => `${a}${r === 'production' ? 'Committed date' : 'Committed date to client'}${b}${o.committedDeadline ? fmtCv(o.committedDeadline) : '—'}${c}`);
   return h;
+};
+
+// ---------------------------------------------------------------- Live updates (3 Nov 2026)
+// The loader checks for other people's changes every 2 minutes (and when a hidden tab comes back), rewrites the
+// changed stores in localStorage, then calls __obLiveApply(stores): each list is refreshed in memory here, the activity
+// snapshot is re-based silently (someone else's change is theirs, not logged again as ours), and the screen is redrawn
+// where the reader was. __obLiveBusy holds the update while someone is typing or has just typed.
+let xLiveInputAt = 0;
+['input', 'keydown', 'change'].forEach(ev => document.addEventListener(ev, () => { xLiveInputAt = Date.now(); }, true));
+window.__obLiveBusy = () => {
+  const a = document.activeElement;
+  if (a && (a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || (a.tagName === 'INPUT' && !/^(checkbox|radio|button|submit|file)$/i.test(a.type || '')))) return true;
+  return Date.now() - xLiveInputAt < 20000;
+};
+const xLiveJson = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); return v == null ? d : v; } catch(e){ return d; } };
+const xLiveSplice = (arr, k) => { const v = xLiveJson(k, []); if (Array.isArray(v)) arr.splice(0, arr.length, ...v); };
+const XLIVE = {
+  ob_fabric_entries:() => xLiveSplice(FABRIC_ENTRIES, 'ob_fabric_entries'),
+  ob_fabric_challans:() => xLiveSplice(FABRIC_CHALLANS, 'ob_fabric_challans'),
+  ob_fabric_receipts:() => xLiveSplice(FABRIC_RECEIPTS, 'ob_fabric_receipts'),
+  ob_job_cards:() => xLiveSplice(JOB_CARDS, 'ob_job_cards'),
+  ob_wh_tags:() => xLiveSplice(WAREHOUSE_TAGS, 'ob_wh_tags'),
+  ob_stock_blocks:() => xLiveSplice(STOCK_BLOCK_REQUESTS, 'ob_stock_blocks'),
+  ob_soline_res:() => xLiveSplice(SO_LINE_RES, 'ob_soline_res'),
+  ob_slot_bookings:() => { xLiveSplice(SLOT_BOOKINGS, 'ob_slot_bookings'); lmBkSaved = JSON.stringify(SLOT_BOOKINGS); },
+  ob_dispatch_day:() => { state.xDD = null; ddList(); },
+  ob_so_revisions:() => { xLiveSplice(SO_REVISION_REQUESTS, SR_KEY); srSaved = JSON.stringify(SO_REVISION_REQUESTS); },
+  ob_activity:() => { ACT.events = null; },
+  ob_act_parts:() => { ACT.parts = ls.get(ACT_PARTS_KEY, {}); },
+  ob_site_details:() => { state.xSites = null; },
+  ob_approvers:() => { state.xApprovers = null; },
+  ob_slot_settings:() => { state.xSlotCfg = null; },
+  ob_fab_locations:() => { state.xFabLocs = null; },
+  ob_permissions:() => { const p = xLiveJson('ob_permissions', null); if (p && p.visibility && p.editAccess) state.permissions = p; },
+  ob_po_dl:() => { const nv = xLiveJson('ob_po_dl', {}) || {}; Object.keys(PO_DL).forEach(k => { if (!(k in nv)) delete PO_DL[k]; }); Object.assign(PO_DL, nv); SRC_LAST.podl = JSON.stringify(PO_DL); },
+  ob_order_ops:() => {   // fields typed on PO Summary lines: back to the line's ERP values, then the saved ones on top
+    const ops = xLiveJson(SRC.OPS, {}) || {};
+    ORDERS.forEach(o => {
+      if (o.appNative || !(o.id in PRISTINE)) return;
+      const pv = JSON.parse(PRISTINE[o.id]), want = ops[o.id] || {};
+      const target = OPS_FIELDS.map((k, i) => want[k] !== undefined ? want[k] : pv[i]);
+      if (JSON.stringify(target) === opsJson(o)) return;
+      OPS_FIELDS.forEach((k, i) => { o[k] = target[i]; });
+    });
+    Object.keys(ORPHAN_OPS).forEach(k => delete ORPHAN_OPS[k]);
+    Object.keys(ops).forEach(id => { if (!ORDER_BY_ID[id]) ORPHAN_OPS[id] = ops[id]; });
+  },
+  ob_risk_golive:() => {}, ob_route_units:() => {},   // read fresh every time
+};
+window.__obLiveApply = stores => {
+  let n = 0;
+  stores.forEach(s => { const f = XLIVE[s]; if (!f) return; try { f(); n++; } catch(e){ console.error('[Order Bridge] live', s, e); } });
+  if (!n || !state.currentUser || location.hash.startsWith('#site-details/')) return;
+  try { actScan(true); } catch(e){}
+  const y = window.scrollY, wraps = [...document.querySelectorAll('.table-wrap')].map(w => w.scrollLeft);
+  renderAll();
+  window.scrollTo(0, y); document.querySelectorAll('.table-wrap').forEach((w, i) => { if (wraps[i]) w.scrollLeft = wraps[i]; });
+  state.xLiveAt = nowIso();
 };
 
 if (!routePublic() && state.currentUser) renderAll();

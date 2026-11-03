@@ -22,7 +22,7 @@ export async function onRequestPost({ request }) {
   const changes = Array.isArray(body && body.changes) ? body.changes : [];
   const user = Array.isArray(body && body.user) ? body.user : [];
   try {
-    const res = await applyChanges(APP_DATA, changes, s.user.name || s.user.email);
+    const res = await applyChanges(APP_DATA, changes, s.user.name || s.user.email, String(s.user.uid).replace(/[^A-Za-z0-9_]/g, '_'));
     for (const u of user) {
       if (!u || !STORE_RE.test(u.s || '')) continue;
       if (u.v === null || u.v === undefined) await APP_DATA.delete(userKey(s.user.uid, u.s));

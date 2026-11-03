@@ -5,7 +5,7 @@
 // The customer can only read their own form and submit its fields; a locked form is refused.
 import { json, errorJson } from '../../_lib/http.js';
 import { getJSON, putJSON } from '../../_lib/kv.js';
-import { getLinkKey, linkToken, bucketKey, siteBucket, SITE_STORE } from '../../_lib/store.js';
+import { getLinkKey, linkToken, bucketKey, siteBucket, SITE_STORE, noteStamps } from '../../_lib/store.js';
 
 async function check(request) {
   const url = new URL(request.url);
@@ -41,5 +41,6 @@ export async function onRequestPost({ request }) {
   const v = Object.assign({}, cur ? cur.v : { so: c.so, createdAt: now, createdBy: '(link opened directly)' }, { fields, submittedAt: now });
   doc.recs[c.so] = { v, ver: (cur ? cur.ver : 0) + 1, c: cur ? cur.c : Date.now(), by: 'customer', at: now };
   await putJSON(APP_DATA, bkey, doc);
+  try { await noteStamps(APP_DATA, [bkey], 'customer'); } catch (e) {}
   return json({ site: v, ver: doc.recs[c.so].ver });
 }

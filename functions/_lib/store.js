@@ -108,7 +108,22 @@ export async function loadPartRaw(kv, keys) {
 }
 
 // changes: [{ s, bk, k, v (null = delete), ver, c }]
-export async function applyChanges(kv, changes, actor) {
+// ---- Change stamps (3 Nov): one small doc { <bucket key>: { t, u } } updated after every save, so open pages can
+// ask "what changed since …" every 2 minutes and fetch only those buckets. Read-modify-write without CAS: two saves
+// at the same instant on different edge nodes can lose one stamp; the record version check still catches any
+// edit made on stale data, and the next change to that bucket stamps it again.
+export const STAMP_KEY = 'cfg_bstamp';
+export async function noteStamps(kv, keys, who) {
+  if (!keys || !keys.length) return;
+  const cur = (await getJSON(kv, STAMP_KEY)) || {};
+  const t = new Date().toISOString();
+  keys.forEach(k => { cur[k] = { t, u: String(who || '') }; });
+  Object.keys(cur).forEach(k => { if (actBucketTooOld(k)) delete cur[k]; });
+  await putJSON(kv, STAMP_KEY, cur);
+}
+export async function readStamps(kv) { return (await getJSON(kv, STAMP_KEY)) || {}; }
+
+export async function applyChanges(kv, changes, actor, who) {
   const byBucket = new Map();
   const actWritten = [];
   for (const ch of changes) {
@@ -119,7 +134,7 @@ export async function applyChanges(kv, changes, actor) {
     if (!byBucket.has(key)) byBucket.set(key, []);
     byBucket.get(key).push(ch);
   }
-  const ok = [], conflicts = [];
+  const ok = [], conflicts = [], dirtyKeys = [];
   const now = new Date().toISOString();
   for (const [key, list] of byBucket) {
     const doc = (await getJSON(kv, key)) || { recs: {} };
@@ -140,10 +155,12 @@ export async function applyChanges(kv, changes, actor) {
     }
     if (dirty) {
       if (Object.keys(doc.recs).length) await putJSON(kv, key, doc); else await kv.delete(key);
+      dirtyKeys.push(key);
       if (/^b_ob_activity__d/.test(key)) actWritten.push(key);
     }
   }
   if (actWritten.length) { try { await noteActKeys(kv, actWritten); } catch (e) {} }
+  if (dirtyKeys.length) { try { await noteStamps(kv, dirtyKeys, who); } catch (e) {} }
   return { ok, conflicts };
 }
 
