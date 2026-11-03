@@ -5,10 +5,10 @@
 import { getSessionUser } from '../../_lib/session.js';
 import { json, errorJson, bearerToken } from '../../_lib/http.js';
 
-export async function onRequestGet({ request }) {
+export async function onRequestGet({ request, env }) {
   const token = bearerToken(request);
   const result = await getSessionUser(AUTH, token);
   if (!result) return errorJson('Not signed in or session expired', 401);
   const { user } = result;
-  return json({ user: { uid: user.uid, email: user.email, name: user.name, role: user.role, title: user.title || null } });
+  return json({ user: { uid: user.uid, email: user.email, name: user.name, role: user.role, title: user.title || null, prevNames: user.prevNames || [] } });
 }

@@ -32,7 +32,7 @@ export async function onRequestGet({ request }) {
   const names = await userRecordNames(AUTH, ['user:' + auth.user.uid]);
   // 23 Oct: read in parallel (one at a time ran past the 15 s limit when KV was slow).
   const recs = await Promise.all(names.map(n => getJSON(AUTH, n).catch(() => null)));
-  const users = recs.filter(Boolean).map(u => ({ uid: u.uid, email: u.email, name: u.name, role: u.role, title: u.title || null, active: u.active, createdAt: u.createdAt }));
+  const users = recs.filter(Boolean).map(u => ({ uid: u.uid, email: u.email, name: u.name, role: u.role, title: u.title || null, active: u.active, createdAt: u.createdAt, prevNames: u.prevNames || [], lastEdit: (u.edits || []).slice(-1)[0] || null }));
   return json({ users });
 }
 

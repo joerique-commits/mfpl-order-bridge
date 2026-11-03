@@ -9011,7 +9011,7 @@ function rerenderKeep(id){ renderAll(); refocus(id); }
 const extraWiring = [];
 // Who raised a record: the signed-in account (online) or, for admin viewing the app as a role, that role. Survives renaming a profile.
 const userKey = () => (state.currentUser && state.currentUser.role === 'admin') ? 'role:' + state.role : 'uid:' + (state.currentUser ? state.currentUser.id : '');
-const isMine = (rec, nameField) => rec.byKey ? rec.byKey === userKey() : rec[nameField] === actingUserName();
+const isMine = (rec, nameField) => rec.byKey ? rec.byKey === userKey() : xIsMe(rec[nameField]);
 
 // ---------------------------------------------------------------- PO Progress Tracker
 // SO status is computed live: PO-confirmed lines come from PO Summary (or from supply confirming a line
@@ -12306,7 +12306,7 @@ function inboxItems(){
   STOCK_BLOCK_REQUESTS.filter(r => isMine(r, 'requestedBy') && r.status !== 'requested').forEach(r => add({ id:'sb-upd-' + r.id + '-' + r.status, kind:'update', area:'Stock block', title:`Your stock block was ${r.status === 'approved' ? 'approved' : r.status}`, detail:`${r.qtyRequested} × ${r.article} at ${r.warehouse} for ${r.so}${r.decidedBy ? ' · by ' + r.decidedBy : ''}`, when:r.decidedAt, nav:{ module:'stockblock' } }));
   SLOT_BOOKINGS.filter(b => isMine(b, 'bookedBy') && ['confirmed','rejected','completed','cancelled','dispatched','delivered'].includes(b.status)).forEach(b => add({ id:'lm-upd-' + b.id + '-' + b.status, kind:'update', area:lastMileTypeLabel(b.type), title: b.status === 'confirmed' ? `Your ${lastMileTypeLabel(b.type).toLowerCase()} slot was approved` : b.status === 'rejected' ? `Your ${lastMileTypeLabel(b.type).toLowerCase()} request was not approved` : b.status === 'dispatched' ? `The dispatch for ${b.so} is in transit` : b.status === 'delivered' ? `The dispatch for ${b.so} was delivered${b.installRequired ? ' — installation pending' : ''}` : b.status === 'completed' && b.type === 'installation' ? `Installation for ${b.so} is complete` : `Your ${lastMileTypeLabel(b.type).toLowerCase()} booking is ${b.status}`,
     detail:`${fmtDate(b.date)}, ${b.window} · ${b.so} · ${b.vendor ? 'Vendor ' + b.vendor : ''}${b.trackingLink ? ' · tracking link added' : b.transportPocName ? ' · transport POC ' + b.transportPocName + ' ' + b.transportPocPhone : ''}`, when:b.approvedAt || null, nav:{ module:'slots', set:() => { state.lastMileTab = b.type; } } }));
-  SO_REVISION_REQUESTS.filter(r => r.requestedBy === me && r.status !== 'pending').forEach(r => add({ id:'sr-upd-' + r.id + '-' + r.status, kind:'update', area:'SO revision', title:`Your revision for ${r.so} was ${r.status}`, detail:`${r.decisionNotes || ''}${r.decidedBy ? ' · by ' + r.decidedBy : ''}`, when:r.decidedAt, nav:{ module:'sorevision' } }));
+  SO_REVISION_REQUESTS.filter(r => xIsMe(r.requestedBy) && r.status !== 'pending').forEach(r => add({ id:'sr-upd-' + r.id + '-' + r.status, kind:'update', area:'SO revision', title:`Your revision for ${r.so} was ${r.status}`, detail:`${r.decisionNotes || ''}${r.decidedBy ? ' · by ' + r.decidedBy : ''}`, when:r.decidedAt, nav:{ module:'sorevision' } }));
   { const grp = {}; ORDERS.forEach(o => lineRisks(o).forEach(r => { const k = r.r + '|' + o.po; const g = grp[k] = grp[k] || { r:r.r, po:o.po, so:o.so, customer:o.customer, lines:[], sev:'warn', text:r.text, first:o };
       g.lines.push(o); if (r.sev === 'critical') g.sev = 'critical'; }));
     const T = { r1:g => `Create the job card${g.lines.length > 1 ? 's' : ''} for PO ${g.po}`, r2:g => `Production behind on PO ${g.po}`, r3:g => `Factory date over 75 days after PO ${g.po} — review with the factory`, r4:g => `Send the fabric for PO ${g.po} — already at Post Frame`, r5:g => `PO ${g.po} will miss the client date` };
@@ -12315,7 +12315,7 @@ function inboxItems(){
       detail:`${g.so} · ${g.customer} · ${g.lines.length} line(s) · ${g.text}`, when:null, nav: N[g.r] ? N[g.r]() : { module:'deadlines', set:() => { state.openOrderId = g.first.id; } } })); }
   if (state.role === 'approver') SO_REVISION_REQUESTS.filter(r => r.status === 'awaiting_approval' && !approvalExpired(r)).forEach(r => add({ id:'sr-appr-' + r.id + '-' + r.approval.token, kind:'action', area:'SO revision', title:`Approve SO revision ${r.so} → ${srNewSosText(r) || '?'}`,
     detail:`${r.customer} · ${fmtRupees(r.currentOrderValue)} → ${fmtRupees(r.revisedOrderValue)} · from ${r.requestedBy} · expires in ${hoursLeft(r)} h`, when:r.approval.createdAt, nav:{ module:'sorevision', set:() => { state.xApprovalOpen = { id:r.id, token:r.approval.token }; } } }));
-  if (is('sales')) SO_REVISION_REQUESTS.filter(r => r.requestedBy === me && (r.status === 'sent_back' || (r.status === 'awaiting_approval' && approvalExpired(r)))).forEach(r => add({ id:'sr-back-' + r.id + '-' + (r.sentBack ? r.sentBack.at : r.approval.expiresAt), kind:'action', area:'SO revision',
+  if (is('sales')) SO_REVISION_REQUESTS.filter(r => xIsMe(r.requestedBy) && (r.status === 'sent_back' || (r.status === 'awaiting_approval' && approvalExpired(r)))).forEach(r => add({ id:'sr-back-' + r.id + '-' + (r.sentBack ? r.sentBack.at : r.approval.expiresAt), kind:'action', area:'SO revision',
     title: r.status === 'sent_back' ? `SO revision for ${r.so} was sent back` : `Approval link expired for SO revision ${r.so}`, detail: r.status === 'sent_back' ? `${r.sentBack.by} (${ROLE_LABEL(r.sentBack.byRole)}): ${r.sentBack.comments}` : 'Create a new link or withdraw and edit',
     when: r.sentBack ? r.sentBack.at : r.approval.expiresAt, nav:{ module:'sorevision' } }));
   // "update" items are superseded by the activity log (Your activity / In your area)
@@ -12392,7 +12392,7 @@ function actSave(newEvents){
 }
 window.addEventListener('storage', e => { if (e.key === ACT_KEY) ACT.events = null; if (e.key === ACT_PARTS_KEY) ACT.parts = ls.get(ACT_PARTS_KEY, {}); });
 const nameKey = n => { const r = Object.keys(ROLES).find(k => ROLES[k].name === n); return r ? 'role:' + r : 'name:' + n; };
-const myKeys = () => [userKey(), 'name:' + actingUserName()];
+const myKeys = () => [userKey()].concat(xMyNames().map(n => 'name:' + n));
 function actAddPart(t, id, key){ if (!key || key === 'name:PO Summary' || key === 'name:' || key === 'customer') return; const k = t + ':' + id; (ACT.parts[k] = ACT.parts[k] || {})[key] = 1; }
 const actEmpty = v => v == null || v === '' || (Array.isArray(v) && !v.length) || (typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length);
 function actFlat(o){
@@ -12867,7 +12867,7 @@ const approvalLink = r => location.href.split('#')[0] + '#so-approval/' + encode
 const approvalExpired = r => !!(r.approval && !r.approval.decision && new Date(r.approval.expiresAt) < new Date());
 const hoursLeft = r => Math.max(0, Math.round((new Date(r.approval.expiresAt) - new Date()) / 3600e3));
 const isApprover = () => state.role === 'approver';
-const srSalesCan = r => ['sales','admin'].includes(state.role) && (state.role === 'admin' || r.requestedBy === actingUserName() || r.requestedByRole === 'sales');
+const srSalesCan = r => ['sales','admin'].includes(state.role) && (state.role === 'admin' || xIsMe(r.requestedBy) || r.requestedByRole === 'sales');
 // new reason (before "Other"); "Other" no longer has its own text box — the mandatory background details explain every reason
 if (!REASON_TYPES.some(t => t.id === 'split_part_po')) REASON_TYPES.splice(REASON_TYPES.findIndex(t => t.id === 'other'), 0, { id:'split_part_po', label:'Split into multiple SOs for raising Part POs' });
 reasonForRevisionText = r => r.reasonType === 'other' ? (r.reasonOther || 'Other') : reasonTypeLabel(r.reasonType);
@@ -13695,7 +13695,7 @@ inboxItems = (o => function(){
     if (is('accounts') && !r.override && !ddNoPay(r) && p.status === 'submitted') add({ id:'dd-pay-' + r.id + '-' + p.submittedAt, title:`Confirm the balance payment for ${r.so}`, detail:`${nm} · ${fmtRupees(ddPaid(r))} received · dispatch ${fmtDate(r.snap.date)}`, when:p.submittedAt, nav:go(r) });
     if (is('accounts') && !r.override && ddHasShort(r) && ddApprOk(r) && !r.approval.validatedAt) add({ id:'dd-val-' + r.id + '-' + r.approval.token, title:`Validate the COO / Director approval for ${r.so}`, detail:`${nm} · ${fmtRupees(r.approval.amount)} unpaid approved by ${r.approval.by}`, when:r.approval.at, nav:go(r) });
     if (is('accounts') && ddPayCleared(r) && ddSupplyDone(r) && !ddAccDone(r)) add({ id:'dd-inv-' + r.id, title:`Enter the invoice and e-way bill for ${r.so}`, detail:`${nm} · dispatch ${fmtDate(r.snap.date)} · sheet ${r.supply.sheetNo}`, when:r.supply.at, nav:go(r) });
-    if (is('sales') && !r.override && (isA || r.byKey === userKey() || r.createdBy === actingUserName())){
+    if (is('sales') && !r.override && (isA || r.byKey === userKey() || xIsMe(r.createdBy))){
       if (p.status === 'sent_back') add({ id:'dd-back-' + r.id + '-' + p.at, title:`Accounts sent back the payment for ${r.so}`, detail:`${nm} · ${p.note || ''}`, when:p.at, nav:go(r) });
       if (ddHasShort(r) && r.approval && r.approval.decision === 'rejected') add({ id:'dd-rej-' + r.id + '-' + r.approval.token, title:`Dispatch without full payment rejected for ${r.so}`, detail:`${r.approval.by}: ${r.approval.comments || ''}`, when:r.approval.at, nav:go(r) });
       if (ddHasShort(r) && ddApprExpired(r)) add({ id:'dd-exp-' + r.id + '-' + r.approval.token, title:`The approval link for ${r.so} expired`, detail:`${nm} · create a new link`, when:r.approval.expiresAt, nav:go(r) });
@@ -14540,6 +14540,65 @@ extraWiring.push(() => {
   const pi = document.getElementById('xu_pw'); if (pi) pi.addEventListener('input', () => { state.xPwDraft = pi.value; });
   const ps = document.getElementById('xu_pw_set'); if (ps) ps.addEventListener('click', () => { const pw = (state.xPwDraft || '').trim(); if (pw.length < 8){ state.xUserMsg = { uid:state.xPwFor, ok:false, text:'At least 8 characters.' }; return renderAll(); } xUserAct(state.xPwFor, 'reset', pw); });
   const pc = document.getElementById('xu_pw_cancel'); if (pc) pc.addEventListener('click', () => { state.xPwFor = null; renderAll(); });
+});
+
+// ---------------------------------------------------------------- Edit a user: name, email, user type, title (3 Nov)
+// The server keeps a renamed person's earlier names (prevNames); records typed with an old name still count as theirs.
+function xMyNames(){
+  const now = actingUserName(), u = window.__OB && window.__OB.user, prev = (u && u.prevNames) || [];
+  if (!prev.length) return [now];
+  if (state.currentUser && state.currentUser.role === 'admin'){   // admin acting as a team: "<name> (as <team>)"
+    const lab = state.role === 'admin' ? '' : ' (as ' + ROLES[state.role].label + ')';
+    return [now].concat(prev.map(n => n + lab));
+  }
+  return [now].concat(prev);
+}
+function xIsMe(n){ return !!n && xMyNames().includes(n); }
+const XU_TYPES = ['sales', 'supply', 'production', 'accounts', 'approver', 'admin'];
+async function xUserEdit(uid){
+  const f = state.xEdit; if (!f || f.uid !== uid) return;
+  state.xUserBusy = uid; state.xUserMsg = null; renderAll();
+  try {
+    const r = await window.__OB.api('/api/admin/user-update', { body:{ uid, action:'edit', name:f.name, email:f.email, role:f.role, title:f.title } });
+    const u = r.user, i = (window.__OB.users || []).findIndex(x => x.uid === uid);
+    if (i >= 0) window.__OB.users[i] = Object.assign({}, window.__OB.users[i], u);
+    const U = USERS.find(x => x.id === uid); if (U) Object.assign(U, { name:u.name, email:u.email, role:u.role, title:u.title || null });
+    state.xEdit = null;
+    state.xUserMsg = { uid, ok:true, text:`Saved. ${u.name} signs in with ${u.email}${f.roleWas !== u.role ? `; their screens change to ${(ROLES[u.role] && ROLES[u.role].label) || u.role} the next time they open or reload the page` : ''}.` };
+  } catch (e){ state.xUserMsg = { uid, ok:false, text:e.message }; }
+  state.xUserBusy = null; renderAll();
+}
+const _rpuEdit = renderPermUsers;
+renderPermUsers = function(){
+  let h = _rpuEdit.apply(this, arguments);
+  const me = window.__OB.user && window.__OB.user.uid, f = state.xEdit;
+  USERS.forEach(u => {
+    const info = xUserInfo(u.id), prev = info.prevNames || [];
+    if (prev.length) h = h.replace(`<td class="cell-primary">${xe(u.name)}`, `<td class="cell-primary">${xe(u.name)}<div class="cell-sub" style="font-weight:400;">Previously: ${xe(prev.join(', '))}</div>`);
+    if (xUserActive(u.id) && state.xUserBusy !== u.id) h = h.replace(`<button class="btn-text" data-xu-pw="${u.id}">Reset password</button>`, `<button class="btn-text" data-xu-edit="${u.id}">Edit</button> · <button class="btn-text" data-xu-pw="${u.id}">Reset password</button>`);
+    if (f && f.uid === u.id){
+      const form = `<tr><td colspan="5" style="padding-top:0;"><div class="field-grid" style="max-width:820px;">
+        <div class="field"><label>Name</label><input id="xu_e_name" value="${xe(f.name)}" maxlength="80"></div>
+        <div class="field"><label>Email (sign-in)</label><input id="xu_e_email" value="${xe(f.email)}" autocomplete="off"></div>
+        <div class="field"><label>User type</label><select id="xu_e_role" ${u.id === me ? 'disabled title="You can\'t change your own user type"' : ''}>${XU_TYPES.map(r => `<option value="${r}" ${r === f.role ? 'selected' : ''}>${xe((ROLES[r] && ROLES[r].label) || (r === 'approver' ? 'COO / Director' : r))}</option>`).join('')}</select></div>
+        ${f.role === 'approver' ? `<div class="field"><label>Title</label><input id="xu_e_title" value="${xe(f.title || '')}" placeholder="COO or Director"></div>` : ''}
+      </div>
+      <div style="margin-top:8px;display:flex;gap:8px;align-items:center;"><button class="btn btn-primary btn-sm" id="xu_e_save">Save</button><button class="btn-text" id="xu_e_cancel">Cancel</button></div>
+      <div class="cell-sub" style="margin-top:4px;">A new email is their sign-in from now on. A new name shows on what they do from now on; older entries keep the name they were made with and still count as theirs. A new user type applies the next time they open or reload the page.</div></td></tr>`;
+      const marker = `data-xu-edit="${u.id}"`, i = h.indexOf(marker);
+      if (i >= 0){ const end = h.indexOf('</tr>', i) + 5; h = h.slice(0, end) + form + h.slice(end); }
+    }
+  });
+  return h;
+};
+extraWiring.push(() => {
+  document.querySelectorAll('[data-xu-edit]').forEach(b => b.addEventListener('click', () => { const u = USERS.find(x => x.id === b.dataset.xuEdit); if (!u) return;
+    state.xEdit = { uid:u.id, name:u.name, email:u.email, role:u.role, roleWas:u.role, title:u.title || '' }; state.xPwFor = null; state.xUserMsg = null; renderAll(); }));
+  const f = state.xEdit; if (!f) return;
+  [['xu_e_name', 'name'], ['xu_e_email', 'email'], ['xu_e_title', 'title']].forEach(([id, k]) => { const el = document.getElementById(id); if (el) el.addEventListener('input', () => { f[k] = el.value; }); });
+  const r = document.getElementById('xu_e_role'); if (r) r.addEventListener('change', () => { f.role = r.value; renderAll(); });
+  const s = document.getElementById('xu_e_save'); if (s) s.addEventListener('click', () => xUserEdit(f.uid));
+  const c = document.getElementById('xu_e_cancel'); if (c) c.addEventListener('click', () => { state.xEdit = null; renderAll(); });
 });
 
 // ---------------------------------------------------------------- Warehouse Tag Station: zone at receipt (JK, 25 Oct)
