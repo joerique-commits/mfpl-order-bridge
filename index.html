@@ -15101,7 +15101,7 @@ function xCatView(){
 }
 function xRmBackfillNote(){
   if (!(window.__OB && window.__OB.user && window.__OB.user.role === 'admin')) return '';
-  const m = (ls.get('ob_migrations', {}) || {}).rm1; if (!m) return '';
+  const m = (ls.get('ob_migrations', {}) || {}).rm1; if (!m || (!m.ticked.length && !m.review.length)) return '';
   return `<div class="cell-sub" style="margin-top:10px;">Raw material back-filled from saved job-card text on ${fmtDate(String(m.at).slice(0, 10))}: ${m.ticked.length} card(s) ticked${m.ticked.length ? ' (#' + m.ticked.map(xe).join(', #') + ')' : ''}.${m.review.length ? ` <b>Check these cards — they have conflicting RM lines (one may be crossed out):</b> #${m.review.map(xe).join(', #')}` : ''}</div>`;
 }
 function xCatCsv(){
