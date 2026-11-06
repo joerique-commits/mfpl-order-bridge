@@ -766,7 +766,8 @@ var STORES = {
   ob_fabric_entries:{ t:'list', n:16, dir:'desc' }, ob_fabric_challans:{ t:'list', n:8, dir:'desc' }, ob_fabric_receipts:{ t:'list', n:8, dir:'desc' },
   ob_stock_blocks:{ t:'list', n:8, dir:'desc' }, ob_wh_tags:{ t:'list', n:16, dir:'desc' }, ob_job_cards:{ t:'list', n:16, dir:'desc' },
   ob_fab_locations:{ t:'value' },
-  ob_route_units:{ t:'value' }
+  ob_route_units:{ t:'value' },
+  ob_migrations:{ t:'value' }
 };
 var USER_RE = /^ob_(profiles$|approver_me$|inbox_read_|inbox_seen_|mute_|unfollow_)/;   // kept per signed-in user
 function cfgFor(k){ if (Object.prototype.hasOwnProperty.call(STORES, k)) return STORES[k]; if (USER_RE.test(k) && /^[A-Za-z0-9_]+$/.test(k)) return { t:'user' }; return null; }
@@ -1323,6 +1324,60 @@ async function loadData(meta){
   try { return JSON.parse(text); } catch(e){ return JSON.parse(await all(false)); }
 }
 
+// ---------------------------------------------------------------- one-time data fixes (6 Nov), run by the first admin to open the page
+// raw material status from job-card text: 'available' | 'not_available' | '' (nothing about RM)
+function rmClassify(text){
+  var t = ' ' + String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ') + ' ';
+  if (!/ (rm|r m|raw ?materials?|raw ?mat|rawmaterials?) /.test(t)) return '';
+  if (/ (not|no|non|un ?available|unavailable|unavl|unavbl|na|n a|pending|short|shortage|nil|awaited|awaiting|waiting|out of stock) /.test(t)) return 'not_available';
+  if (/ (available|availabl|avl|avbl|avlbl|aval|avail|ok|okay|blocked|block|ready|received|in stock|done|yes) /.test(t)) return 'available';
+  return '';
+}
+OB.rmClassify = rmClassify;
+var PLACEHOLDER_NAMES = ['Priya Menon', 'Arjun Vora', 'Suresh Iyer', 'Divya Nair', 'Meera Kapoor'], ADMIN_UNKNOWN = 'Admin (name not recorded)';
+function migrateOnce(){
+  var M = safeParse(rawGet.call(LS, 'ob_migrations')) || {}, changed = false, now = new Date().toISOString(), who = (OB.user && OB.user.name) || 'admin';
+  if (!M.names1){
+    var real = {}; (OB.users || []).forEach(function(u){ if (u && u.name) real[u.name] = 1; });
+    var ph = {}; PLACEHOLDER_NAMES.forEach(function(n){ if (!real[n]) ph[n] = 1; });
+    var count = 0;
+    var walk = function(v, byKey){
+      if (typeof v === 'string') return byKey && ph[v] ? (count++, ADMIN_UNKNOWN) : v;
+      if (Array.isArray(v)) return v.map(function(x){ return walk(x, byKey); });
+      if (v && typeof v === 'object'){ Object.keys(v).forEach(function(k){ v[k] = walk(v[k], /by(name)?$/i.test(k)); }); }
+      return v;
+    };
+    Object.keys(STORES).forEach(function(s){
+      var t = STORES[s].t; if (t !== 'value' && t !== 'map' && t !== 'list') return;
+      var raw = rawGet.call(LS, s); if (!raw) return;
+      var before = count, val = safeParse(raw); if (val == null) return;
+      val = walk(val, false);
+      if (count > before) LS.setItem(s, JSON.stringify(val));
+    });
+    M.names1 = { at:now, by:who, replaced:count }; changed = true;
+  }
+  if (!M.rm1){
+    var jcs = safeParse(rawGet.call(LS, 'ob_job_cards')), set = [], review = [], jcChanged = false;
+    (Array.isArray(jcs) ? jcs : []).forEach(function(jc){
+      if (!jc || jc.rmBlocked) return;
+      var reads = (jc.materials || []).map(function(m){ var line = [m.material, m.qty].filter(Boolean).join(' '); return { line:line, st:rmClassify(line) }; }).filter(function(x){ return x.st; });
+      if (!reads.length) return;
+      var sts = {}; reads.forEach(function(x){ sts[x.st] = 1; });
+      if (Object.keys(sts).length > 1){ review.push(jc.jobCardNumber); return; }   // conflicting lines: a crossed-out line may be among them
+      var last = reads[reads.length - 1], at = jc.updatedAt || now;
+      jc.rmRead = { status:last.st, line:last.line, at:at, by:'Order Bridge (saved card text)', how:'back-filled 6 Nov' };
+      if (last.st === 'available'){
+        var ev = { on:true, by:'Order Bridge (saved card text)', at:now, how:'back-filled from the card text saved ' + String(at).slice(0, 10) + ': “' + last.line + '”' };
+        jc.rmBlocked = Object.assign({}, ev, { history:[ev] }); set.push(jc.jobCardNumber);
+      }
+      jcChanged = true;
+    });
+    if (jcChanged) LS.setItem('ob_job_cards', JSON.stringify(jcs));
+    M.rm1 = { at:now, by:who, ticked:set, review:review }; changed = true;
+  }
+  if (changed) LS.setItem('ob_migrations', JSON.stringify(M));
+}
+
 function runApp(){
   var olds = Array.prototype.slice.call(document.querySelectorAll('script[type="text/x-ob-app"]'));
   olds.forEach(function(old){ var s = document.createElement('script'); s.textContent = old.textContent; old.parentNode.replaceChild(s, old); });
@@ -1352,6 +1407,7 @@ async function start(user, pre){
   window.__MFPL_REAL_DATA__ = data;
   hideCard();
   OB.sync = true;
+  if (user.role === 'admin'){ try { migrateOnce(); } catch(e){ console.error('[Order Bridge] migration', e); } }
   runApp();
   liveStart();
 }
@@ -5471,10 +5527,10 @@ function renderDashboard(){
   // SO Revision Request — Accounts reconciles value + advance (see ROLES.accounts' own
   // emphasis), and Supply separately validates the PO-cancellation answer. A pending
   // request lands on whichever of those two still has work left to do on it.
-  SO_REVISION_REQUESTS.filter(r=>r.status==='pending').forEach(r => {
+  SO_REVISION_REQUESTS.filter(r=>r.status==='pending' || r.status==='awaiting_supply').forEach(r => {
     const detail = `${reasonForRevisionText(r)} — value check ${r.valueCheck.done?'done':'pending'}, advance check ${r.advanceCheck.done?'done':'pending'}`;
-    if (!r.supplyValidation.done) allRows.push({ owner:'supply', domain:'sorevision', item:r.so, itemSub:r.customer, ref:r.so, detail:`PO cancellation (${r.poCancellation}) needs validating — ${detail}`, status:soRevisionStatusPill(r.status), sortKey:100, nav:{module:'sorevision'} });
-    allRows.push({ owner:'accounts', domain:'sorevision', item:r.so, itemSub:r.customer, ref:r.so, detail, status:soRevisionStatusPill(r.status), sortKey:100, nav:{module:'sorevision'} });
+    if (!r.supplyValidation.done && r.status === 'awaiting_supply') allRows.push({ owner:'supply', domain:'sorevision', item:r.so, itemSub:r.customer, ref:r.so, detail:`PO cancellation (${r.poCancellation}) needs validating — ${detail}`, status:soRevisionStatusPill(r.status), sortKey:100, nav:{module:'sorevision'} });
+    if (r.status === 'pending') allRows.push({ owner:'accounts', domain:'sorevision', item:r.so, itemSub:r.customer, ref:r.so, detail, status:soRevisionStatusPill(r.status), sortKey:100, nav:{module:'sorevision'} });
   });
   // A role that's had a menu section removed doesn't see attention rows pointing
   // at that section either — same rule the tile groups above apply, and it avoids
@@ -7624,7 +7680,7 @@ const SO_REVISION_REQUESTS = [
 ];
 function soRevisionBadgeForRole(role){
   if (role==='accounts' || role==='admin') return SO_REVISION_REQUESTS.filter(r=>r.status==='pending').length;
-  if (role==='supply') return SO_REVISION_REQUESTS.filter(r=>r.status==='pending' && !r.supplyValidation.done).length;
+  if (role==='supply') return SO_REVISION_REQUESTS.filter(r=>r.status==='awaiting_supply' && !r.supplyValidation.done).length;
   return 0;
 }
 function soRevisionStatusPill(status){
@@ -8260,7 +8316,7 @@ function wireContentEvents(){
       po, qty, unit,
       product:o?o.article:'', productCode:o?o.sku:'', customer:o?o.customer:'', component,
       received, addedAt:new Date().toISOString(),
-      loggedByName:actingUserName(), loggedByPhone:'—', loggedByLocation:'MFPL-Upholstery',
+      loggedByName:actingUserName(), loggedByPhone:'—', loggedByLocation:(window.__xIntakeLoc ? window.__xIntakeLoc() : 'MFPL-Upholstery'),
       destReceivedAt:null, destReceivedBy:null, destLocation:null,
       dispatches:[], receipts:[]
     };
@@ -9662,7 +9718,7 @@ renderSoRevision = function(){
   const rows = SO_REVISION_REQUESTS.slice().sort((a,b) => b.requestedAt.localeCompare(a.requestedAt));
   const editing = state.srEditId && SO_REVISION_REQUESTS.find(x => x.id === state.srEditId);
   return `${renderApproverBar()}${renderApprovalCard()}${srLinkCard()}
-    <div class="preview-banner dashed">${icon('split')} <div><strong>Standalone record — nothing here writes back into the real order.</strong> SO, customer and current value come from Daily PI Revenue; PO(s) raised from PO Summary. Sales first gets a COO/Director approval through an approval link; only then does it reach supply and accounts. Supply confirms the PO cancellation (or that none is needed) and Accounts reconciles value and advance — only once all three are done can it be approved.</div></div>
+    <div class="preview-banner dashed">${icon('split')} <div><strong>Standalone record — nothing here writes back into the real order.</strong> SO, customer and current value come from Daily PI Revenue; PO(s) raised from PO Summary. Sales first gets a COO/Director approval through an approval link. Then Accounts reconciles value and advance and approves (the revised SO is raised in the ERP). Supply then confirms the PO cancellation (or that none was needed) — the request stays open until supply confirms.</div></div>
     ${canCreate ? srFormHtml(editing) : ''}
     <div class="group-label">Revision requests <span style="text-transform:none;font-weight:400;color:var(--ink-faint);">— every request, no limit</span></div>
     <div class="card table-wrap"><table class="grid-table x-srt">
@@ -9696,10 +9752,10 @@ renderStockBlockStation = function(){
   const code = artCode === '__other' ? otherCode : artCode;
   const artName = code ? ((arts.find(a => a.code === code) || {}).name || STOCK_NAME[code] || '') : '';
   const inHand = code && wh ? stockInHand(code, wh) : null;
-  const blockedHere = code && wh ? STOCK_BLOCK_REQUESTS.filter(r => r.sku === code && r.warehouse === wh && r.status === 'approved' && !xFinOf(r)).reduce((s,r) => s + (r.qtyRequested || 0), 0) : 0;
+  const blockedHere = code && wh ? STOCK_BLOCK_REQUESTS.filter(r => r.sku === code && r.warehouse === wh).reduce((s,r) => s + xSbLeft(r), 0) : 0;
   const whStock = wh ? X.stock.filter(s => s.wh === wh && s.qty > 0) : [];
   const rows = STOCK_BLOCK_REQUESTS.slice().sort((a,b) => b.requestedAt.localeCompare(a.requestedAt));
-  const approved = STOCK_BLOCK_REQUESTS.filter(r => r.status === 'approved' && !xFinOf(r));
+  const approved = STOCK_BLOCK_REQUESTS.filter(r => xSbLeft(r) > 0);
   return `
     <div class="preview-banner dashed">${icon('box')} <div><strong>Block warehouse stock against a sales order.</strong> Sales or production raise the request; supply approves it. Stock shows as blocked only after supply approves.</div></div>
     ${canRequest ? `
@@ -9734,12 +9790,12 @@ renderStockBlockStation = function(){
       const list = approved.filter(r => r.warehouse === w);
       const byArt = {}; list.forEach(r => { (byArt[r.sku] = byArt[r.sku] || []).push(r); });
       return `<div class="card table-wrap" style="margin-bottom:12px;"><table class="grid-table">
-        <thead><tr><th colspan="4">${whLabel(w)} <span class="cell-sub" style="font-weight:400;">· ${list.reduce((s,r)=>s+(r.qtyRequested||0),0)} item(s) blocked</span></th></tr>
+        <thead><tr><th colspan="4">${whLabel(w)} <span class="cell-sub" style="font-weight:400;">· ${list.reduce((s,r)=>s+xSbLeft(r),0)} item(s) blocked</span></th></tr>
         <tr><th>Article</th><th>Blocked against SO</th><th class="num">Qty blocked</th><th class="num">Stock in hand</th></tr></thead>
         <tbody>${Object.keys(byArt).length ? Object.entries(byArt).map(([sku, rs]) => rs.map((r, i) => `<tr>
           ${i===0 ? `<td rowspan="${rs.length}"><div class="cell-primary">${xe(r.article)}</div><div class="cell-sub">${xe(sku)}</div></td>` : ''}
           <td><div class="cell-primary">${r.so}</div><div class="cell-sub">${xe(r.customer || customerForSo(r.so))}</div></td>
-          <td class="num">${r.qtyRequested} ${xe(r.uom)}</td>
+          <td class="num">${xSbLeft(r)} ${xe(r.uom)}${xSbLeft(r) !== r.qtyRequested ? `<div class="cell-sub">of ${r.qtyRequested}; rest dispatched</div>` : ''}</td>
           ${i===0 ? `<td class="num" rowspan="${rs.length}">${stockInHand(sku, w) === null ? '—' : stockInHand(sku, w)}</td>` : ''}</tr>`).join('')).join('')
           : `<tr><td colspan="4"><div class="empty-note">Nothing blocked here.</div></td></tr>`}</tbody></table></div>`;
     }).join('')}
@@ -9751,9 +9807,9 @@ renderStockBlockStation = function(){
           <td>${whLabel(r.warehouse)}</td><td class="num">${r.qtyRequested} ${xe(r.uom)}</td>
           <td><div class="cell-primary">${xe(r.requestedBy)}</div><div class="cell-sub">${ROLES[r.requestedByRole]?.label||r.requestedByRole} · ${fmtDT(r.requestedAt)}</div></td>
           <td>${xe(r.reason)}${r.notes?`<div class="cell-sub" style="margin-top:4px;">${xe(r.notes)}</div>`:''}</td>
-          <td>${xFinOf(r) ? xFinPill(r, xFinOf(r)) : stockBlockStatusPill(r.status)}${r.decidedBy?`<div class="cell-sub">by ${xe(r.decidedBy)} · ${fmtDT(r.decidedAt)}</div>`:''}</td>
+          <td>${xFinOf(r) ? xFinPill(r, xFinOf(r)) : xSbDisp(r) ? xSbDispPill(r, xSbDisp(r)) : stockBlockStatusPill(r.status)}${r.decidedBy?`<div class="cell-sub">by ${xe(r.decidedBy)} · ${fmtDT(r.decidedAt)}</div>`:''}</td>
           ${canDecide ? `<td>${r.status==='requested' ? `<button class="btn-text" data-xsb-approve="${r.id}">Approve</button> · <button class="btn-text" data-xsb-reject="${r.id}">Reject</button>`
-            : r.status==='approved' && !xFinOf(r) ? `<button class="btn-text" data-xsb-release="${r.id}">Release</button>` : ''}</td>` : ''}
+            : r.status==='approved' && xSbLeft(r) > 0 ? `<button class="btn-text" data-xsb-release="${r.id}">Release</button>` : ''}</td>` : ''}
         </tr>`).join('') : `<tr><td colspan="${canDecide?7:6}"><div class="empty-note">No stock block requests yet.</div></td></tr>`}</tbody>
     </table></div>`;
 };
@@ -9780,7 +9836,7 @@ extraWiring.push(() => {
     if (!reason) return fail('Enter a reason.');
     const a = arts.find(x => x.code === code) || { name: STOCK_NAME[code] || code, uom: 'PCS' };
     const inHand = stockInHand(code, wh);
-    const blocked = STOCK_BLOCK_REQUESTS.filter(r => r.sku === code && r.warehouse === wh && r.status === 'approved' && !xFinOf(r)).reduce((s,r) => s + (r.qtyRequested||0), 0);
+    const blocked = STOCK_BLOCK_REQUESTS.filter(r => r.sku === code && r.warehouse === wh).reduce((s,r) => s + xSbLeft(r), 0);
     const note = inHand === null ? 'Article not in this warehouse\'s stock file' : (qty > inHand - blocked ? `Requested ${qty} but only ${inHand - blocked} free at request time` : '');
     STOCK_BLOCK_REQUESTS.unshift({ id:'SBR-' + Math.floor(1000 + Math.random()*9000), so, customer: customerForSo(so), po: posForSo(so).join(', '), article: a.name, sku: code, qtyRequested: qty, uom: a.uom || 'PCS',
       warehouse: wh, requestedBy: actingUserName(), byKey: userKey(), requestedByRole: state.role, requestedAt: nowIso(), reason, status:'requested', decidedBy:'', decidedAt:'', notes: note });
@@ -10472,7 +10528,7 @@ extraWiring.push(() => {
     state.fabricIntakeMessage = dupCount ? 'This SKU has already been logged against this order. Adding this created a second tag for it — fine for a partial delivery, otherwise check the Logbook tab.' : '';
     const t = { id:'FTS-' + Math.floor(1000 + Math.random()*9000), fabricName:t_(d.mMaterial), sku, materialUom:d.unit, furnishingsPo:t_(d.mFpo), po:t_(d.mFurnPo), qty, unit:d.unit,
       product:t_(d.mProduct), productCode:'', customer:t_(d.mCustomer), component:d.component.trim(), received:d.received || todayStr(), addedAt:new Date().toISOString(), mfplDirect:true,
-      loggedByName:actingUserName(), loggedByPhone:'—', loggedByLocation:'MFPL-Upholstery', destReceivedAt:null, destReceivedBy:null, destLocation:null, dispatches:[], receipts:[] };
+      loggedByName:actingUserName(), loggedByPhone:'—', loggedByLocation:(window.__xIntakeLoc ? window.__xIntakeLoc() : 'MFPL-Upholstery'), destReceivedAt:null, destReceivedBy:null, destLocation:null, dispatches:[], receipts:[] };
     FABRIC_ENTRIES.unshift(t); state.fabricLastTagId = t.id;
     // stay in MFPL Direct mode for the next delivery; clear the per-item fields
     state.fabricDraft = { clientSupplied:false, furnishingsPo:'', material:'', qty:'', unit:d.unit, received:todayStr(), furniturePo:'', component:'', xProduct:'', mfplDirect:true, mFpo:d.mFpo, mSku:'', mMaterial:'', mFurnPo:'', mProduct:'', mCustomer:'' };
@@ -10545,7 +10601,7 @@ extraWiring.push(() => {
     state.fabricIntakeMessage = dupCount ? 'This SKU has already been logged against this Furnishings PO. Adding this created a second tag for it — fine for a partial delivery, otherwise check the Logbook tab.' : '';
     const t = { id:'FTS-' + Math.floor(1000 + Math.random()*9000), fabricName, sku, materialUom:d.unit, furnishingsPo, po:d.furniturePo, qty, unit:d.unit,
       product: prod.name, productCode: prod.code, customer: poCustomer(d.furniturePo), component: d.component.trim(), received: d.received || todayStr(), addedAt: new Date().toISOString(),
-      loggedByName: actingUserName(), loggedByPhone:'—', loggedByLocation:'MFPL-Upholstery', destReceivedAt:null, destReceivedBy:null, destLocation:null, dispatches:[], receipts:[] };
+      loggedByName: actingUserName(), loggedByPhone:'—', loggedByLocation:(window.__xIntakeLoc ? window.__xIntakeLoc() : 'MFPL-Upholstery'), destReceivedAt:null, destReceivedBy:null, destLocation:null, dispatches:[], receipts:[] };
     FABRIC_ENTRIES.unshift(t); state.fabricLastTagId = t.id;
     state.fabricDraft = { clientSupplied:false, furnishingsPo:'', material:'', qty:'', unit:'metres', received:todayStr(), furniturePo:'', component:'', xProduct:'' };
     renderAll();
@@ -12276,7 +12332,7 @@ function inboxItems(){
     SLOT_BOOKINGS.filter(b => b.type === 'dispatch' && b.status === 'confirmed' && b.date <= todayStr()).forEach(b => add({ id:'lm-dsp-' + b.id, kind:'action', area:'Dispatch', title:`Mark the dispatch for ${b.so} as dispatched — ${fmtDate(b.date)}, ${b.window}`, detail:`${customerForSo(b.so) || (DPI_BY_SO[b.so] || {}).customer || ''} · ${b.vendor}`, when:b.approvedAt || null, nav:{ module:'slots', set:() => { state.lastMileTab = 'dispatch'; } } }));
     SLOT_BOOKINGS.filter(b => b.type === 'dispatch' && b.status === 'dispatched').forEach(b => add({ id:'lm-pod-' + b.id, kind:'action', area:'Dispatch', title:`Confirm delivery of ${b.so} — upload the handover photo`, detail:`${customerForSo(b.so) || (DPI_BY_SO[b.so] || {}).customer || ''} · dispatched ${fmtDate(b.dispatchedAt)} · ${b.vendor}`, when:b.dispatchedAt || null, nav:{ module:'slots', set:() => { state.lastMileTab = 'dispatch'; } } }));
     SLOT_BOOKINGS.filter(b => b.type === 'installation' && b.status === 'confirmed' && b.date <= todayStr()).forEach(b => add({ id:'lm-ins-' + b.id, kind:'action', area:'Installation', title:`Mark the installation for ${b.so} as completed`, detail:`${fmtDate(b.date)}, ${b.window} · ${b.vendor}`, when:b.approvedAt || null, nav:{ module:'slots', set:() => { state.lastMileTab = 'installation'; } } }));
-    SO_REVISION_REQUESTS.filter(r => r.status === 'pending' && !r.supplyValidation.done).forEach(r => add({ id:'sr-sup-' + r.id, kind:'action', area:'SO revision', title:`Confirm PO cancellation for SO revision ${r.so}`, detail:`${r.customer} · PO(s) raised: ${r.poRaised} · ${reasonForRevisionText(r)}`, when:r.requestedAt, nav:{ module:'sorevision' } }));
+    SO_REVISION_REQUESTS.filter(r => r.status === 'awaiting_supply' && !r.supplyValidation.done).forEach(r => add({ id:'sr-sup-' + r.id, kind:'action', area:'SO revision', title:`Confirm PO cancellation for SO revision ${r.so}`, detail:`Accounts approved the revision · ${r.customer} · PO(s) raised: ${r.poRaised} · ${reasonForRevisionText(r)}`, when:r.requestedAt, nav:{ module:'sorevision' } }));
     WAREHOUSE_TAGS.filter(t => warehouseTagStatus(t) === 'in_transit').forEach(t => add({ id:'wh-rcv-' + t.id, kind:'action', area:'Warehouse tag', title:`Receive ${t.tagNo} at the brand warehouse`, detail:`${t.article}${t.seq ? ' · ' + t.seq + ' of ' + t.seqTotal : ''} · ${t.so || ''}`, when:t.packedAt, nav:{ module:'warehousetag', set:() => { state.whTab = 'receipt'; } } }));
     const canc = X.dpi.filter(h => h.cancelled && h.linked && !h.ic).length;
     if (canc) add({ id:'po-canc-' + canc, kind:'action', area:'PO Progress', title:`${canc} cancelled sales orders still have POs raised`, detail:'Check whether those POs need cancelling with the vendor', when:null, nav:{ module:'confirmations', set:() => { state.xPoFilter = 'cancelled'; } } });
@@ -12289,7 +12345,7 @@ function inboxItems(){
   if (is('supply')) FABRIC_ENTRIES.filter(e => entryStatus(e) === 'awaiting_dispatch').forEach(e => add({ id:'fab-dsp-' + e.id, kind:'action', area:'Furnishings', title:`Dispatch ${e.fabricName} to the factory`, detail:`${e.id} · ${e.qty} ${e.unit} · for PO ${e.po}`, when:e.addedAt, nav:{ module:'fabric', set:() => { state.fabricTab = 'dispatch'; } } }));
   if (is('accounts')){
     SO_REVISION_REQUESTS.filter(r => r.status === 'pending' && (!r.valueCheck.done || !r.advanceCheck.done)).forEach(r => add({ id:'sr-acc-' + r.id, kind:'action', area:'SO revision', title:`Reconcile revision for ${r.so}`, detail:`${r.customer} · ${fmtRupees(r.currentOrderValue)} → ${fmtRupees(r.revisedOrderValue)} · ${[!r.valueCheck.done && 'value check', !r.advanceCheck.done && 'advance check'].filter(Boolean).join(' and ')} pending`, when:r.requestedAt, nav:{ module:'sorevision' } }));
-    SO_REVISION_REQUESTS.filter(r => r.status === 'pending' && r.supplyValidation.done && r.valueCheck.done && r.advanceCheck.done).forEach(r => add({ id:'sr-dec-' + r.id, kind:'action', area:'SO revision', title:`Approve or reject revision for ${r.so}`, detail:'All three checks are done', when:r.requestedAt, nav:{ module:'sorevision' } }));
+    SO_REVISION_REQUESTS.filter(r => r.status === 'pending' && r.valueCheck.done && r.advanceCheck.done).forEach(r => add({ id:'sr-dec-' + r.id, kind:'action', area:'SO revision', title:`Approve or reject revision for ${r.so}`, detail:'Value and advance checks are done — supply confirms the PO cancellation after you approve', when:r.requestedAt, nav:{ module:'sorevision' } }));
   }
   if (is('supply')){ const uq_ = srcQueue(); if (uq_.count) add({ id:'um-' + uq_.count, kind:'action', area:'PO Progress', title:`${uq_.count} unmatched SO SKU / PO line item(s) to link`, detail:`SOs from ${fmtDate(riskGoLive())} · PO Summary data of ${fmtDate(BUILT)}`, when:null, nav:{ module:'confirmations', set:() => { state.openOrderId = null; state.xPoFilter = 'unmatched'; } } });
   }
@@ -12950,7 +13006,7 @@ function renderApprovalCard(){
   if (!isApprover()) return box(`Approval needed — SO revision ${r.id}`, `<div class="ac-sub">Only the COO or a Director can approve this. Sign in with your approver login to decide.${__LOCAL_FILE_DATA_BUILD ? ' <b>Local build:</b> sign-in is simulated.' : ''}</div>${facts}
       ${(__LOCAL_FILE_DATA_BUILD || (state.currentUser && state.currentUser.role === 'admin')) ? '<button class="btn btn-primary btn-sm" data-xsr-asapprover="1">Switch to COO / Director (admin test)</button>' : ''}`);
   const me = currentApprover(); const msg = state.xApprMsg || '';
-  return box(`Approve SO revision ${r.id}?`, `<div class="ac-sub">Signed in as <b>${xe(me.name)}</b> (${xe(me.title)}). Link expires in ${hoursLeft(r)} h. Approving sends it to supply and accounts for their checks.</div>${facts}
+  return box(`Approve SO revision ${r.id}?`, `<div class="ac-sub">Signed in as <b>${xe(me.name)}</b> (${xe(me.title)}). Link expires in ${hoursLeft(r)} h. Approving sends it to accounts; supply confirms the PO cancellation after accounts approves.</div>${facts}
     <div class="field"><label>Comments <span class="opt">(required to send back or reject)</span></label><textarea id="x_appr_comments" rows="2" placeholder="e.g. OK as discussed with the client">${xe(state.xApprComments || '')}</textarea></div>
     <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;"><button class="btn btn-primary" data-xappr="approved:${r.id}">Approve</button><button class="btn btn-ghost" data-xappr="sent_back:${r.id}">Send back to sales</button><button class="btn btn-ghost" data-xappr="rejected:${r.id}" style="color:var(--critical);">Reject</button></div>
     ${msg ? `<div class="cell-sub" style="color:var(--critical);margin-top:6px;">${xe(msg)}</div>` : ''}`);
@@ -14876,7 +14932,9 @@ extraWiring.push(() => {
 // "RM confirmed" = the job card tick "All raw material (except fabric) available & blocked" (factory / admin;
 // a scan can pre-tick it, the person saving confirms it; can be unticked; history kept).
 // A PO / SO takes its worst open line (packed lines don't count). Worst → best: C4, C0, C3, C2, C1 (JK 26 Oct).
-const xCatOn = () => !!(window.__OB && window.__OB.user && window.__OB.user.role === 'admin');
+// 6 Nov (JK): shared with the factory and supply so both plan readiness; each line says whose move it is
+const xCatOn = () => !!(window.__OB && window.__OB.user && ['admin', 'production', 'supply'].includes(window.__OB.user.role));
+const XCAT_WHO = { factory:'Factory', supply:'Supply', sales:'Sales' };
 const XCAT_ORDER = ['C4', 'C0', 'C3', 'C2', 'C1'];   // JK 26 Oct: C4 is the worst
 const XCAT_INFO = {
   C0:{ sev:'critical', label:'No job card' },
@@ -14947,6 +15005,26 @@ function xCatReason(r){
   const fab = r.fab.note || r.fab.items.map(i => i.name + ': ' + (i.status === 'received' ? 'received' : i.status === 'in_transit' ? 'in transit' : i.status === 'awaiting_dispatch' ? 'tagged, not dispatched' : 'no tag')).join('; ');
   return rm + ' · ' + fab;
 }
+// whose move it is on a line: factory (job card, RM, confirm fabric received), supply (log / send fabric), sales (fabric details missing)
+function xCatOwners(r){
+  if (r.packed) return [];
+  const o = new Set(), why = [];
+  if (!r.jc){ o.add('factory'); why.push('Factory: capture the job card'); }
+  else if (!r.rm) { o.add('factory'); why.push('Factory: confirm raw material on the job card'); }
+  if (!r.fab.ok){
+    if (r.fab.note){ o.add('sales'); why.push('Sales: fill in the fabric on the order line'); }
+    r.fab.items.forEach(i => {
+      if (i.status === 'received') return;
+      if (i.status === 'in_transit'){ o.add('factory'); why.push('Factory: confirm ' + i.name + ' received'); }
+      else if (i.status === 'awaiting_dispatch'){ o.add('supply'); why.push('Supply: send ' + i.name + ' to the factory'); }
+      else { o.add('supply'); why.push('Supply: log ' + i.name + ' (no tag yet)'); }
+    });
+  }
+  return { list:[...o], why };
+}
+const xMyOwn = () => state.role === 'production' ? 'factory' : state.role === 'supply' ? 'supply' : '';
+const xOwnPills = r => { const w = xCatOwners(r); return (w.list || []).map(k => `<span class="pill neutral" title="${xe(w.why.join(' · '))}"><span class="dot"></span>${XCAT_WHO[k]}</span>`).join(' ') || '<span class="cell-sub">—</span>'; };
+const xRmAsOf = jc => { const a = (jc && jc.rmRead && jc.rmRead.at) || (jc && jc.rmBlocked && jc.rmBlocked.at) || ''; return a ? 'as of ' + fmtDate(a.slice(0, 10)) : ''; };
 function xSetRm(jc, on, how){
   const cur = jc.rmBlocked || { on:false, history:[] };
   if (!!cur.on === !!on) return false;
@@ -14973,7 +15051,7 @@ renderOrdersList = function(){
   if (!xCatOn()){ if (state.xPoFilter === 'xcat') state.xPoFilter = 'all'; return _rolCat.apply(this, arguments); }
   if (state.xPoFilter !== 'xcat'){
     const h = _rolCat.apply(this, arguments);
-    return h.replace('<div class="filter-row">', `<div class="filter-row"><button class="filter-chip" data-xpo-filter="xcat" aria-pressed="false" title="Admin preview until go-live">Readiness C0–C4</button>`);
+    return h.replace('<div class="filter-row">', `<div class="filter-row"><button class="filter-chip" data-xpo-filter="xcat" aria-pressed="false" title="Material readiness: whose move it is on each open factory line">Readiness C0–C4</button>`);
   }
   return xCatView();
 };
@@ -14982,48 +15060,57 @@ function xCatView(){
   const sos = Object.keys(X_.bySo);
   const cnt = { all:sos.length }; XCAT_ORDER.forEach(c => cnt[c] = sos.filter(so => X_.soCat[so] === c).length);
   const lineCnt = {}; XCAT_ORDER.forEach(c => lineCnt[c] = 0); X_.byLine.forEach(r => { if (!r.packed) lineCnt[r.c]++; });
-  let rows = sos.filter(so => cf === 'all' || X_.soCat[so] === cf).map(so => ({ so, h:DPI_BY_SO[so] || { so, customer:(X_.bySo[so][0].o.customer || ''), date:'' }, rs:X_.bySo[so] }));
+  const own = state.xCatOwn || '', soOwn = so => new Set([].concat(...X_.bySo[so].map(r => xCatOwners(r).list || [])));
+  const ownCnt = { factory:sos.filter(so => soOwn(so).has('factory')).length, supply:sos.filter(so => soOwn(so).has('supply')).length };
+  let rows = sos.filter(so => (cf === 'all' || X_.soCat[so] === cf) && (!own || soOwn(so).has(own))).map(so => ({ so, h:DPI_BY_SO[so] || { so, customer:(X_.bySo[so][0].o.customer || ''), date:'' }, rs:X_.bySo[so] }));
   if (q) rows = rows.filter(x => (x.so + ' ' + x.h.customer).toLowerCase().includes(q) || x.rs.some(r => (r.o.po + ' ' + r.o.sku + ' ' + r.o.article + ' ' + (r.jc ? r.jc.jobCardNumber : '')).toLowerCase().includes(q)));
   rows.sort((a, b) => XCAT_ORDER.indexOf(X_.soCat[a.so]) - XCAT_ORDER.indexOf(X_.soCat[b.so]) || (b.h.date || '').localeCompare(a.h.date || ''));
   const open = state.xCatOpen || (state.xCatOpen = new Set());
   const lim = state.xCatLimit || 100, shown = rows.slice(0, lim);
   const fabTxt = r => r.fab.note ? xe(r.fab.note) : r.fab.items.map(i => `${xe(i.name)} <span class="cell-sub">${i.status === 'received' ? '✓ received' : i.status === 'in_transit' ? 'in transit' : i.status === 'awaiting_dispatch' ? 'tagged, not dispatched' : 'no tag'}</span>`).join('<br>');
   return `
-    <div class="preview-banner">${icon('check')} <div><strong>Material readiness — admin preview until go-live.</strong> One category per open MFPL factory SKU line; a PO or SO shows its worst line (packed lines left out). Worst first: ${XCAT_ORDER.map(c => `<b>${c}</b> ${XCAT_INFO[c].label}`).join(' · ')}. "RM confirmed" is the job card tick <i>All raw material (except fabric) available &amp; blocked</i>; fabric counts as in when every fabric listed on the order line has a received tag in the Furnishings Tag Station.</div></div>
+    <div class="preview-banner">${icon('check')} <div><strong>Material readiness — shared by the factory and supply.</strong> "Next" on each line says whose move it is. One category per open MFPL factory SKU line; a PO or SO shows its worst line (packed lines left out). Worst first: ${XCAT_ORDER.map(c => `<b>${c}</b> ${XCAT_INFO[c].label}`).join(' · ')}. "RM confirmed" is the job card tick <i>All raw material (except fabric) available &amp; blocked</i>, which follows the latest raw-material line the factory writes in the card's Material Used table (the date shows which scan it is from); fabric counts as in when every fabric listed on the order line has a received tag in the Furnishings Tag Station.</div></div>
+    ${xRmBackfillNote()}
     <div class="toolbar" style="margin-top:18px;">
       <div class="search">${icon('grid')}<input id="xCatQ" placeholder="Search SO, customer, PO, SKU or job card #" value="${xe(state.xCatQ || '')}"></div>
       <div class="filter-row">
         <button class="filter-chip" data-xpo-filter="all" aria-pressed="false">← PO tracker</button>
+        ${['factory', 'supply'].map(k => `<button class="filter-chip" data-xcat-own="${k}" aria-pressed="${own === k}">${xMyOwn() === k ? 'Mine · ' : ''}${XCAT_WHO[k]} to act (${ownCnt[k]})</button>`).join('')}
         ${['all'].concat(XCAT_ORDER).map(c => `<button class="filter-chip" data-xcat-f="${c}" aria-pressed="${cf === c}" ${c !== 'all' ? `title="${xe(XCAT_INFO[c].label)}"` : ''}>${c === 'all' ? 'All SOs' : c} (${cnt[c]})</button>`).join('')}
       </div>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin:-6px 0 10px;flex-wrap:wrap;"><span class="cell-sub">Open SKU lines: ${XCAT_ORDER.map(c => `${c} ${lineCnt[c]}`).join(' · ')}</span><button class="btn btn-ghost btn-sm" id="xCatCsv">Download lines CSV</button></div>
     <div class="card table-wrap"><table class="grid-table">
-      <thead><tr><th></th><th>Sales order / Customer</th><th>SO date</th><th>Category</th><th>Open SKU lines</th></tr></thead>
+      <thead><tr><th></th><th>Sales order / Customer</th><th>SO date</th><th>Category</th><th>Open SKU lines</th><th>Next</th></tr></thead>
       <tbody>${shown.map(({ so, h, rs }) => {
         const isOpen = open.has(so), per = {}; rs.forEach(r => per[r.c] = (per[r.c] || 0) + 1);
         return `<tr class="clickable" data-xcat-toggle="${xe(so)}"><td class="mono">${isOpen ? '−' : '+'}</td>
           <td><div class="cell-primary">${xe(so)}</div><div class="cell-sub">${xe(h.customer || '')}</div></td><td>${h.date ? fmtDate(h.date) : '—'}</td>
           <td>${xCatPill(X_.soCat[so], XCAT_INFO[X_.soCat[so]].label)} <span class="cell-sub">${xe(XCAT_INFO[X_.soCat[so]].label)}</span></td>
-          <td>${XCAT_ORDER.filter(c => per[c]).map(c => `${c} × ${per[c]}`).join(' · ')}</td></tr>
-          ${isOpen ? `<tr><td colspan="5" style="padding:0;"><table class="grid-table" style="background:var(--surface-sunken);">
-            <thead><tr><th style="padding-left:34px;">PO / SKU</th><th>Job card</th><th>RM (except fabric)</th><th>Fabric</th><th>Category</th></tr></thead>
+          <td>${XCAT_ORDER.filter(c => per[c]).map(c => `${c} × ${per[c]}`).join(' · ')}</td><td>${[...soOwn(so)].map(k => `<span class="pill neutral"><span class="dot"></span>${XCAT_WHO[k]}</span>`).join(' ') || '<span class="cell-sub">—</span>'}</td></tr>
+          ${isOpen ? `<tr><td colspan="6" style="padding:0;"><table class="grid-table" style="background:var(--surface-sunken);">
+            <thead><tr><th style="padding-left:34px;">PO / SKU</th><th>Job card</th><th>RM (except fabric)</th><th>Fabric</th><th>Category</th><th>Next</th></tr></thead>
             <tbody>${rs.slice().sort((a, b) => a.o.po.localeCompare(b.o.po) || XCAT_ORDER.indexOf(a.c) - XCAT_ORDER.indexOf(b.c)).map(r => `<tr>
               <td style="padding-left:34px;"><div class="cell-primary"><button class="btn-text" data-open="${xe(r.o.id)}">${xe(r.o.article || r.o.sku)}</button></div><div class="cell-sub mono">${xe(r.o.po)} · ${xe(r.o.sku)} · PO ${X_.poCat[r.o.po] || '—'}</div></td>
               <td>${r.jc ? `<button class="btn-text" data-xcat-jc="${xe(r.jc.id)}">${xe(r.jc.jobCardNumber)}</button>` : '<span class="cell-sub">none</span>'}</td>
-              <td>${r.jc ? (r.rm ? `✓ <span class="cell-sub">${xe(r.jc.rmBlocked.by || '')}${r.jc.rmBlocked.at ? ', ' + fmtDate(r.jc.rmBlocked.at.slice(0, 10)) : ''}${r.jc.rmBlocked.how ? ' (' + xe(r.jc.rmBlocked.how) + ')' : ''}</span>` : 'Not confirmed') : '—'}</td>
-              <td>${fabTxt(r)}</td><td>${xCatPill(r.c, xCatReason(r))}</td></tr>`).join('')}</tbody></table></td></tr>` : ''}`;
-      }).join('') || `<tr><td colspan="5"><div class="empty-note">No sales orders match.</div></td></tr>`}</tbody>
+              <td>${r.jc ? (r.rm ? `✓ <span class="cell-sub">${xe(r.jc.rmBlocked.by || '')} · ${xRmAsOf(r.jc)}</span>` : `Not confirmed${r.jc.rmRead && r.jc.rmRead.status === 'not_available' ? ` <span class="cell-sub">· card says “${xe(r.jc.rmRead.line)}” ${xRmAsOf(r.jc)}</span>` : ''}`) : '—'}</td>
+              <td>${fabTxt(r)}</td><td>${xCatPill(r.c, xCatReason(r))}</td><td>${xOwnPills(r)}</td></tr>`).join('')}</tbody></table></td></tr>` : ''}`;
+      }).join('') || `<tr><td colspan="6"><div class="empty-note">No sales orders match.</div></td></tr>`}</tbody>
     </table></div>
     ${rows.length > lim ? `<div style="margin-top:10px;display:flex;gap:10px;align-items:center;"><span class="cell-sub">Showing ${lim} of ${rows.length}.</span><button class="btn btn-ghost btn-sm" id="xCatMore">Show 100 more</button></div>` : ''}`;
 }
+function xRmBackfillNote(){
+  if (!(window.__OB && window.__OB.user && window.__OB.user.role === 'admin')) return '';
+  const m = (ls.get('ob_migrations', {}) || {}).rm1; if (!m) return '';
+  return `<div class="cell-sub" style="margin-top:10px;">Raw material back-filled from saved job-card text on ${fmtDate(String(m.at).slice(0, 10))}: ${m.ticked.length} card(s) ticked${m.ticked.length ? ' (#' + m.ticked.map(xe).join(', #') + ')' : ''}.${m.review.length ? ` <b>Check these cards — they have conflicting RM lines (one may be crossed out):</b> #${m.review.map(xe).join(', #')}` : ''}</div>`;
+}
 function xCatCsv(){
   const X_ = xCatIndex(), q = v => `"${xlFix(v).replace(/"/g, '""')}"`;
-  const head = ['SO Number', 'Customer', 'SO Category', 'PO Number', 'PO Category', 'Article Code', 'Article Name', 'Line Category', 'Packed', 'Job Card #', 'RM (except fabric) available & blocked', 'RM confirmed by', 'RM confirmed on', 'RM how', 'Fabrics', 'Reason'];
+  const head = ['SO Number', 'Customer', 'SO Category', 'PO Number', 'PO Category', 'Article Code', 'Article Name', 'Line Category', 'Packed', 'Job Card #', 'RM (except fabric) available & blocked', 'RM confirmed by', 'RM confirmed on', 'RM how', 'RM line on card', 'Fabrics', 'Next', 'Reason'];
   const lines = [head.map(q).join(',')];
   X_.byLine.forEach(r => { const o = r.o, b = r.jc && r.jc.rmBlocked;
-    lines.push([o.so, o.customer, X_.soCat[o.so] || '', o.po, X_.poCat[o.po] || '', o.sku, o.article, r.packed ? '' : r.c, r.packed ? 'Yes' : '', r.jc ? r.jc.jobCardNumber : '', r.rm ? 'Yes' : 'No', r.rm ? b.by : '', r.rm && b.at ? b.at.slice(0, 10) : '', r.rm ? b.how : '',
-      r.fab.note || r.fab.items.map(i => i.name + ' (' + i.status.replace('_', ' ') + ')').join('; '), xCatReason(r)].map(q).join(',')); });
+    lines.push([o.so, o.customer, X_.soCat[o.so] || '', o.po, X_.poCat[o.po] || '', o.sku, o.article, r.packed ? '' : r.c, r.packed ? 'Yes' : '', r.jc ? r.jc.jobCardNumber : '', r.rm ? 'Yes' : 'No', r.rm ? b.by : '', r.rm && b.at ? b.at.slice(0, 10) : '', r.rm ? b.how : '', r.jc && r.jc.rmRead ? r.jc.rmRead.line : '',
+      r.fab.note || r.fab.items.map(i => i.name + ' (' + i.status.replace('_', ' ') + ')').join('; '), (xCatOwners(r).why || []).join('; '), xCatReason(r)].map(q).join(',')); });
   const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + lines.join('\r\n')], { type:'text/csv' }));
   a.download = 'Material readiness C0-C4 ' + todayStr() + '.csv'; document.body.appendChild(a); a.click(); a.remove();
 }
@@ -15034,7 +15121,7 @@ renderOrderDetail = function(orderId){
   const h = _rodCat.apply(this, arguments);
   if (!xCatOn()) return h;
   const r = xCatIndex().byLine.get(orderId); if (!r) return h;
-  const box = `<div class="readonly-banner" style="margin-bottom:12px;display:block;">${r.packed ? '<b>Packed</b> — left out of the C0–C4 categories.' : `${xCatPill(r.c)} <b>${xe(XCAT_INFO[r.c].label)}</b> <span class="cell-sub">(admin preview)</span>`}<div class="cell-sub" style="margin-top:4px;">${xe(xCatReason(r))}</div></div>`;
+  const box = `<div class="readonly-banner" style="margin-bottom:12px;display:block;">${r.packed ? '<b>Packed</b> — left out of the C0–C4 categories.' : `${xCatPill(r.c)} <b>${xe(XCAT_INFO[r.c].label)}</b> ${xOwnPills(r)}`}<div class="cell-sub" style="margin-top:4px;">${xe(xCatReason(r))}</div></div>`;
   const i = h.indexOf('<div class="card'); return i < 0 ? box + h : h.slice(0, i) + box + h.slice(i);
 };
 
@@ -15043,11 +15130,16 @@ const _rjcCat = renderJobCardCapture;
 renderJobCardCapture = function(){
   let h = _rjcCat.apply(this, arguments);
   const d = state.jobcardDraft; if (!d || !xCatOn()) return h;
-  const amber = d.rmFromScan && !d.rmTouched;
+  const amber = (d.rmFromScan || d.rmUnsure) && !d.rmTouched;
+  const read = d.rmRead && d.rmRead.status ? `Card says: <b>“${xe(d.rmRead.line || (d.rmRead.status === 'available' ? 'RM available' : 'RM not available'))}”</b> (last raw-material line that isn't crossed out)` : '';
+  const help = amber ? (d.rmUnsure ? 'The reader isn\'t sure about this line (crossed out, or a "not" / "un") — check the photo; saving confirms it.' : 'Changed by the card\'s latest raw-material line — check the photo; saving confirms it.')
+    : xRmCanEdit() ? 'Follows the latest raw-material line in the card\'s Material Used table (e.g. "RM Available" / "RM Not Available"). You can change it. Fabric is tracked separately by its tags.'
+    : 'Only the factory or an admin can change this.';
   const sec = `<div class="form-section"><div class="fs-head"><h3>Raw material</h3></div>
+      ${read ? `<div class="cell-sub" style="margin-bottom:6px;">${read}</div>` : ''}
       <label style="display:flex;gap:10px;align-items:flex-start;${amber ? 'outline:2px solid var(--warn);outline-offset:4px;border-radius:4px;' : ''}">
         <input type="checkbox" id="xRmBlocked" ${d.rmBlocked ? 'checked' : ''} ${xRmCanEdit() ? '' : 'disabled'} style="margin-top:3px;">
-        <span><b>All raw material (except fabric) available &amp; blocked</b><div class="cell-sub">${amber ? 'Ticked because the card says so — check the photo; saving confirms it.' : xRmCanEdit() ? 'Tick when the card says so, or when the factory confirms it. Fabric is tracked separately by its tags.' : 'Only factory or admin can change this.'}${d.rmPrev ? ' Currently confirmed on the saved card.' : ''}</div></span>
+        <span><b>All raw material (except fabric) available &amp; blocked</b><div class="cell-sub">${help}</div></span>
       </label></div>`;
   return h.replace(/<div class="form-section">\s*<div class="fs-head"><h3>Production stages<\/h3>/, m => sec + m);
 };
@@ -15057,20 +15149,28 @@ renderJobCardDetail = function(id){
   const jc = JOB_CARDS.find(x => x.id === id); if (!jc || !xCatOn()) return h;
   const b = jc.rmBlocked, on = !!(b && b.on);
   const hist = ((b && b.history) || []).slice().reverse().map(e => `${e.on ? 'Ticked' : 'Unticked'} by ${xe(e.by)} · ${fmtDT(e.at)} (${xe(e.how)})`).join('<br>');
-  const fact = `<div><div class="f-k">All RM (except fabric) available &amp; blocked</div><div class="f-v">${on ? 'Yes' : 'No'}${xRmCanEdit() ? ` <button class="btn-text" data-xrm-toggle="${xe(jc.id)}">${on ? 'Untick' : 'Tick'}</button>` : ''}</div>${hist ? `<div class="cell-sub" style="margin-top:4px;">${hist}</div>` : ''}</div>`;
+  const rd = jc.rmRead && jc.rmRead.status ? `<div class="cell-sub">Card ${xRmAsOf(jc)}: “${xe(jc.rmRead.line)}”</div>` : '';
+  const fact = `<div><div class="f-k">All RM (except fabric) available &amp; blocked</div><div class="f-v">${on ? 'Yes' : 'No'}${xRmCanEdit() ? ` <button class="btn-text" data-xrm-toggle="${xe(jc.id)}">${on ? 'Untick' : 'Tick'}</button>` : ''}</div>${rd}${hist ? `<div class="cell-sub" style="margin-top:4px;">${hist}</div>` : ''}</div>`;
   return h.replace('<div class="order-facts">', '<div class="order-facts">' + fact);
 };
 
-// scan: the reader's rmBlocked pre-ticks the box (never unticks a saved card); a rescan keeps the saved tick
+// scan (6 Nov, JK): the card's latest raw-material line decides, both ways: "RM Available" ticks, "RM Not Available" unticks.
+// Nothing about RM on the card = the saved tick stays. A change, or a line the reader isn't sure of, is outlined for the person saving.
 const _xJcApplyCat = xJcApply;
 xJcApply = function(R){
   const cur = state.jobcardDraft || {};
   const out = _xJcApplyCat.apply(this, arguments);
   const d = state.jobcardDraft, num = (d.jobCardNumber || '').trim().toLowerCase();
   const ex = num && JOB_CARDS.find(j => String(j.jobCardNumber).trim().toLowerCase() === num);
-  const saved = !!(ex && ex.rmBlocked && ex.rmBlocked.on), read = !!(R && R.rmBlocked);
-  d.rmPrev = saved; d.rmBlocked = cur.rmTouched ? !!cur.rmBlocked : (saved || read); d.rmTouched = !!cur.rmTouched; d.rmFromScan = read && !saved && !cur.rmTouched;
-  if (d.rmFromScan && xCatOn()) out.unsure.push('All raw material available & blocked (ticked from the card)');
+  const saved = !!(ex && ex.rmBlocked && ex.rmBlocked.on);
+  const st = R && (R.rmStatus || (R.rmBlocked ? 'available' : '')) || '';
+  d.rmPrev = saved; d.rmTouched = !!cur.rmTouched;
+  d.rmRead = st ? { status:st, line:(R.rmLine || ''), sure:R.rmSure !== false } : null;
+  const fromCard = st ? st === 'available' : saved;
+  d.rmBlocked = cur.rmTouched ? !!cur.rmBlocked : fromCard;
+  d.rmFromScan = !!st && fromCard !== saved && !cur.rmTouched;
+  d.rmUnsure = !!st && R.rmSure === false && !cur.rmTouched;
+  if ((d.rmFromScan || d.rmUnsure) && xCatOn()) out.unsure.push('Raw material: ' + (st === 'available' ? 'available' : 'NOT available') + ' (from the card' + (d.rmRead.line ? ': “' + d.rmRead.line + '”' : '') + ')');
   // keep the exact PO line picked (a PO can have several SKUs)
   d.linkedCode = cur.linkedCode || (ex && ex.linkedPo === d.linkedPo ? ex.linkedArticleCode : '') || '';
   return out;
@@ -15085,7 +15185,11 @@ saveJobcardDraft = function(){
   // the PO line picked, not the first line of that PO
   const row = d.linkedPo && d.linkedCode ? JOBCARD_ORDERS.find(r => r.po === d.linkedPo && r.articleCode === d.linkedCode) : null;
   if (row){ jc.linkedArticleCode = row.articleCode; jc.linkedArticleName = row.articleName; jc.linkedCustomerName = row.customer; }
-  if (xCatOn() && xRmCanEdit() && (d.rmTouched || d.rmFromScan)) xSetRm(jc, !!d.rmBlocked, d.rmTouched ? 'manual' : 'from the card, confirmed on save');
+  if (!xRmCanEdit() && state.role !== 'supply') return;   // supply can't tick by hand, but a card it photographs still carries the factory's written line
+  if (state.role === 'supply') d.rmTouched = false;
+  if (d.rmRead) jc.rmRead = { status:d.rmRead.status, line:d.rmRead.line, at:nowIso(), by:actingUserName(), sure:d.rmRead.sure };
+  if (d.rmTouched) xSetRm(jc, !!d.rmBlocked, 'manual, while saving a scan');
+  else if (d.rmRead) xSetRm(jc, d.rmRead.status === 'available', 'from the card: “' + (d.rmRead.line || d.rmRead.status) + '”, confirmed on save');
 };
 // the linked-order chip shows the PO line picked
 const _rjccfCat = renderJobCardCaptureForm;
@@ -15115,6 +15219,7 @@ extraWiring.push(() => {
     xSetRm(jc, !(jc.rmBlocked && jc.rmBlocked.on), 'manual'); renderAll();
   }));
   document.querySelectorAll('[data-xcat-f]').forEach(b => b.addEventListener('click', () => { state.xCatF = b.dataset.xcatF; state.xCatLimit = 100; renderAll(); }));
+  document.querySelectorAll('[data-xcat-own]').forEach(b => b.addEventListener('click', () => { state.xCatOwn = state.xCatOwn === b.dataset.xcatOwn ? '' : b.dataset.xcatOwn; state.xCatLimit = 100; renderAll(); }));
   document.querySelectorAll('[data-xcat-toggle]').forEach(b => b.addEventListener('click', () => { const s = state.xCatOpen || (state.xCatOpen = new Set()); const so = b.dataset.xcatToggle; s.has(so) ? s.delete(so) : s.add(so); renderAll(); }));
   document.querySelectorAll('[data-xcat-jc]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); state.module = 'jobcards'; state.jobcardTab = 'dashboard'; state.jobcardOpenId = b.dataset.xcatJc; renderAll(); }));
   const q = document.getElementById('xCatQ');
@@ -15122,7 +15227,7 @@ extraWiring.push(() => {
   const m = document.getElementById('xCatMore'); if (m) m.addEventListener('click', () => { state.xCatLimit = (state.xCatLimit || 100) + 100; renderAll(); });
   const c = document.getElementById('xCatCsv'); if (c) c.addEventListener('click', xCatCsv);
 });
-window.__xcat = { index:xCatIndex, reason:xCatReason };   // for checks from the console
+window.__xcat = { index:xCatIndex, reason:xCatReason, owners:xCatOwners };   // for checks from the console
 
 // ---------------------------------------------------------------- Payables & Flushout › Projection Analysis (JK, 26 Oct)
 // Admin-only preview until after go-live (xCatOn, from block_cat.js). Pre-GST throughout.
@@ -15764,6 +15869,159 @@ window.__obLiveApply = stores => {
   window.scrollTo(0, y); document.querySelectorAll('.table-wrap').forEach((w, i) => { if (wraps[i]) w.scrollLeft = wraps[i]; });
   state.xLiveAt = nowIso();
 };
+
+// ---------------------------------------------------------------- 6 Nov (JK) feedback round
+// 1. Names: records always carry the signed-in person's own name. Before this, an admin working "as" another team was
+//    recorded under that team's demo name (Arjun Vora, Suresh Iyer …); those saved records were relabelled
+//    "Admin (name not recorded)" by the loader's one-time fix.
+actingUserName = function(){
+  if (state.currentUser && state.currentUser.name) return state.currentUser.name;
+  return ROLES[state.role] ? ROLES[state.role].name : '';
+};
+
+// 2. SO revision order: COO / Director → Accounts (value, advance, approve; the revised SO is raised in the ERP) →
+//    Supply confirms the PO cancellation. The request stays open until supply confirms.
+//    status: pending = with accounts · awaiting_supply = accounts approved, supply to confirm · approved = closed
+const _srPillN6 = srStatusPill;
+srStatusPill = function(r){
+  if (r.status === 'pending') return '<span class="pill warn"><span class="dot"></span>With accounts</span>';
+  if (r.status === 'awaiting_supply') return '<span class="pill warn"><span class="dot"></span>Accounts approved · supply to confirm PO cancellation</span>';
+  if (r.status === 'approved' && r.accountsApproval) return '<span class="pill good"><span class="dot"></span>Closed — PO cancellation confirmed</span>';
+  return _srPillN6.apply(this, arguments);
+};
+const srAccountsDone = r => r.valueCheck.done && r.advanceCheck.done;
+srActionsCell = function(r, canValidate, canDecide){
+  const out = [];
+  if (r.sentBack && r.status === 'sent_back') out.push(`<div class="cell-sub" style="margin-bottom:4px;"><b>Sent back by ${xe(r.sentBack.by)} (${xe(ROLE_LABEL(r.sentBack.byRole))}):</b> “${xe(r.sentBack.comments)}”</div>`);
+  if (srSalesCan(r)){
+    if (r.status === 'awaiting_approval' && !approvalExpired(r)) out.push(`<button class="btn-text" data-xsr-copy="${r.id}">Copy approval link</button>`, `<button class="btn-text" data-xsr-withdraw="${r.id}">Withdraw &amp; edit</button>`);
+    if (r.status === 'awaiting_approval' && approvalExpired(r)) out.push(`<button class="btn-text" data-xsr-renew="${r.id}">Create a new link</button>`, `<button class="btn-text" data-xsr-withdraw="${r.id}">Withdraw &amp; edit</button>`);
+    if (r.status === 'sent_back' || r.status === 'draft') out.push(`<button class="btn-text" data-xsr-withdraw="${r.id}">Edit &amp; request approval again</button>`);
+  }
+  if (isApprover() && r.status === 'awaiting_approval' && !approvalExpired(r)) out.push(`<button class="btn btn-primary btn-sm" data-xsr-review="${r.id}">Review &amp; decide</button>`);
+  if (r.status === 'pending' && canDecide){
+    out.push(`<input id="sr_decisionNote_${r.id}" placeholder="Decision note" style="width:100%;margin-bottom:4px;">
+      <button class="btn-text" data-sr-approve="${r.id}" ${srAccountsDone(r) ? '' : 'disabled'} title="${srAccountsDone(r) ? 'Approve: supply then confirms the PO cancellation' : 'Do the value and advance checks first'}">Approve</button> · <button class="btn-text" data-sr-reject="${r.id}">Reject</button>`);
+    out.push(state.xSrSendBack === r.id
+      ? `<div style="margin-top:6px;"><input id="x_sr_sbnote" placeholder="What sales needs to fix" style="width:100%;"><button class="btn-text" data-xsr-sbsave="${r.id}">Send back</button> · <button class="btn-text" data-xsr-sbcancel="1">Cancel</button><div class="cell-sub" id="x_sr_sbmsg" style="color:var(--critical);"></div></div>`
+      : `<div style="margin-top:4px;"><button class="btn-text" data-xsr-sendback="${r.id}">Send back to sales</button></div>`);
+  }
+  if (r.status === 'pending' && canValidate && !canDecide) out.push('<div class="cell-sub">Supply confirms the PO cancellation after accounts approves.</div>');
+  if (r.accountsApproval && (r.status === 'awaiting_supply' || r.status === 'approved')) out.push(`<div class="cell-sub">Accounts: ${xe(r.accountsApproval.notes)}</div><div class="cell-sub">by ${xe(r.accountsApproval.by)} · ${fmtDT(r.accountsApproval.at)}</div>`);
+  else if (r.status === 'approved' || r.status === 'rejected') out.push(`<div class="cell-sub">${xe(r.decisionNotes)}</div><div class="cell-sub">by ${xe(r.decidedBy)} · ${fmtDT(r.decidedAt)}</div>`);
+  return out.join(' ');
+};
+const _srActN6 = renderSoRevisionActionCell;
+renderSoRevisionActionCell = function(r, key, label, canAct, byField, atField){
+  if (key !== 'supplyValidation' || r[key].done) return _srActN6.apply(this, arguments);
+  if (r.status === 'pending') return `<div class="cell-sub" style="margin-bottom:8px;"><strong>${label}:</strong> after accounts approves</div>`;
+  if (r.status !== 'awaiting_supply') return _srActN6.apply(this, arguments);
+  if (!canAct) return `<div class="cell-sub" style="margin-bottom:8px;"><strong>${label}:</strong> pending — accounts has approved</div>`;
+  return `<div style="margin-bottom:8px;"><div class="cell-sub"><strong>${label}:</strong> pending — accounts has approved</div>
+    <input id="sr_${key}Note_${r.id}" placeholder="Note (which PO was cancelled, or why none was needed)" style="width:100%;margin-top:4px;">
+    <button class="btn-text" data-sr-check="${r.id}:${key}" style="margin-top:2px;">Mark done</button></div>`;
+};
+// clicks: handled here before the older handlers (which assumed all three checks ran in parallel)
+document.addEventListener('click', e => {
+  const ap = e.target.closest && e.target.closest('[data-sr-approve]');
+  if (ap){
+    e.stopPropagation(); e.preventDefault();
+    const r = SO_REVISION_REQUESTS.find(x => x.id === ap.dataset.srApprove);
+    if (!r || r.status !== 'pending' || !srAccountsDone(r) || !['accounts','admin'].includes(state.role)) return;
+    const n = document.getElementById(`sr_decisionNote_${r.id}`), notes = n ? n.value.trim() : '';
+    if (!notes){ if (n){ n.focus(); n.placeholder = 'Write a decision note first'; } return; }
+    r.accountsApproval = { by:actingUserName(), at:nowIso(), notes };
+    r.decidedBy = r.accountsApproval.by; r.decidedAt = r.accountsApproval.at; r.decisionNotes = notes;
+    r.status = r.supplyValidation.done ? 'approved' : 'awaiting_supply';   // supply already confirmed (revisions in flight on 6 Nov) → closes now
+    renderAll(); return;
+  }
+  const ck = e.target.closest && e.target.closest('[data-sr-check]');
+  if (ck){
+    const [id, key] = ck.dataset.srCheck.split(':'); if (key !== 'supplyValidation') return;
+    e.stopPropagation(); e.preventDefault();
+    const r = SO_REVISION_REQUESTS.find(x => x.id === id);
+    if (!r || r.status !== 'awaiting_supply' || !['supply','admin'].includes(state.role)) return;
+    const n = document.getElementById(`sr_supplyValidationNote_${id}`), notes = n ? n.value.trim() : '';
+    if (!notes){ if (n){ n.focus(); n.placeholder = 'Write a note first'; } return; }
+    r.supplyValidation = { done:true, validatedBy:actingUserName(), validatedAt:nowIso(), notes };
+    r.status = 'approved'; renderAll();
+  }
+}, true);
+
+// 3. Stock block cleared by dispatch: a dispatch marked in Order Bridge (dispatched / delivered / completed) for the same SO
+//    and the exact SKU counts against that SO's approved blocks, oldest block first. Nothing is deleted: the block shows
+//    "Dispatched to customer"; a partial dispatch leaves the rest blocked.
+const SB_DISP_ST = ['dispatched', 'delivered', 'completed'];
+function xSbDispIndex(){
+  const out = new Map(), groups = {};
+  STOCK_BLOCK_REQUESTS.forEach(r => { if (r.status === 'approved' && r.so && r.sku && !xFinOf(r)) (groups[r.so + '|' + r.sku] = groups[r.so + '|' + r.sku] || []).push(r); });
+  Object.keys(groups).forEach(g => {
+    const [so, sku] = g.split('|');
+    const ds = SLOT_BOOKINGS.filter(b => b.type === 'dispatch' && b.so === so && SB_DISP_ST.includes(b.status))
+      .map(b => ({ qty:(b.items || []).filter(i => i.sku === sku).reduce((s, i) => s + (+i.qty || 0), 0), at:b.dispatchedAt || b.approvedAt || '', id:b.id }))
+      .filter(x => x.qty > 0).sort((a, b) => a.at.localeCompare(b.at));
+    let pool = ds.map(x => Object.assign({}, x));
+    groups[g].slice().sort((a, b) => (a.requestedAt || '').localeCompare(b.requestedAt || '')).forEach(r => {
+      let need = +r.qtyRequested || 0, got = 0, last = '';
+      for (const x of pool){ if (!need) break; const t = Math.min(need, x.qty); if (t > 0){ x.qty -= t; need -= t; got += t; last = x.at; } }
+      if (got) out.set(r.id, { qty:got, at:last, left:(+r.qtyRequested || 0) - got });
+    });
+  });
+  return out;
+}
+let XSB_CACHE = null;
+const _raSbN6 = renderAll; renderAll = function(){ XSB_CACHE = null; return _raSbN6.apply(this, arguments); };
+const xSbDisp = r => (XSB_CACHE = XSB_CACHE || xSbDispIndex()).get(r.id) || null;
+// quantity still blocked (0 once issued to the factory on a FIN PO or fully dispatched)
+function xSbLeft(r){
+  if (!r || r.status !== 'approved' || xFinOf(r)) return 0;
+  const d = xSbDisp(r); return d ? d.left : (+r.qtyRequested || 0);
+}
+const xSbDispPill = (r, d) => d.left > 0
+  ? `${stockBlockStatusPill(r.status)}<div class="cell-sub">${d.qty} of ${r.qtyRequested} dispatched to the customer${d.at ? ' · ' + fmtDate(d.at.slice(0, 10)) : ''} · ${d.left} still blocked</div>`
+  : `<span class="pill good"><span class="dot"></span>Dispatched to customer</span><div class="cell-sub">${d.qty} ${xe(r.uom || '')}${d.at ? ' · ' + fmtDate(d.at.slice(0, 10)) : ''}</div>`;
+blockedQty = function(sku, warehouse){ return STOCK_BLOCK_REQUESTS.filter(r => r.sku === sku && r.warehouse === warehouse).reduce((s, r) => s + xSbLeft(r), 0); };
+window.__xSb = { left:xSbLeft, disp:xSbDisp };
+
+// 4. Furnishings intake: "Received at" — where the delivery actually arrived (it used to be fixed as MFPL-Upholstery).
+//    Choices are the admin's location lists; the last one used is remembered on this computer.
+const INTAKE_LOC_LS = 'obx_intake_loc';
+function xIntakeLocChoices(){
+  const L = fabLocs(), seen = new Set(), out = [];
+  [].concat(L.dispatchers || [], L.receivers || []).forEach(l => { const n = (l.name || '').trim(); if (n && !seen.has(n)){ seen.add(n); out.push(n); } });
+  return out;
+}
+function xIntakeLocGet(){
+  const ch = xIntakeLocChoices();
+  let v = state.xIntakeLoc; if (v == null){ try { v = localStorage.getItem(INTAKE_LOC_LS) || ''; } catch(e){ v = ''; } }
+  return ch.includes(v) ? v : (ch.length === 1 ? ch[0] : '');
+}
+window.__xIntakeLoc = () => xIntakeLocGet() || '—';
+const _rfsN6 = renderFabricStation;
+renderFabricStation = function(){
+  const html = _rfsN6.apply(this, arguments);
+  if (state.fabricTab !== 'intake') return html;
+  const t = document.createElement('template'); t.innerHTML = html;
+  const btn = t.content.querySelector('#x_submitIntake, #x_submitIntakeManual, #submitIntake');
+  if (!btn) return html;
+  const ch = xIntakeLocChoices(), cur = xIntakeLocGet();
+  const f = document.createElement('div'); f.className = 'field'; f.style.margin = '0 0 12px';
+  f.innerHTML = `<label>Received at <span style="color:var(--critical);">*</span></label><select id="xIntakeLoc"><option value="">${ch.length ? 'Where did this delivery arrive?' : 'No locations yet — an admin adds them in Locations'}</option>${ch.map(n => `<option value="${xe(n)}" ${n === cur ? 'selected' : ''}>${xe(n)}</option>`).join('')}</select><div class="cell-sub" style="margin-top:2px;">Shown as "Logged" in the Logbook.</div>`;
+  btn.before(f);
+  if (!cur){ btn.setAttribute('data-x-needloc', '1'); btn.disabled = true; }
+  return t.innerHTML;
+};
+extraWiring.push(() => {
+  const s = document.getElementById('xIntakeLoc');
+  if (s) s.addEventListener('change', () => { state.xIntakeLoc = s.value; try { localStorage.setItem(INTAKE_LOC_LS, s.value); } catch(e){} renderAll(); });
+});
+// a tag can't be logged without saying where it arrived
+document.addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest('[data-x-needloc]'); if (!b || state.module !== 'fabric' || state.fabricTab !== 'intake') return;
+  if (xIntakeLocGet()) return;
+  e.stopPropagation(); e.preventDefault();
+  const s = document.getElementById('xIntakeLoc'); if (s){ s.focus(); s.style.outline = '2px solid var(--critical)'; }
+}, true);
 
 if (!routePublic() && state.currentUser) renderAll();
 })();

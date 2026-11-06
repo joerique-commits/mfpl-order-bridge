@@ -59,8 +59,10 @@ export function buildPrompt() {
     '  ],\n' +
     '  "factoryRemarks": string,    // "Factory Remarks" line(s), "" if blank\n' +
     '  "designTeamRemarks": string, // "Design team Remarks" line(s), "" if blank\n' +
-    '  "materials": [ { "slNo": string, "material": string, "qty": string } ],  // rows of the "Material Used" table that have anything written, skip fully blank rows\n' +
-    '  "rmBlocked": boolean,        // true only if the card has a ticked box or a written note saying all raw material (RM) is available and blocked (e.g. "All RM available & blocked", "RM blocked"); false if absent or unticked\n' +
+    '  "materials": [ { "slNo": string, "material": string, "qty": string, "struck": boolean } ],  // rows of the "Material Used" table that have anything written, skip fully blank rows; struck = true if the row is crossed / scratched / struck out\n' +
+    '  "rmStatus": string,          // raw material (RM) status from the "Material Used" rows: "available", "not_available" or "" -- see the RM rule below\n' +
+    '  "rmLine": string,            // the exact text of the row rmStatus was taken from, as written; "" if rmStatus is ""\n' +
+    '  "rmSure": boolean,           // false if you are unsure whether that row is crossed out, or unsure of a word that changes its meaning (e.g. "not", "un-")\n' +
     '  "uncertainFields": [string]  // field names (dot-path, e.g. "stages.1.startDate") you are genuinely unsure you read correctly. Empty array if nothing is uncertain.\n' +
     '}\n\n' +
     'Rules: always return exactly 7 entries in "stages", one per printed row, in the fixed key order above, even if a row is ' +
@@ -72,7 +74,13 @@ export function buildPrompt() {
     'a scribble, a tick/cross, a circled number, even a single stray pen stroke. Only use false when the cell has no mark of ' +
     'any kind. Do not confuse a signature cell with its neighbouring date cell -- check the column carefully.\n\n' +
     'Be conservative on dates: if a date could be one of two digits, put your best reading in the field and add its path to ' +
-    'uncertainFields rather than silently picking one.'
+    'uncertainFields rather than silently picking one.\n\n' +
+    'RM rule: factory staff write the raw material status as a row in the "Material Used" table, e.g. "RM Available", ' +
+    '"Raw Material Available", "All RM available & blocked", "RM Unavailable", "RM Not Available", "Raw Material No Available". ' +
+    'When it changes they cross out the earlier row and write a new one below it. Ignore every crossed-out / scratched / struck-out row. ' +
+    'Of the rows that are not crossed out and talk about raw material / RM availability, take the LAST one (highest Sl. No): ' +
+    '"available" if it says RM is available / ok / blocked; "not_available" if it says not / no / un-available, pending or short. ' +
+    'If no such row exists, rmStatus is "". Read "not", "no" and "un" very carefully -- they reverse the meaning.'
   );
 }
 
@@ -104,7 +112,7 @@ export function normalizeExtracted(data) {
       endDateRaw: toStr(s.endDate), endDateISO: parseDateToISO(s.endDate), supervisorSigned: toBool(s.supervisorSigned), managerSigned: toBool(s.managerSigned) };
   });
   const materials = (Array.isArray(data.materials) ? data.materials : []).slice(0, 20)
-    .map(m => ({ slNo: toStr(m && m.slNo), material: toStr(m && m.material), qty: toStr(m && m.qty) }))
+    .map(m => ({ slNo: toStr(m && m.slNo), material: toStr(m && m.material), qty: toStr(m && m.qty), struck: toBool(m && m.struck) }))
     .filter(m => m.material || m.qty);
   return {
     jobCardNumber: toStr(data.jobCardNumber), clientName: toStr(data.clientName),
@@ -112,7 +120,9 @@ export function normalizeExtracted(data) {
     deadlineDateRaw: toStr(data.deadlineDate), deadlineDateISO: parseDateToISO(data.deadlineDate),
     workOrderNumber: toStr(data.workOrderNumber), productCode: toStr(data.productCode), qty: toStr(data.qty),
     stages, factoryRemarks: toStr(data.factoryRemarks), designTeamRemarks: toStr(data.designTeamRemarks), materials,
-    rmBlocked: toBool(data.rmBlocked),
+    rmStatus: ['available', 'not_available'].includes(toStr(data.rmStatus)) ? toStr(data.rmStatus) : (toBool(data.rmBlocked) ? 'available' : ''),
+    rmLine: toStr(data.rmLine), rmSure: data.rmSure === undefined ? true : toBool(data.rmSure),
+    rmBlocked: toStr(data.rmStatus) === 'available' || toBool(data.rmBlocked),
     uncertainFields: Array.isArray(data.uncertainFields) ? data.uncertainFields.map(toStr).filter(Boolean) : [],
   };
 }
