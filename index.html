@@ -767,7 +767,8 @@ var STORES = {
   ob_stock_blocks:{ t:'list', n:8, dir:'desc' }, ob_wh_tags:{ t:'list', n:16, dir:'desc' }, ob_job_cards:{ t:'list', n:16, dir:'desc' },
   ob_fab_locations:{ t:'value' },
   ob_route_units:{ t:'value' },
-  ob_migrations:{ t:'value' }
+  ob_migrations:{ t:'value' },
+  ob_corrections:{ t:'list', n:8, dir:'desc' }
 };
 var USER_RE = /^ob_(profiles$|approver_me$|inbox_read_|inbox_seen_|mute_|unfollow_)/;   // kept per signed-in user
 function cfgFor(k){ if (Object.prototype.hasOwnProperty.call(STORES, k)) return STORES[k]; if (USER_RE.test(k) && /^[A-Za-z0-9_]+$/.test(k)) return { t:'user' }; return null; }
@@ -9256,7 +9257,7 @@ const requestLines = so => (LINES_BY_SO[so] || []).filter(o => o.appNative ? o.l
 const canRequestCsv = () => ['supply','admin'].includes(state.role);
 const xlText = v => v ? `="${String(v)}"` : '';   // 16-digit SO/PO numbers would otherwise become 3.11E+15 in Excel
 const reqCsvHead = () => ['SO Number','SO Date','Customer','Site','Sales Rep','SO Line #','Article Code','Article Name','Qty','UOM',...(bothView() ? ['Committed Date to Client','Factory Target Date'] : [state.role === 'production' ? 'Committed Date' : 'Committed Date to Client']),'Request Status',
-  'Submitted By','Submitted On','PO Number','PO Raised On','PO Confirmed By','Fabric / Material SKU','Fabric Name','Placement on Furniture','Polish / Finish','Finish Application Notes','Stone Type',
+  'Submitted By','Submitted On','PO Number','PO Raised On','PO Confirmed By','Fabric / Material SKU','Fabric Name','Placement on Furniture','Polish / Finish','Finish Application Notes','Cane Weave','Stone Type',
   'Design Related Instructions','Site Work Requirements','Site Mapping','Notes','Open Clarifications','Clarification History'];
 const isoD = v => v ? String(v).slice(0, 10) : '';
 function requestCsvRows(so){
@@ -9272,7 +9273,7 @@ function requestCsvRows(so){
     return [xlText(so), isoD(h.date), h.customer || o.customer, h.city || '', h.rep || '', o.soLineSno || '', o.sku, o.article, o.qty, o.uom, ...(bothView() ? [isoD(o.committedDeadline), isoD(o.committedDeadline ? addD(o.committedDeadline, -DL_BUF) : '')] : [isoD(viewC(o.committedDeadline))]),
       o.lifecycle === 'po_confirmed' ? 'PO confirmed' : o.lifecycle === 'submitted' ? 'Sent to supply - PO to raise' : (o.lifecycle || ''),
       o.submittedBy || o.addedBy || '', isoD(o.submittedAt), xlText(o.po), isoD(o.poRaisedDate), o.poConfirmedBy || '',
-      fabSkus, fabNames, placements, finNames, finNotes, stoneDisplay(d.stoneType), d.design, d.siteReq, d.siteMap, d.notes,
+      fabSkus, fabNames, placements, finNames, finNotes, window.__xCaneDisplay(d), window.__xStoneText(d), d.design, d.siteReq, d.siteMap, d.notes,
       cl.filter(c => c.status === 'open').map(c => `${c.question} (raised by ${c.raisedBy || '?'} ${isoD(c.raisedAt)})`).join(' | '),
       cl.filter(c => c.status !== 'open').map(c => `${c.question} -> ${c.response || ''} (${c.respondedBy || ''} ${isoD(c.respondedAt)})`).join(' | ')];
   });
@@ -14045,7 +14046,7 @@ detailComplete = o => {
   const d = ensureDetailShape(o);
   return d.fabrics.some(fabricEntryComplete) && d.finishes.some(finishEntryComplete) && !!(d.design||'').trim() && !!o.committedDeadline;
 };
-const DETAIL_HELP = 'Fill in the committed date, at least one complete fabric entry, at least one complete finish entry, and the design related instructions before this can be raised.';
+const DETAIL_HELP = 'Fill in the committed date, at least one complete fabric entry, at least one complete finish entry, the cane weave, the stone (NA if none) and the design related instructions before this can be raised.';
 const MAT_SEARCH_PH = { fab:'Type to search fabric name…', fin:'Type to search polish / finish…' };
 
 function renderFabricRow(o, i, f, canEdit){
@@ -14131,19 +14132,19 @@ window.__obRodBase = function(orderId){
         <div class="form-section">
           <div class="fs-head"><div class="fs-num">1</div><h3>Fabric &amp; placement <span class="opt" style="text-transform:none;font-weight:500;">— from Standard Materials</span></h3></div>
           <div class="field-grid">
-            ${o.detail.fabrics.map((f,i) => renderFabricRow(o, i, f, canEditDetail)).join('')}
+            ${o.detail.fabrics.map((f,i) => renderFabricRow(o, i, f, canEditDetail || window.__xOpen(o, 'fabric'))).join('')}
           </div>
-          ${canEditDetail ? `<button class="btn-text" type="button" id="xfabAdd" style="margin-top:8px;">+ Add fabric</button>` : ''}
+          ${canEditDetail || window.__xOpen(o, 'fabric') ? `<button class="btn-text" type="button" id="xfabAdd" style="margin-top:8px;">+ Add fabric</button>` : ''}
         </div>
         <div class="form-section">
           <div class="fs-head"><div class="fs-num">2</div><h3>Finish &amp; design</h3></div>
           <div class="field-grid">
-            ${o.detail.finishes.map((f,i) => renderFinishRow(o, i, f, canEditDetail)).join('')}
+            ${o.detail.finishes.map((f,i) => renderFinishRow(o, i, f, canEditDetail || window.__xOpen(o, 'finish'))).join('')}
           </div>
-          ${canEditDetail ? `<button class="btn-text" type="button" id="xfinAdd" style="margin-top:8px;">+ Add polish</button>` : ''}
+          ${canEditDetail || window.__xOpen(o, 'finish') ? `<button class="btn-text" type="button" id="xfinAdd" style="margin-top:8px;">+ Add polish</button>` : ''}
           <div class="field-grid" style="margin-top:10px;">
-            <div class="field"><label>Stone type <span class="opt">(if applicable)</span></label>${stoneSelectHtml(o, canEditDetail)}</div>
-            <div class="field"></div>
+            <div class="field"><label>Cane weave</label>${window.__xCaneHtml(o, canEditDetail || window.__xOpen(o, 'cane'))}</div>
+            <div class="field"><label>Stone</label>${stoneSelectHtml(o, canEditDetail || window.__xOpen(o, 'stone'))}</div>
             <div class="field span2"><label>Design related instructions</label><textarea id="f_design" rows="2" ${canEditDetail?'':'disabled'} placeholder="What's been approved, and by whom / which email">${o.detail.design}</textarea></div>
           </div>
         </div>
@@ -14232,7 +14233,7 @@ extraWiring.push(() => {
       getF: () => { const ord = curOrder(); if (!ord) return null; return ensureDetailShape(ord).fabrics[i] || null; },
       labelOf: fabricSelectorLabel,
       onCommit: value => {
-        const ord = curOrder(); if (!ord || ord.lifecycle !== 'draft') return;
+        const ord = curOrder(); if (!ord || !window.__xEd(ord, 'fabric')) return;
         const d = ensureDetailShape(ord); const f = d.fabrics[i]; if (!f) return;
         if (value === ''){ Object.assign(f, blankFabric()); return; }
         const type = fabricTypeFromValue(value);
@@ -14244,16 +14245,16 @@ extraWiring.push(() => {
     });
   });
   document.querySelectorAll('[data-xfab-idx][data-xfab-k="millName"], [data-xfab-idx][data-xfab-k="otherFabricName"], [data-xfab-idx][data-xfab-k="placement"]').forEach(el => el.addEventListener('input', () => {
-    const ord = curOrder(); if (!ord || ord.lifecycle !== 'draft') return;
+    const ord = curOrder(); if (!ord || !window.__xEd(ord, 'fabric')) return;
     const i = Number(el.dataset.xfabIdx); const d = ensureDetailShape(ord); const f = d.fabrics[i]; if (!f) return;
     f[el.dataset.xfabK] = el.value; refreshNote();
   }));
   document.querySelectorAll('[data-xfab-remove]').forEach(btn => btn.addEventListener('click', () => {
-    const ord = curOrder(); if (!ord || ord.lifecycle !== 'draft') return;
+    const ord = curOrder(); if (!ord || !window.__xEd(ord, 'fabric')) return;
     const i = Number(btn.dataset.xfabRemove); const d = ensureDetailShape(ord); d.fabrics.splice(i, 1); if (!d.fabrics.length) d.fabrics.push(blankFabric()); renderAll();
   }));
   const addFab = document.getElementById('xfabAdd');
-  if (addFab) addFab.addEventListener('click', () => { const ord = curOrder(); if (!ord || ord.lifecycle !== 'draft') return; ensureDetailShape(ord).fabrics.push(blankFabric()); renderAll(); });
+  if (addFab) addFab.addEventListener('click', () => { const ord = curOrder(); if (!ord || !window.__xEd(ord, 'fabric')) return; ensureDetailShape(ord).fabrics.push(blankFabric()); renderAll(); });
 
   // Finish / polish name: same single-combobox pattern as fabric above.
   document.querySelectorAll('[data-xfin-combo]').forEach(wrap => {
@@ -14266,7 +14267,7 @@ extraWiring.push(() => {
       getF: () => { const ord = curOrder(); if (!ord) return null; return ensureDetailShape(ord).finishes[i] || null; },
       labelOf: finishSelectorLabel,
       onCommit: value => {
-        const ord = curOrder(); if (!ord || ord.lifecycle !== 'draft') return;
+        const ord = curOrder(); if (!ord || !window.__xEd(ord, 'finish')) return;
         const d = ensureDetailShape(ord); const f = d.finishes[i]; if (!f) return;
         if (value === ''){ Object.assign(f, blankFinish()); return; }
         if (value === '__NA__') Object.assign(f, { type:'na', polishName:'', shortCode:'', otherFinishName:'', appliedNotes:'' });
@@ -14276,16 +14277,16 @@ extraWiring.push(() => {
     });
   });
   document.querySelectorAll('[data-xfin-idx][data-xfin-k="otherFinishName"], [data-xfin-idx][data-xfin-k="appliedNotes"]').forEach(el => el.addEventListener('input', () => {
-    const ord = curOrder(); if (!ord || ord.lifecycle !== 'draft') return;
+    const ord = curOrder(); if (!ord || !window.__xEd(ord, 'finish')) return;
     const i = Number(el.dataset.xfinIdx); const d = ensureDetailShape(ord); const f = d.finishes[i]; if (!f) return;
     f[el.dataset.xfinK] = el.value; refreshNote();
   }));
   document.querySelectorAll('[data-xfin-remove]').forEach(btn => btn.addEventListener('click', () => {
-    const ord = curOrder(); if (!ord || ord.lifecycle !== 'draft') return;
+    const ord = curOrder(); if (!ord || !window.__xEd(ord, 'finish')) return;
     const i = Number(btn.dataset.xfinRemove); const d = ensureDetailShape(ord); d.finishes.splice(i, 1); if (!d.finishes.length) d.finishes.push(blankFinish()); renderAll();
   }));
   const addFin = document.getElementById('xfinAdd');
-  if (addFin) addFin.addEventListener('click', () => { const ord = curOrder(); if (!ord || ord.lifecycle !== 'draft') return; ensureDetailShape(ord).finishes.push(blankFinish()); renderAll(); });
+  if (addFin) addFin.addEventListener('click', () => { const ord = curOrder(); if (!ord || !window.__xEd(ord, 'finish')) return; ensureDetailShape(ord).finishes.push(blankFinish()); renderAll(); });
   refreshNote();
 });
 
@@ -14297,7 +14298,7 @@ const CSV_MAX_FABRICS = 3, CSV_MAX_FINISHES = 2;
 const CSV_HEADERS_V2 = ['SO Number','PO Number','Customer','Article Code','Article Name','Qty','UOM'];
 for (let i=1;i<=CSV_MAX_FABRICS;i++) CSV_HEADERS_V2.push(`Fabric ${i} Name`, `Fabric ${i} SKU`, `Fabric ${i} Placement`, `Fabric ${i} Mill (if Other)`, `Fabric ${i} Name (if Other)`);
 for (let i=1;i<=CSV_MAX_FINISHES;i++) CSV_HEADERS_V2.push(`Polish ${i}`, `Polish ${i} (if Other)`, `Polish ${i} Notes`);
-CSV_HEADERS_V2.push('Stone Type','Design Related Instructions','Site Requirements','Site Mapping','Notes');
+CSV_HEADERS_V2.push('Cane Weave','Cane Weave (if Other)','Stone Type','Stone (if Other)','Design Related Instructions','Site Requirements','Site Mapping','Notes');
 function fabricCsvCells(f){
   if (!f || !f.type) return ['','','','',''];
   if (f.type === 'na') return ['NA','','','',''];
@@ -14317,7 +14318,7 @@ csvTemplateFor = function(lines){
     const row = [o.so,o.po,o.customer,o.sku,o.article,o.qty,o.uom];
     for (let i=0;i<CSV_MAX_FABRICS;i++) row.push(...fabricCsvCells(d.fabrics[i]));
     for (let i=0;i<CSV_MAX_FINISHES;i++) row.push(...finishCsvCells(d.finishes[i]));
-    row.push(stoneDisplay(d.stoneType), d.design||'', d.siteReq||'', d.siteMap||'', d.notes||'');
+    row.push(...window.__xCaneCsv(d), ...window.__xStoneCsv(d), d.design||'', d.siteReq||'', d.siteMap||'', d.notes||'');
     return row;
   });
   return [CSV_HEADERS_V2, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n');
@@ -14359,7 +14360,8 @@ handleCsvUpload = function(file){
       }
       if (finishes.length) d.finishes = finishes;
       const stoneRaw = get('Stone Type');
-      if (stoneRaw){ const su = stoneRaw.toUpperCase(); if (su === 'NA') d.stoneType = '__NA__'; else { const match = STD_STONE.find(s => stoneLabel(s).toUpperCase() === su || s.stoneName.toUpperCase() === su); d.stoneType = match ? stoneLabel(match) : stoneRaw; } }
+      if (stoneRaw){ const su = stoneRaw.toUpperCase(); if (su === 'NA') d.stoneType = '__NA__'; else if (su === 'STONE SENT BY CLIENT') d.stoneType = '__CLIENT__'; else if (su === 'OTHER'){ d.stoneType = '__OTHER__'; d.stoneOther = get('Stone (if Other)'); } else { const match = STD_STONE.find(s => stoneLabel(s).toUpperCase() === su || s.stoneName.toUpperCase() === su); d.stoneType = match ? stoneLabel(match) : stoneRaw; } }
+      window.__xCaneImport(d, get);
       if (get('Design Related Instructions')) d.design = get('Design Related Instructions');
       if (get('Site Requirements')) d.siteReq = get('Site Requirements');
       if (get('Site Mapping')) d.siteMap = get('Site Mapping');
@@ -16022,6 +16024,391 @@ document.addEventListener('click', e => {
   e.stopPropagation(); e.preventDefault();
   const s = document.getElementById('xIntakeLoc'); if (s){ s.focus(); s.style.outline = '2px solid var(--critical)'; }
 }, true);
+
+// ---------------------------------------------------------------- 7 Nov (JK) — admin-opened revisions and corrections
+// A. SKU form: stone gets "Stone sent by client" and "Other"; a new cane weave choice after finish. Both required (NA allowed).
+// B. Reopening fabric / finish / cane weave / stone after the PO is raised: sales asks, an admin accepts or rejects (with a reason),
+//    only while the job card shows no work started on the matching stage; sales re-saves; factory AND supply acknowledge.
+//    Before the PO is raised, an admin can send a request back to draft.
+// C. Factory dates: an admin can allow the factory one more deviation request (sales still accepts or rejects).
+// D. Logbook corrections (furnishings tags, warehouse tags, job cards): an admin proposes, the owning team accepts or rejects
+//    (with a reason); tags that have moved can only be voided; quantities are never edited; job-card fields an admin corrected
+//    are not silently replaced by a later scan.
+// All of it lives in one shared list, ob_corrections.
+
+// ---- shared list
+const CORR = ls.get('ob_corrections', []);
+const corrSaveKey = () => JSON.stringify(CORR);
+let CORR_LAST = corrSaveKey();
+const _raCorr = renderAll; renderAll = function(){ const r = _raCorr.apply(this, arguments); try { const j = corrSaveKey(); if (j !== CORR_LAST){ CORR_LAST = j; localStorage.setItem('ob_corrections', j); } } catch(e){ console.error('[Order Bridge] corrections save', e); } return r; };
+XLIVE.ob_corrections = () => { xLiveSplice(CORR, 'ob_corrections'); CORR_LAST = corrSaveKey(); };
+const corrId = p => p + '-' + Date.now().toString(36).toUpperCase() + Math.floor(Math.random() * 900 + 100);
+const meStamp = () => ({ by:actingUserName(), byRole:state.role, at:nowIso() });
+const TEAM = { sales:'Sales', supply:'Supply', production:'Factory', accounts:'Accounts', admin:'Admin' };
+
+// ---------------------------------------------------------------- A. stone + cane weave
+const CANE_OPTS = [['na', 'NA'], ['round_hole', 'Round Hole'], ['german_mesh', 'German Mesh'], ['other', 'Other']];
+const caneLabel = v => (CANE_OPTS.find(x => x[0] === v) || [, ''])[1];
+function caneDisplay(d){ if (!d || !d.cane) return ''; return d.cane === 'other' ? 'Other — ' + (d.caneOther || '') : caneLabel(d.cane); }
+function stoneText(d){ const v = d && d.stoneType || ''; if (v === '__CLIENT__') return 'Stone sent by client'; if (v === '__OTHER__') return 'Other — ' + (d.stoneOther || ''); return stoneDisplay(v); }
+const stoneOk = d => !!d.stoneType && (d.stoneType !== '__OTHER__' || !!(d.stoneOther || '').trim());
+const caneOk = d => !!d.cane && (d.cane !== 'other' || !!(d.caneOther || '').trim());
+window.__xCaneDisplay = caneDisplay; window.__xStoneText = stoneText;
+window.__xCaneCsv = d => [d.cane ? (d.cane === 'other' ? 'Other' : caneLabel(d.cane)) : '', d.cane === 'other' ? (d.caneOther || '') : ''];
+window.__xStoneCsv = d => [d.stoneType === '__CLIENT__' ? 'Stone sent by client' : d.stoneType === '__OTHER__' ? 'Other' : stoneDisplay(d.stoneType), d.stoneType === '__OTHER__' ? (d.stoneOther || '') : ''];
+window.__xCaneImport = (d, get) => {
+  const c = String(get('Cane Weave') || '').trim(); if (!c) return;
+  const m = CANE_OPTS.find(x => x[1].toUpperCase() === c.toUpperCase()); if (!m) return;
+  d.cane = m[0]; d.caneOther = m[0] === 'other' ? get('Cane Weave (if Other)') : '';
+};
+stoneSelectHtml = function(o, canEdit){
+  const dis = canEdit ? '' : 'disabled', d = o.detail, cur = d.stoneType || '';
+  const known = ['', '__NA__', '__CLIENT__', '__OTHER__'].includes(cur) || STONE_BY_LABEL[cur];
+  return `<select id="f_stone" ${dis}>
+    <option value="">— Select —</option>
+    <option value="__NA__" ${cur === '__NA__' ? 'selected' : ''}>NA</option>
+    <option value="__CLIENT__" ${cur === '__CLIENT__' ? 'selected' : ''}>Stone sent by client</option>
+    ${STD_STONE.map(s => `<option value="${xe(stoneLabel(s))}" ${cur === stoneLabel(s) ? 'selected' : ''}>${xe(stoneLabel(s))}</option>`).join('')}
+    <option value="__OTHER__" ${cur === '__OTHER__' ? 'selected' : ''}>Other</option>
+    ${!known ? `<option value="${xe(cur)}" selected>${xe(cur)} (existing value)</option>` : ''}
+  </select>${cur === '__OTHER__' ? `<input id="f_stoneOther" ${dis} value="${xe(d.stoneOther || '')}" placeholder="Which stone, finish, thickness" style="margin-top:6px;">` : ''}`;
+};
+window.__xCaneHtml = (o, canEdit) => {
+  const dis = canEdit ? '' : 'disabled', d = o.detail, cur = d.cane || '';
+  return `<select id="f_cane" ${dis}><option value="">${canEdit ? '— Select —' : 'Not specified'}</option>${CANE_OPTS.map(([v, l]) => `<option value="${v}" ${cur === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    ${cur === 'other' ? `<input id="f_caneOther" ${dis} value="${xe(d.caneOther || '')}" placeholder="Describe the cane weave" style="margin-top:6px;">` : ''}`;
+};
+const _dcN7 = detailComplete;
+detailComplete = o => { if (!_dcN7(o)) return false; if (!isFurn(o)) return true; const d = ensureDetailShape(o); return stoneOk(d) && caneOk(d); };
+extraWiring.push(() => {
+  const o = state.module === 'confirmations' && state.openOrderId ? ORDERS.find(x => x.id === state.openOrderId) : null; if (!o) return;
+  const sel = (id, f, apply) => { const el = document.getElementById(id); if (el) el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => { if (!xEd(o, f)) return; apply(el.value); if (el.tagName === 'SELECT') renderAll(); else xRefreshReady(o); }); };
+  sel('f_stone', 'stone', v => { o.detail.stoneType = v; if (v !== '__OTHER__') o.detail.stoneOther = ''; });
+  sel('f_stoneOther', 'stone', v => { o.detail.stoneOther = v; });
+  sel('f_cane', 'cane', v => { o.detail.cane = v; if (v !== 'other') o.detail.caneOther = ''; });
+  sel('f_caneOther', 'cane', v => { o.detail.caneOther = v; });
+});
+function xRefreshReady(o){
+  const ok = detailComplete(o), n = document.getElementById('poReadyNote'), b = document.getElementById('submitPoDetail');
+  if (n && o.lifecycle === 'draft') n.textContent = ok ? 'All required details are filled in.' : DETAIL_HELP; if (b) b.disabled = !ok;
+}
+Object.assign(ACT_LABELS, { 'detail.cane':'Cane weave', 'detail.caneOther':'Cane weave (other)', 'detail.stoneOther':'Stone (other)' });
+
+// ---------------------------------------------------------------- B. reopening fields after the PO is raised
+const RF = { fabric:{ label:'Fabric', stage:'upholsteryQc', stageLabel:'Upholstery' }, finish:{ label:'Finish', stage:'polishingQc', stageLabel:'Polishing' },
+  cane:{ label:'Cane weave', stage:'postFrame', stageLabel:'Post Frame' }, stone:{ label:'Stone', stage:'polishingQc', stageLabel:'Polishing' } };
+const RF_KEYS = Object.keys(RF);
+const reopenOf = o => CORR.filter(r => r.kind === 'reopen' && r.orderId === o.id);
+const reopenActive = o => reopenOf(o).find(r => ['requested', 'opened', 'saved'].includes(r.status)) || null;
+function xLocks(o){
+  const jc = jobCardOf(o), out = {};
+  RF_KEYS.forEach(k => { const st = jc && (jc.stages || []).find(s => STAGE_SEQ.indexOf(s.key) >= STAGE_SEQ.indexOf(RF[k].stage) && (s.startDateISO || s.endDateISO || s.supervisorSigned));
+    out[k] = st ? { locked:true, why:`${RF[k].stageLabel} work has started${st.startDateISO ? ' (' + fmtDate(st.startDateISO) + ')' : ''}` } : { locked:false }; });
+  out.jc = jc ? { no:jc.jobCardNumber, scanned:jc.updatedAt || jc.createdAt || '' } : null;
+  return out;
+}
+const xOpen = (o, f) => { const r = o && reopenActive(o); return !!(r && r.status === 'opened' && r.opened.includes(f) && ['sales', 'admin'].includes(state.role)); };
+const xEd = (o, f) => !!o && (o.lifecycle === 'draft' || xOpen(o, f));
+window.__xOpen = xOpen; window.__xEd = xEd;
+const specOf = o => { const d = ensureDetailShape(o); return { fabric:JSON.parse(JSON.stringify(d.fabrics)), finish:JSON.parse(JSON.stringify(d.finishes)), cane:{ cane:d.cane || '', caneOther:d.caneOther || '' }, stone:{ stoneType:d.stoneType || '', stoneOther:d.stoneOther || '' } }; };
+const specText = (k, v) => k === 'fabric' ? (v || []).filter(f => f && f.type).map(f => fabricDisplayName(f) + (f.placement ? ' (' + f.placement + ')' : '')).join(' | ') || '—'
+  : k === 'finish' ? (v || []).filter(f => f && f.type).map(f => finishDisplayName(f) + (f.appliedNotes ? ' (' + f.appliedNotes + ')' : '')).join(' | ') || '—'
+  : k === 'cane' ? caneDisplay(v) || '—' : stoneText(v) || '—';
+function setSpec(o, k, v){ const d = ensureDetailShape(o); if (k === 'fabric') d.fabrics = JSON.parse(JSON.stringify(v)); else if (k === 'finish') d.finishes = JSON.parse(JSON.stringify(v)); else Object.assign(d, v); }
+const revisable = o => !!o && isFurn(o) && factoryLine(o) && (o.appNative ? ['po_raised', 'po_confirmed'].includes(o.lifecycle) : true) && !!o.po;
+function reopenPanel(o){
+  const role = state.role, canSales = ['sales', 'admin'].includes(role) && canEditSection('confirmations', role), isA = role === 'admin';
+  if (o.appNative && o.lifecycle === 'submitted'){
+    if (!isA) return '';
+    return `<div class="form-section x-rev"><div class="fs-head"><h3>Admin</h3></div>
+      <div class="cell-sub">Sent to supply, PO not raised yet. Sending it back lets sales change any detail; supply is told not to raise it on the old details.</div>
+      <input id="x_unsub_reason" placeholder="Reason (sales will see it)" style="width:100%;margin-top:6px;"><button class="btn-text" data-x-unsubmit="${xe(o.id)}">Send back to draft</button><div class="cell-sub" id="x_unsub_msg" style="color:var(--critical);"></div></div>`;
+  }
+  if (!revisable(o)) return '';
+  const L = xLocks(o), r = reopenActive(o), hist = reopenOf(o).filter(x => x !== r);
+  const lockChips = RF_KEYS.map(k => `<span class="pill ${L[k].locked ? 'neutral' : 'good'}" title="${xe(L[k].why || 'No work started on ' + RF[k].stageLabel)}"><span class="dot"></span>${RF[k].label}: ${L[k].locked ? 'locked' : 'can reopen'}</span>`).join(' ');
+  const jcLine = L.jc ? `Job card ${xe(L.jc.no)} · last scanned ${L.jc.scanned ? fmtDate(L.jc.scanned.slice(0, 10)) : '—'}` : 'No job card yet — no work recorded';
+  let body = '';
+  if (!r){
+    if (canSales && RF_KEYS.some(k => !L[k].locked)) body = `<div class="cell-sub" style="margin:8px 0 4px;">Customer changed their mind? Ask an admin to reopen fields (only while the job card shows no work on that stage):</div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;">${RF_KEYS.map(k => `<label style="display:flex;gap:6px;align-items:center;${L[k].locked ? 'opacity:.55' : ''}"><input type="checkbox" data-x-rq="${k}" ${L[k].locked ? 'disabled' : ''} style="width:auto;margin:0;"> ${RF[k].label}</label>`).join('')}</div>
+      <textarea id="x_rq_reason" rows="2" placeholder="Why (what the customer asked for)" style="width:100%;margin-top:6px;"></textarea>
+      <button class="btn btn-ghost btn-sm" data-x-rq-send="${xe(o.id)}" style="margin-top:6px;">Ask admin to reopen</button><div class="cell-sub" id="x_rq_msg" style="color:var(--critical);"></div>`;
+  } else if (r.status === 'requested'){
+    body = `<div class="cell-sub" style="margin-top:8px;"><b>${xe(r.by)}</b> asked ${fmtDT(r.at)} to reopen <b>${r.fields.map(k => RF[k].label).join(', ')}</b>: “${xe(r.reason)}”</div>`;
+    if (isA) body += `<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;">${r.fields.map(k => `<label style="display:flex;gap:6px;align-items:center;"><input type="checkbox" data-x-op="${k}" ${L[k].locked ? 'disabled' : 'checked'} style="width:auto;margin:0;"> ${RF[k].label}${L[k].locked ? ' <span class="cell-sub">(' + xe(L[k].why) + ')</span>' : ''}</label>`).join('')}</div>
+      <input id="x_op_reason" placeholder="Reason for your decision (required to reject)" style="width:100%;margin-top:6px;">
+      <button class="btn btn-primary btn-sm" data-x-op-accept="${xe(r.id)}">Reopen the ticked fields</button> <button class="btn-text" data-x-op-reject="${xe(r.id)}">Reject</button><div class="cell-sub" id="x_op_msg" style="color:var(--critical);"></div>`;
+    else body += '<div class="cell-sub">Waiting for an admin.</div>';
+    if (canSales && !isA) body += ` <button class="btn-text" data-x-rq-cancel="${xe(r.id)}">Withdraw request</button>`;
+  } else if (r.status === 'opened'){
+    body = `<div class="part-po-note" style="margin-top:8px;">Reopened by ${xe(r.decision.by)} (${fmtDT(r.decision.at)})${r.decision.reason ? ': “' + xe(r.decision.reason) + '”' : ''}. Open to edit below: <b>${r.opened.map(k => RF[k].label).join(', ')}</b>. Everything else stays locked.</div>`;
+    if (canSales) body += `<button class="btn btn-primary btn-sm" data-x-rv-save="${xe(r.id)}" style="margin-top:6px;">Save revision</button> <button class="btn-text" data-x-rv-cancel="${xe(r.id)}">Cancel — keep the old details</button><div class="cell-sub" id="x_rv_msg" style="color:var(--critical);"></div>`;
+    else body += '<div class="cell-sub">Sales is revising these fields.</div>';
+  } else if (r.status === 'saved'){
+    const ackBtn = who => role === who && !r.acks[who] ? `<input id="x_ack_note" placeholder="Note (optional)" style="width:60%;"> <button class="btn btn-primary btn-sm" data-x-ack="${xe(r.id)}|${who}">Seen revised spec</button>` : '';
+    body = `<div class="cell-sub" style="margin-top:8px;">Revised by ${xe(r.saved.by)} on ${fmtDT(r.saved.at)} (reopened for: “${xe(r.reason)}”)</div>${revDiffHtml(r)}
+      ${r.oldTags && r.oldTags.length ? `<div class="cell-sub" style="color:var(--warn);">Fabric changed — tag(s) for the old fabric: ${r.oldTags.map(xe).join(', ')}. Supply: return or re-use them.</div>` : ''}
+      <div class="cell-sub">Factory: ${r.acks.production ? `seen by ${xe(r.acks.production.by)} ${fmtDT(r.acks.production.at)}` : '<b>not yet acknowledged</b>'} · Supply: ${r.acks.supply ? `seen by ${xe(r.acks.supply.by)} ${fmtDT(r.acks.supply.at)}` : '<b>not yet acknowledged</b>'}</div>
+      ${ackBtn('production') || ackBtn('supply')}`;
+  }
+  const histHtml = hist.length ? `<details style="margin-top:8px;"><summary class="cell-sub">Earlier revisions (${hist.length})</summary>${hist.slice().reverse().map(x => `<div class="cell-sub" style="margin-top:6px;">${fmtDT(x.at)} · ${xe(x.by)} asked for ${x.fields.map(k => RF[k].label).join(', ')} — <b>${xe(x.status)}</b>${x.decision && x.decision.reason ? ' (“' + xe(x.decision.reason) + '”)' : ''}</div>${x.saved ? revDiffHtml(x) : ''}`).join('')}</details>` : '';
+  return `<div class="form-section x-rev"><div class="fs-head"><h3>Spec revisions <span class="opt" style="text-transform:none;font-weight:500;">— fabric, finish, cane weave, stone</span></h3></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">${lockChips} <span class="cell-sub">${jcLine}</span></div>${body}${histHtml}</div>`;
+}
+const revDiffHtml = r => `<table class="grid-table" style="margin:6px 0;"><thead><tr><th>Field</th><th>Before</th><th>After</th></tr></thead><tbody>${(r.changed || []).map(k => `<tr><td>${RF[k].label}</td><td>${xe(specText(k, r.before[k]))}</td><td><b>${xe(specText(k, r.after[k]))}</b></td></tr>`).join('') || '<tr><td colspan="3" class="cell-sub">No change</td></tr>'}</tbody></table>`;
+const _rodN7 = renderOrderDetail;
+renderOrderDetail = function(id){
+  const h = _rodN7.apply(this, arguments); const o = ORDERS.find(x => x.id === id); if (!o) return h;
+  const p = reopenPanel(o); if (!p) return h;
+  const i = h.indexOf('<div class="form-body">'); return i < 0 ? h : h.slice(0, i) + '<div class="form-body" style="padding-bottom:0;">' + p + '</div>' + h.slice(i);
+};
+extraWiring.push(() => {
+  const q = s => document.querySelector(s), msg = (id, t) => { const m = document.getElementById(id); if (m) m.textContent = t; };
+  const ord = () => ORDERS.find(x => x.id === state.openOrderId);
+  const b1 = q('[data-x-rq-send]'); if (b1) b1.addEventListener('click', () => {
+    const o = ord(); if (!o || reopenActive(o)) return; const L = xLocks(o);
+    const fields = [...document.querySelectorAll('[data-x-rq]:checked')].map(x => x.dataset.xRq).filter(k => !L[k].locked);
+    const reason = (q('#x_rq_reason') || {}).value.trim();
+    if (!fields.length) return msg('x_rq_msg', 'Tick at least one field.'); if (reason.split(/\s+/).length < 3) return msg('x_rq_msg', 'Give the reason (3 words or more).');
+    CORR.unshift(Object.assign({ id:corrId('RV'), kind:'reopen', orderId:o.id, so:o.so, po:o.po, sku:o.sku, article:o.article, customer:o.customer, fields, reason, status:'requested' }, meStamp())); renderAll();
+  });
+  const bc = q('[data-x-rq-cancel]'); if (bc) bc.addEventListener('click', () => { const r = CORR.find(x => x.id === bc.dataset.xRqCancel); if (r && r.status === 'requested'){ r.status = 'withdrawn'; r.closedAt = nowIso(); renderAll(); } });
+  const decide = (accept) => () => {
+    const btn = q(accept ? '[data-x-op-accept]' : '[data-x-op-reject]'); const r = CORR.find(x => x.id === btn.dataset[accept ? 'xOpAccept' : 'xOpReject']); const o = r && ORDER_BY_ID[r.orderId];
+    if (!r || !o || r.status !== 'requested' || state.role !== 'admin') return;
+    const reason = (q('#x_op_reason') || {}).value.trim(); const L = xLocks(o);
+    if (!accept){ if (!reason) return msg('x_op_msg', 'Give the reason for rejecting.'); r.status = 'rejected'; r.decision = Object.assign({ reason }, meStamp()); renderAll(); return; }
+    const opened = [...document.querySelectorAll('[data-x-op]:checked')].map(x => x.dataset.xOp).filter(k => !L[k].locked);
+    if (!opened.length) return msg('x_op_msg', 'Nothing can be reopened — work has started on every requested stage. Reject it with a reason.');
+    r.status = 'opened'; r.opened = opened; r.decision = Object.assign({ reason }, meStamp()); r.before = specOf(o); renderAll();
+  };
+  const ba = q('[data-x-op-accept]'); if (ba) ba.addEventListener('click', decide(true));
+  const brj = q('[data-x-op-reject]'); if (brj) brj.addEventListener('click', decide(false));
+  const bs = q('[data-x-rv-save]'); if (bs) bs.addEventListener('click', () => {
+    const r = CORR.find(x => x.id === bs.dataset.xRvSave); const o = r && ORDER_BY_ID[r.orderId]; if (!r || !o || r.status !== 'opened') return;
+    const L = xLocks(o), now = specOf(o), after = {}, changed = [], blocked = [];
+    RF_KEYS.forEach(k => { if (!r.opened.includes(k)) { setSpec(o, k, r.before[k]); return; }
+      if (JSON.stringify(now[k]) === JSON.stringify(r.before[k])) return;
+      if (L[k].locked){ setSpec(o, k, r.before[k]); blocked.push(RF[k].label + ' (' + L[k].why + ')'); return; }
+      after[k] = now[k]; changed.push(k); });
+    const d = ensureDetailShape(o);
+    if (changed.includes('fabric') && !d.fabrics.some(fabricEntryComplete)) return msg('x_rv_msg', 'Fill in at least one complete fabric.');
+    if (changed.includes('finish') && !d.finishes.some(finishEntryComplete)) return msg('x_rv_msg', 'Fill in at least one complete finish.');
+    if (changed.includes('stone') && !stoneOk(d)) return msg('x_rv_msg', 'Choose the stone (or NA).');
+    if (changed.includes('cane') && !caneOk(d)) return msg('x_rv_msg', 'Choose the cane weave (or NA).');
+    if (!changed.length){ if (blocked.length) renderAll(); return msg('x_rv_msg', blocked.length ? 'Work started meanwhile, so these weren\'t saved: ' + blocked.join('; ') : 'Nothing has changed yet — edit the open fields, or Cancel.'); }
+    r.after = after; r.changed = changed; r.saved = meStamp(); r.status = 'saved'; r.acks = {};
+    if (changed.includes('fabric')){
+      const oldF = new Set((r.before.fabric || []).map(f => f.fabricSku || f.fabricName).filter(Boolean)), newF = new Set((after.fabric || []).map(f => f.fabricSku || f.fabricName).filter(Boolean));
+      r.oldTags = FABRIC_ENTRIES.filter(e => e.po === o.po && (!e.productCode || e.productCode === o.sku) && (oldF.has(e.sku) || oldF.has(e.fabricName)) && !newF.has(e.sku) && !newF.has(e.fabricName)).map(e => e.id);
+    }
+    if (blocked.length) r.notSaved = blocked;
+    renderAll();
+  });
+  const bx = q('[data-x-rv-cancel]'); if (bx) bx.addEventListener('click', () => { const r = CORR.find(x => x.id === bx.dataset.xRvCancel); const o = r && ORDER_BY_ID[r.orderId]; if (!r || !o || r.status !== 'opened') return;
+    RF_KEYS.forEach(k => setSpec(o, k, r.before[k])); r.status = 'cancelled'; r.closedAt = nowIso(); renderAll(); });
+  const bk = q('[data-x-ack]'); if (bk) bk.addEventListener('click', () => { const [id, who] = bk.dataset.xAck.split('|'); const r = CORR.find(x => x.id === id); if (!r || r.status !== 'saved' || state.role !== who) return;
+    r.acks[who] = Object.assign({ note:(q('#x_ack_note') || {}).value || '' }, meStamp()); if (r.acks.production && r.acks.supply){ r.status = 'done'; r.closedAt = nowIso(); } renderAll(); });
+  const bu = q('[data-x-unsubmit]'); if (bu) bu.addEventListener('click', () => { const o = ORDER_BY_ID[bu.dataset.xUnsubmit]; const reason = (q('#x_unsub_reason') || {}).value.trim();
+    if (!o || o.lifecycle !== 'submitted' || state.role !== 'admin') return; if (!reason) return msg('x_unsub_msg', 'Give a reason.');
+    o.lifecycle = 'draft'; CORR.unshift(Object.assign({ id:corrId('UD'), kind:'unsubmit', orderId:o.id, so:o.so, sku:o.sku, article:o.article, customer:o.customer, reason, status:'done' }, meStamp())); renderAll(); });
+});
+
+// ---------------------------------------------------------------- C. one more factory deviation
+const grantOf = t => CORR.find(r => r.kind === 'devgrant' && r.key === t.key && r.status === 'granted') || null;
+const grantLive = t => { const g = grantOf(t); if (!g) return null; const n = negOf(t); return n && n.openedAt && n.openedAt >= g.at ? null : g; };
+const _dlcsN7 = dlCanStart;
+dlCanStart = function(t){ const c = _dlcsN7.apply(this, arguments); return c === 'locked' && grantLive(t) ? 'deviation' : c; };
+const _negBoxN7 = negBox;
+negBox = function(t){
+  let h = _negBoxN7.apply(this, arguments); const n = negOf(t), g = grantLive(t);
+  if (g) return h + ` <span class="cell-sub">Admin ${xe(g.by)} allowed one more deviation: “${xe(g.reason)}”</span>`;
+  if (state.role !== 'admin' || (n && ['awaiting_sales', 'awaiting_factory'].includes(n.status)) || !t.lines.some(factoryLine)) return h;
+  const conf = tConfirmed(t); if (!conf || dDiff(conf, todayStr()) > DL_LOCK) return h;
+  return h + (state.xGrant === t.key ? `<div style="margin-top:4px;"><input id="x_grant_reason" placeholder="Why the factory may ask again (sales sees this)" style="width:100%;"><button class="btn-text" data-x-grant-go="${xe(t.key)}">Allow one more deviation</button> · <button class="btn-text" data-x-grant-x="1">Cancel</button></div>`
+    : ` <button class="btn-text" data-x-grant="${xe(t.key)}">Allow the factory one more deviation</button>`);
+};
+extraWiring.push(() => {
+  document.querySelectorAll('[data-x-grant]').forEach(b => b.addEventListener('click', () => { state.xGrant = b.dataset.xGrant; renderAll(); }));
+  document.querySelectorAll('[data-x-grant-x]').forEach(b => b.addEventListener('click', () => { state.xGrant = null; renderAll(); }));
+  document.querySelectorAll('[data-x-grant-go]').forEach(b => b.addEventListener('click', () => {
+    const reason = (document.getElementById('x_grant_reason') || {}).value.trim(); const t = tFromKey(b.dataset.xGrantGo); if (!t || !reason) return;
+    CORR.unshift(Object.assign({ id:corrId('DG'), kind:'devgrant', key:t.key, label:t.type === 'sku' ? `${t.o.so} · ${t.o.article}` : `PO ${t.po}`, reason, status:'granted' }, meStamp()));
+    state.xGrant = null; renderAll(); }));
+});
+
+// ---------------------------------------------------------------- D. logbook corrections
+const CF = {
+  fabric:{ name:'Furnishings tag', owner:'supply', list:() => FABRIC_ENTRIES, label:e => e.id, moved:e => entryStatus(e) !== 'awaiting_dispatch', module:'fabric',
+    fields:[['fabricName', 'Material', 1], ['sku', 'Material SKU', 1], ['furnishingsPo', 'Furnishings PO', 1], ['po', 'Furniture PO', 1], ['product', 'Product', 0], ['component', 'Component', 1], ['customer', 'Customer', 0], ['received', 'Received on (YYYY-MM-DD)', 1], ['loggedByLocation', 'Received at', 0]] },
+  wh:{ name:'Warehouse tag', owner:'production', list:() => WAREHOUSE_TAGS, label:t => t.tagNo, moved:t => warehouseTagStatus(t) !== 'awaiting_dispatch', module:'warehousetag',
+    fields:[['po', 'PO number', 1], ['so', 'SO number', 1], ['sku', 'SKU code', 1], ['article', 'Article name', 1], ['customer', 'Client name', 1]] },
+  jc:{ name:'Job card', owner:'production', list:() => JOB_CARDS, label:j => j.jobCardNumber, moved:() => false, module:'jobcards',
+    fields:[['clientName', 'Client name', 0], ['workOrderNumber', 'Work order number', 0], ['productCode', 'Product code', 0], ['qty', 'Qty', 0], ['factoryRemarks', 'Factory remarks', 0]] },
+};
+const jcStageFields = jc => (jc.stages || []).flatMap(s => [[`stage:${s.key}:startDateISO`, `${s.label} — start date (YYYY-MM-DD)`], [`stage:${s.key}:endDateISO`, `${s.label} — end date (YYYY-MM-DD)`], [`stage:${s.key}:supervisorSigned`, `${s.label} — supervisor signed (yes / no)`], [`stage:${s.key}:managerSigned`, `${s.label} — manager signed (yes / no)`]]);
+const fieldsFor = (type, rec) => type === 'jc' ? CF.jc.fields.concat(jcStageFields(rec)) : CF[type].fields;
+function getF(rec, k){ if (k.startsWith('stage:')){ const [, key, f] = k.split(':'); const s = (rec.stages || []).find(x => x.key === key) || {}; const v = s[f]; return typeof v === 'boolean' ? (v ? 'yes' : 'no') : (v || ''); } return rec[k] == null ? '' : String(rec[k]); }
+function setF(rec, k, v){
+  if (k.startsWith('stage:')){ const [, key, f] = k.split(':'); const s = (rec.stages || []).find(x => x.key === key); if (!s) return;
+    if (/Signed$/.test(f)) s[f] = /^(y|yes|true|1)$/i.test(v); else { s[f] = v; s[f.replace('ISO', 'Raw')] = v ? fmtDate(v) : ''; } return; }
+  rec[k] = v;
+}
+const findRec = (type, id) => CF[type].list().find(r => r.id === id);
+const corrOf = (type, id) => CORR.filter(r => (r.kind === 'fix' || r.kind === 'void') && r.rec.type === type && r.rec.id === id);
+const corrPending = (type, id) => corrOf(type, id).find(r => r.status === 'proposed');
+const ownerCan = r => state.role === CF[r.rec.type].owner;
+function corrModalHtml(){
+  const m = state.xCorr; if (!m) return ''; const C = CF[m.type], rec = findRec(m.type, m.id); if (!rec) return '';
+  const moved = C.moved(rec), pend = corrPending(m.type, m.id), flds = fieldsFor(m.type, rec);
+  const hist = corrOf(m.type, m.id).filter(r => r !== pend).slice().reverse().map(corrRowHtml).join('');
+  let body;
+  if (pend) body = `<div class="cell-sub">A correction is already waiting for ${TEAM[C.owner]}:</div>${corrRowHtml(pend)}`;
+  else body = `${moved ? `<div class="part-po-note">This ${C.name.toLowerCase()} has already moved (dispatched or received). It can't be edited — only voided, then a new one logged the normal way.</div>`
+      : `<div class="cell-sub" style="margin-bottom:6px;">Change only what is wrong. Quantities${m.type === 'wh' ? ', packets' : ''} can't be changed here.</div>
+      <div class="field-grid">${flds.map(([k, l]) => `<div class="field"><label>${xe(l)}</label><input data-xcf="${xe(k)}" value="${xe(getF(rec, k))}"></div>`).join('')}</div>`}
+    <label style="display:flex;gap:8px;align-items:center;margin-top:8px;"><input type="checkbox" id="xcf_void" ${moved ? 'checked disabled' : ''} style="width:auto;margin:0;"> Void this ${C.name.toLowerCase()} instead (it leaves every list; history is kept here)</label>
+    <textarea id="xcf_reason" rows="2" placeholder="Reason (${TEAM[C.owner]} will see it)" style="width:100%;margin-top:6px;"></textarea>
+    <button class="btn btn-primary btn-sm" id="xcf_send" style="margin-top:6px;">Send to ${TEAM[C.owner]} to accept</button><div class="cell-sub" id="xcf_msg" style="color:var(--critical);"></div>`;
+  return `<div class="modal-overlay" id="xcfOverlay"><div class="modal-card" style="max-width:760px;"><div class="modal-head"><div><h3>Correct ${xe(C.name.toLowerCase())} ${xe(C.label(rec))}</h3><div class="modal-sub">${TEAM[C.owner]} accepts or rejects it. Nothing changes until they accept.</div></div><button class="modal-close" id="xcfClose" aria-label="Close">&times;</button></div>
+    <div class="modal-body">${body}${hist ? `<div style="margin-top:12px;"><div class="cell-sub"><b>Earlier corrections</b></div>${hist}</div>` : ''}</div></div></div>`;
+}
+function corrRowHtml(r){
+  const C = CF[r.rec.type];
+  const what = r.kind === 'void' ? '<b>Void</b>' : `<table class="grid-table" style="margin:4px 0;"><thead><tr><th>Field</th><th>Now</th><th>Corrected</th></tr></thead><tbody>${Object.keys(r.changes).map(k => `<tr><td>${xe(r.changes[k].label)}</td><td>${xe(r.changes[k].from || '—')}</td><td><b>${xe(r.changes[k].to || '—')}</b></td></tr>`).join('')}</tbody></table>`;
+  const dec = r.decision ? `<div class="cell-sub">${r.status === 'accepted' ? 'Accepted' : 'Rejected'} by ${xe(r.decision.by)} · ${fmtDT(r.decision.at)}${r.decision.reason ? ': “' + xe(r.decision.reason) + '”' : ''}</div>` : '';
+  const act = r.status === 'proposed' && ownerCan(r) ? `<input data-xcr-reason="${xe(r.id)}" placeholder="Reason for your decision (required to reject)" style="width:100%;margin-top:4px;"><button class="btn btn-primary btn-sm" data-xcr-accept="${xe(r.id)}">Accept</button> <button class="btn-text" data-xcr-reject="${xe(r.id)}">Reject</button><div class="cell-sub" data-xcr-msg="${xe(r.id)}" style="color:var(--critical);"></div>`
+    : r.status === 'proposed' && state.role === 'admin' ? ` <button class="btn-text" data-xcr-withdraw="${xe(r.id)}">Withdraw</button>` : '';
+  const rp = r.status === 'accepted' && r.reprint && !r.reprinted && r.kind === 'fix' ? `<div class="cell-sub" style="color:var(--warn);">Printed details changed — reprint the tag and replace the old label. <button class="btn-text" data-xcr-print="${xe(r.id)}">Print new tag</button></div>` : '';
+  return `<div class="x-corr-row" style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-top:6px;"><div class="cell-sub">${xe(C.name)} <b class="mono">${xe(r.rec.label)}</b> · ${r.kind === 'void' ? 'void' : 'correction'} proposed by ${xe(r.by)} · ${fmtDT(r.at)}: “${xe(r.reason)}” · <b>${xe(r.status)}</b></div>${what}${dec}${act}${rp}</div>`;
+}
+const _rueN7 = renderUserEditModal;
+renderUserEditModal = function(){ return _rueN7.apply(this, arguments) || corrModalHtml(); };
+// station banners: corrections waiting for this team, accepted ones that need a reprint
+function corrBanner(module){
+  const rows = CORR.filter(r => (r.kind === 'fix' || r.kind === 'void') && CF[r.rec.type].module === module && ((r.status === 'proposed' && (ownerCan(r) || state.role === 'admin')) || (r.status === 'accepted' && r.reprint && !r.reprinted && r.kind === 'fix' && (ownerCan(r) || state.role === 'admin'))));
+  if (!rows.length) return '';
+  return `<div class="card" style="padding:12px 16px;margin-bottom:14px;"><div class="ac-title" style="font-size:15px;">Corrections (${rows.length})</div>${rows.map(corrRowHtml).join('')}</div>`;
+}
+const corrBtn = (type, id) => { if (state.role !== 'admin') return ''; const p = corrPending(type, id); return ` <button class="btn-text" data-xcorr-open="${type}|${xe(id)}" title="Propose a correction">${p ? 'Correction pending' : 'Correct'}</button>`; };
+const _rfsN7 = renderFabricStation;
+renderFabricStation = function(){
+  let h = _rfsN7.apply(this, arguments);
+  if (state.fabricTab === 'log' && state.role === 'admin') h = h.replace(/(<button class="btn-text" data-fab-view-tag="([^"]+)"[^>]*>[\s\S]*?<\/button>)/g, (m, b, id) => b + corrBtn('fabric', id));
+  return corrBanner('fabric') + h;
+};
+const _rwlN7 = renderWarehouseLog;
+renderWarehouseLog = function(){
+  let h = _rwlN7.apply(this, arguments); if (state.role !== 'admin') return h;
+  return h.replace(/<td class="mono">([^<]+)<\/td>/g, (m, tagNo) => { const t = WAREHOUSE_TAGS.find(x => x.tagNo === tagNo); return t ? `<td class="mono">${tagNo}${corrBtn('wh', t.id)}</td>` : m; });
+};
+const _rwtsN7 = renderWarehouseTagStation;
+renderWarehouseTagStation = function(){ return corrBanner('warehousetag') + _rwtsN7.apply(this, arguments); };
+const _rjcN7 = renderJobCards;
+renderJobCards = function(){ return corrBanner('jobcards') + _rjcN7.apply(this, arguments); };
+const _rjcdN7 = renderJobCardDetail;
+renderJobCardDetail = function(id){
+  const h = _rjcdN7.apply(this, arguments); const jc = JOB_CARDS.find(j => j.id === (id || state.jobcardOpenId));
+  if (!jc || state.role !== 'admin') return h;
+  const fixed = jc.adminFixed && Object.keys(jc.adminFixed).length ? `<div class="cell-sub" style="padding:6px 22px 0;">Admin-corrected: ${Object.keys(jc.adminFixed).map(k => xe((fieldsFor('jc', jc).find(f => f[0] === k) || [k, k])[1])).join(', ')}</div>` : '';
+  return h.replace('<div class="order-facts">', `<div style="padding:8px 22px 0;">${corrBtn('jc', jc.id)}</div>${fixed}<div class="order-facts">`);
+};
+function applyCorr(r){
+  const C = CF[r.rec.type], rec = findRec(r.rec.type, r.rec.id);
+  if (!rec) return 'This record no longer exists.';
+  if (r.kind === 'void'){
+    r.snapshot = JSON.parse(JSON.stringify(rec)); const L = C.list(); L.splice(L.indexOf(rec), 1); return '';
+  }
+  if (C.moved(rec)) return 'It has moved since the correction was proposed — ask the admin to void it instead.';
+  const stale = Object.keys(r.changes).filter(k => getF(rec, k) !== r.changes[k].from);
+  if (stale.length) return 'Someone changed this record after the correction was proposed (' + stale.map(k => r.changes[k].label).join(', ') + ') — reject it and ask the admin to propose again.';
+  Object.keys(r.changes).forEach(k => { setF(rec, k, r.changes[k].to); if (r.rec.type === 'jc') (rec.adminFixed = rec.adminFixed || {})[k] = r.changes[k].to; });
+  if (r.rec.type === 'fabric' || r.rec.type === 'wh') (rec.corrected = rec.corrected || []).push({ id:r.id, at:nowIso() });
+  return '';
+}
+extraWiring.push(() => {
+  document.querySelectorAll('[data-xcorr-open]').forEach(b => b.addEventListener('click', ev => { ev.stopPropagation(); const [type, id] = b.dataset.xcorrOpen.split('|'); state.xCorr = { type, id }; renderAll(); }));
+  const cl = document.getElementById('xcfClose'); if (cl) cl.addEventListener('click', () => { state.xCorr = null; renderAll(); });
+  const send = document.getElementById('xcf_send'); if (send) send.addEventListener('click', () => {
+    const m = state.xCorr, C = CF[m.type], rec = findRec(m.type, m.id); const out = document.getElementById('xcf_msg'); if (!rec || state.role !== 'admin') return;
+    const reason = (document.getElementById('xcf_reason') || {}).value.trim(); if (reason.split(/\s+/).length < 3) { out.textContent = 'Give the reason (3 words or more).'; return; }
+    const isVoid = document.getElementById('xcf_void').checked || C.moved(rec);
+    const base = Object.assign({ id:corrId('CR'), rec:{ type:m.type, id:rec.id, label:C.label(rec), so:rec.so || rec.linkedOrderId || '', po:rec.po || rec.linkedPo || '' }, reason, status:'proposed' }, meStamp());
+    if (isVoid){ CORR.unshift(Object.assign(base, { kind:'void' })); state.xCorr = null; renderAll(); return; }
+    const changes = {}; let reprint = false, bad = false;
+    document.querySelectorAll('[data-xcf]').forEach(inp => { const k = inp.dataset.xcf, from = getF(rec, k), to = inp.value.trim(); if (to === from) return;
+      if ((/ISO$/.test(k) || k === 'received') && to && !/^\d{4}-\d{2}-\d{2}$/.test(to)) bad = true;
+      const f = fieldsFor(m.type, rec).find(x => x[0] === k); changes[k] = { from, to, label:f[1] }; if (f[2]) reprint = true; });
+    if (bad){ out.textContent = 'Dates as YYYY-MM-DD.'; return; }
+    if (!Object.keys(changes).length){ out.textContent = 'Nothing changed.'; return; }
+    CORR.unshift(Object.assign(base, { kind:'fix', changes, reprint })); state.xCorr = null; renderAll();
+  });
+  const dec = accept => b => b.addEventListener('click', () => {
+    const r = CORR.find(x => x.id === b.dataset[accept ? 'xcrAccept' : 'xcrReject']); if (!r || r.status !== 'proposed' || !ownerCan(r)) return;
+    const reason = ((document.querySelector(`[data-xcr-reason="${r.id}"]`) || {}).value || '').trim(); const out = document.querySelector(`[data-xcr-msg="${r.id}"]`);
+    if (!accept && !reason){ if (out) out.textContent = 'Give the reason for rejecting.'; return; }
+    if (accept){ const err = applyCorr(r); if (err){ if (out) out.textContent = err; return; } }
+    r.status = accept ? 'accepted' : 'rejected'; r.decision = Object.assign({ reason }, meStamp()); renderAll();
+  });
+  document.querySelectorAll('[data-xcr-accept]').forEach(dec(true)); document.querySelectorAll('[data-xcr-reject]').forEach(dec(false));
+  document.querySelectorAll('[data-xcr-withdraw]').forEach(b => b.addEventListener('click', () => { const r = CORR.find(x => x.id === b.dataset.xcrWithdraw); if (r && r.status === 'proposed'){ r.status = 'withdrawn'; renderAll(); } }));
+  document.querySelectorAll('[data-xcr-print]').forEach(b => b.addEventListener('click', () => { const r = CORR.find(x => x.id === b.dataset.xcrPrint); const rec = r && findRec(r.rec.type, r.rec.id); if (!rec) return;
+    printDocument(r.rec.type === 'fabric' ? printableTagHtml(rec) : whPrintHtml(rec)); r.reprinted = meStamp(); renderAll(); }));
+});
+// a rescan doesn't silently undo an admin correction on a job card
+const _xJcApplyN7 = xJcApply;
+xJcApply = function(R){
+  const out = _xJcApplyN7.apply(this, arguments); const d = state.jobcardDraft; if (!d) return out;
+  const num = String(d.jobCardNumber || '').trim().toLowerCase(); const ex = num && JOB_CARDS.find(j => String(j.jobCardNumber).trim().toLowerCase() === num);
+  if (!ex || !ex.adminFixed) return out;
+  Object.keys(ex.adminFixed).forEach(k => { const fixedV = ex.adminFixed[k], scanV = getF(d, k);
+    if (String(scanV) === String(fixedV)) return; setF(d, k, fixedV);
+    const l = (fieldsFor('jc', ex).find(f => f[0] === k) || [k, k])[1];
+    out.unsure.push(`${l}: an admin corrected this to “${fixedV || '—'}”; this photo reads “${scanV || '—'}”. Kept the correction — change it if the card is right.`); });
+  return out;
+};
+
+// ---------------------------------------------------------------- to-dos and notices
+inboxItems = (base => function(){
+  const out = base.apply(this, arguments), role = state.role, isA = role === 'admin', add = x => out.push(Object.assign({ kind:'action' }, x));
+  const goOrder = id => ({ module:'confirmations', set:() => { state.openOrderId = id; } });
+  const recent = r => Date.now() - new Date(r.decision ? r.decision.at : r.at).getTime() < 7 * 864e5;
+  CORR.forEach(r => {
+    if (r.kind === 'reopen'){
+      const nm = `${r.so} · ${r.article}`;
+      if (r.status === 'requested' && isA) add({ id:'rv-req-' + r.id, area:'Spec revision', title:`Reopen request: ${r.fields.map(k => RF[k].label).join(', ')} — ${nm}`, detail:`${r.by}: “${r.reason}”`, nav:goOrder(r.orderId) });
+      if (r.status === 'opened' && (role === 'sales' || isA)) add({ id:'rv-open-' + r.id, area:'Spec revision', title:`Revise ${r.opened.map(k => RF[k].label).join(', ')} on ${nm}`, detail:`Reopened by ${r.decision.by}`, nav:goOrder(r.orderId) });
+      if (r.status === 'rejected' && role === 'sales' && recent(r)) add({ id:'rv-rej-' + r.id, kind:'update', area:'Spec revision', title:`Reopen request rejected — ${nm}`, detail:`${r.decision.by}: “${r.decision.reason}”`, nav:goOrder(r.orderId) });
+      if (r.status === 'saved') ['production', 'supply'].forEach(w => { if (role === w && !r.acks[w]) add({ id:'rv-ack-' + w + '-' + r.id, area:'Spec revision', title:`Revised spec to acknowledge — ${nm}`,
+        detail:(r.changed || []).map(k => `${RF[k].label}: ${specText(k, r.before[k])} → ${specText(k, r.after[k])}`).join(' · ') + (w === 'supply' && r.oldTags && r.oldTags.length ? ` · old fabric tag(s) ${r.oldTags.join(', ')} to return or re-use` : ''), nav:goOrder(r.orderId) }); });
+    }
+    if (r.kind === 'unsubmit' && role === 'supply' && recent(r)) add({ id:'ud-' + r.id, kind:'update', area:'PO Progress', title:`Don't raise a PO for ${r.so} · ${r.article} — sent back to sales`, detail:`${r.by}: “${r.reason}”`, nav:goOrder(r.orderId) });
+    if (r.kind === 'unsubmit' && role === 'sales' && recent(r)) add({ id:'ud-s-' + r.id, kind:'action', area:'PO Progress', title:`${r.so} · ${r.article} is back in draft — change it and send it again`, detail:`${r.by}: “${r.reason}”`, nav:goOrder(r.orderId) });
+    if (r.kind === 'devgrant' && role === 'production' && grantLive(tFromKey(r.key) || { key:'' })) add({ id:'dg-' + r.id, kind:'update', area:'Order deadlines', title:`You may request one more deviation — ${r.label}`, detail:`${r.by}: “${r.reason}”`, nav:{ module:'deadlines' } });
+    if ((r.kind === 'fix' || r.kind === 'void') && r.status === 'proposed' && ownerCan(r)) add({ id:'cr-' + r.id, area:'Corrections', title:`${r.kind === 'void' ? 'Void' : 'Correct'} ${CF[r.rec.type].name.toLowerCase()} ${r.rec.label}? Accept or reject`, detail:`${r.by}: “${r.reason}”`, nav:{ module:CF[r.rec.type].module } });
+    if ((r.kind === 'fix' || r.kind === 'void') && r.status === 'rejected' && isA && recent(r)) add({ id:'cr-rej-' + r.id, kind:'update', area:'Corrections', title:`Correction rejected — ${CF[r.rec.type].name.toLowerCase()} ${r.rec.label}`, detail:`${r.decision.by}: “${r.decision.reason}”`, nav:{ module:CF[r.rec.type].module } });
+  });
+  return out;
+})(inboxItems);
+
+// ---------------------------------------------------------------- admin: this month's corrections and reopens, by team
+const _rauN7 = renderAdminUploads;
+renderAdminUploads = function(){
+  const h = _rauN7.apply(this, arguments), m = todayStr().slice(0, 7), rows = {};
+  const bump = (team, k) => { (rows[team] = rows[team] || { asked:0, opened:0, fixes:0, accepted:0, rejected:0 })[k]++; };
+  CORR.filter(r => String(r.at).slice(0, 7) === m).forEach(r => {
+    if (r.kind === 'reopen'){ bump('Sales', 'asked'); if (r.decision && r.status !== 'rejected') bump('Sales', 'opened'); }
+    if (r.kind === 'unsubmit') bump('Sales', 'opened');
+    if (r.kind === 'devgrant') bump('Factory', 'opened');
+    if (r.kind === 'fix' || r.kind === 'void'){ const t = TEAM[CF[r.rec.type].owner]; bump(t, 'fixes'); if (r.status === 'accepted') bump(t, 'accepted'); if (r.status === 'rejected') bump(t, 'rejected'); }
+  });
+  const teams = Object.keys(rows);
+  return h + `<div class="card" style="padding:16px 20px;margin-top:16px;"><div class="ac-title" style="font-size:16px;">Corrections &amp; reopens — ${fmtDate(m + '-01').replace(/^\d+\s/, '')}</div>
+    <div class="cell-sub">Where the same team keeps needing fixes, the process there needs a look.</div>
+    ${teams.length ? `<table class="grid-table" style="margin-top:8px;"><thead><tr><th>Team</th><th>Reopens asked</th><th>Reopened / allowed</th><th>Corrections proposed</th><th>Accepted</th><th>Rejected</th></tr></thead><tbody>${teams.map(t => `<tr><td>${t}</td><td>${rows[t].asked}</td><td>${rows[t].opened}</td><td>${rows[t].fixes}</td><td>${rows[t].accepted}</td><td>${rows[t].rejected}</td></tr>`).join('')}</tbody></table>` : '<div class="empty-note">None this month.</div>'}</div>`;
+};
+window.__xcorr = { list:CORR, locks:xLocks, reopenActive, revisable, isFurn, factoryLine, jobCardOf, can:k => dlCanStart(tFromKey(k)), addD, todayStr, inbox:() => inboxItems() };
 
 if (!routePublic() && state.currentUser) renderAll();
 })();
