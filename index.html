@@ -16415,7 +16415,8 @@ window.__xcorr = { list:CORR, locks:xLocks, reopenActive, revisable, isFurn, fac
 //   1. adds the "Assistant" menu item (User Permissions › Menu visibility decides which teams see it; off until an admin ticks it),
 //   2. opens those files in a side panel (a same-origin frame), and
 //   3. hands the frame read access to the lists and rule functions already in memory (window.__obAsst.get).
-// It never saves anything. If any of it fails, the rest of Order Bridge carries on.
+// It never changes saved work (its one write is the daily collections record, see below). If any of it fails, the rest of
+// Order Bridge carries on.
 (function(){
   if (location.protocol === 'file:') return;   // the offline training file has no assistant
   try {
@@ -16435,7 +16436,7 @@ window.__xcorr = { list:CORR, locks:xLocks, reopenActive, revisable, isFurn, fac
       ddList:() => ddList, ddFor:() => ddFor, ddBalance:() => ddBalance, ddComplete:() => ddComplete, ddMissing:() => ddMissing, clientDateFor:() => clientDateFor, heldQty:() => heldQty,
       xSbLeft:() => xSbLeft, xSbDisp:() => xSbDisp, xProjCompute:() => xProjCompute, pfCompute:() => pfCompute, soCompletion:() => soCompletion, actEvents:() => actEvents,
     };
-    const VER = '1';
+    const VER = '2';
     const A = window.__obAsst = {
       v:1, names:Object.keys(G), pending:null, onOpen:null,
       get:n => { try { return G[n] ? G[n]() : undefined; } catch(e){ return undefined; } },
@@ -16445,6 +16446,17 @@ window.__xcorr = { list:CORR, locks:xLocks, reopenActive, revisable, isFurn, fac
       open:q => openPanel(q), close:() => closePanel(),
       wide:on => { const el = document.getElementById('obAsstPanel'); if (el) el.classList.toggle('wide', !!on); },
     };
+
+    // Collections record: the ERP files give each sales order's collected total but no collection dates, so the first
+    // admin to open the page after a new ERP data file saves those totals once (keyed by the file's build time).
+    // "Collections received" in the Assistant is the difference between two days' records.
+    setTimeout(function(){ try {
+      const u = (window.__OB || {}).user, api = (window.__OB || {}).api;
+      if (!u || u.role !== 'admin' || !api || !X.builtAt) return;
+      api('/api/assistant/coll').then(r => { if (((r && r.days) || []).some(d => d.builtAt >= X.builtAt)) return;
+        const m = {}; X.dpi.forEach(h => { if (!h.ic && (h.collectedExTax || h.collected)) m[h.so] = [h.collectedExTax || 0, h.collected || 0]; });
+        return api('/api/assistant/coll', { body:{ builtAt:X.builtAt, m } }); }).catch(function(){});
+    } catch(e){} }, 12000);
 
     ICONS.chat = '<path d="M5 5.5h14a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5h-6.5L8 20v-3.5H5A1.5 1.5 0 0 1 3.500 15V7A1.5 1.5 0 0 1 5 5.500z" stroke-linejoin="round"/><path d="M8 9.500h8M8 12.500h5" stroke-linecap="round"/>';
     const at = NAV.findIndex(n => n.id === 'adminuploads');
