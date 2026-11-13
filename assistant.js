@@ -1,5 +1,5 @@
 // =====================================================================================
-// Order Bridge Assistant — phase 1: the order card (13 Nov 2026).
+// Order Bridge Assistant — phase 1: the order card; phase 2: team reports (13 Nov 2026).
 // Runs inside the side panel that Order Bridge opens (a same-origin frame). It reads the
 // lists and rule functions Order Bridge already holds in memory (parent.__obAsst.get) and
 // never saves anything. Every figure and date comes from those functions, so the card
@@ -265,21 +265,193 @@ function textOf(C){
   return T.join('\n');
 }
 
+// ------------------------------------------------------------------ reports (phase 2, 13 Nov 2026)
+// Each report is worked out here from the lists and rules Order Bridge already holds. Nothing is estimated.
+var CORD = ['C1', 'C2', 'C4', 'C3', 'C0'];   // weekly plan order inside a week (JK, 11 Nov)
+function addD(d, n){ return call('addD', d, n) || ''; }
+function today(){ return call('todayStr') || new Date().toISOString().slice(0, 10); }
+function monday(d){ var x = new Date(d + 'T00:00:00Z'); return addD(d, -((x.getUTCDay() + 6) % 7)); }
+function heads(){ var D = g('DPI_BY_SO') || {}; return Object.keys(D).map(function(k){ return D[k]; }).filter(function(h){ return !h.cancelled && !h.ic; }); }
+function headOf(so){ return (g('DPI_BY_SO') || {})[so] || {}; }
+function openRows(){ var idx = call('xCatIndex'), out = []; if (idx && idx.byLine) idx.byLine.forEach(function(r){ if (!r.packed) out.push(r); }); return out; }
+function catLabel(c){ return c + ' · ' + (((g('XCAT_INFO') || {})[c] || {}).label || ''); }
+function catCls(c){ var s = ((g('XCAT_INFO') || {})[c] || {}).sev; return s === 'good' ? 'good' : s === 'warn' ? 'warn' : 'crit'; }
+function lineBase(r){ var o = r.o; return { so:o.so, customer:headOf(o.so).customer || o.customer || '', article:o.article || '', sku:o.sku || '', qty:+(o.poQty || o.qty) || 0, po:o.po, poDate:call('poDateOf', o) || '' }; }
+function dispatchedSos(){ var m = {}; ((g('X') || {}).dispatches || []).forEach(function(d){ if (!/cancel|reject/i.test(d.status || '')) m[d.so] = (m[d.so] || 0) + (+d.grossPreGst || 0); }); return m; }
+function soStage(h, ctx){
+  var bs = ctx.book[h.so] || [];
+  if (bs.some(function(b){ return /delivered|completed/.test(b.status); })) return 'Delivered';
+  if (ctx.disp[h.so] || bs.some(function(b){ return b.status === 'dispatched'; })) return 'Dispatched';
+  var ps = call('poStatusOf', h) || {};
+  if (ps.key === 'nopo') return 'No PO yet';
+  if (ps.key === 'part') return 'Part of the POs raised';
+  if (ctx.cat){ var c = ctx.cat.soCat[h.so]; if (c) return 'In production · ' + catLabel(c); if (ctx.packed[h.so]) return 'Packed, not dispatched'; return 'POs raised · no open factory line'; }
+  return 'POs raised';
+}
+var STAGE_SORT = ['No PO yet', 'Part of the POs raised', 'In production · C0', 'In production · C3', 'In production · C4', 'In production · C2', 'In production · C1', 'POs raised', 'Packed, not dispatched', 'Dispatched', 'Delivered'];
+function stageRank(s){ for (var i = 0; i < STAGE_SORT.length; i++) if (s.indexOf(STAGE_SORT[i]) === 0) return i; return 50; }
+
+var REPORTS = [
+  { id:'orders', team:'MIS', title:'Orders and values', sub:'Open sales orders by stage, vertical, site or sales rep, with value and collections before GST.',
+    can:function(){ return can('payables') && can('confirmations'); },
+    controls:[{ id:'by', label:'Group by', options:[['stage', 'Stage'], ['vertical', 'Vertical'], ['city', 'Site'], ['rep', 'Sales rep']] }],
+    build:function(o){
+      var by = o.by || 'stage', idx = call('xCatOn') ? call('xCatIndex') : null, ctx = { cat:idx, disp:dispatchedSos(), book:{}, packed:{} };
+      (g('SLOT_BOOKINGS') || []).forEach(function(b){ if (b.type === 'dispatch') (ctx.book[b.so] = ctx.book[b.so] || []).push(b); });
+      if (idx) idx.byLine.forEach(function(r){ if (r.packed) ctx.packed[r.o.so] = 1; });
+      var keyOf = function(h){ return by === 'stage' ? soStage(h, ctx) : (h[by] || '(blank)'); };
+      var H = heads();
+      if (o.drill != null){
+        var rows = H.filter(function(h){ return keyOf(h) === o.drill; }).sort(function(a, b){ return (b.value || 0) - (a.value || 0); }).map(function(h){ return { so:h.so, customer:h.customer, date:h.date, city:h.city, rep:h.rep, value:+h.value || 0, coll:+h.collectedExTax || 0, bal:Math.max(0, (+h.value || 0) - (+h.collectedExTax || 0)) }; });
+        return { crumb:o.drill, cols:[{ k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'date', label:'SO date', kind:'date' }, { k:'city', label:'Site' }, { k:'rep', label:'Sales rep' }, { k:'value', label:'Order value (before GST)', kind:'money' }, { k:'coll', label:'Collected (before GST)', kind:'money' }, { k:'bal', label:'Not yet collected', kind:'money' }], rows:rows, total:['value', 'coll', 'bal'] };
+      }
+      var G = {}; H.forEach(function(h){ var k = keyOf(h), a = G[k] = G[k] || { group:k, n:0, value:0, coll:0, bal:0, _drill:k }; a.n++; a.value += +h.value || 0; a.coll += +h.collectedExTax || 0; a.bal += Math.max(0, (+h.value || 0) - (+h.collectedExTax || 0)); });
+      var rows2 = Object.keys(G).map(function(k){ return G[k]; }).sort(by === 'stage' ? function(a, b){ return stageRank(a.group) - stageRank(b.group) || a.group.localeCompare(b.group); } : function(a, b){ return b.value - a.value; });
+      return { cols:[{ k:'group', label:(this.controls[0].options.filter(function(x){ return x[0] === by; })[0] || [])[1], kind:'drill' }, { k:'n', label:'Sales orders', kind:'num' }, { k:'value', label:'Order value (before GST)', kind:'money' }, { k:'coll', label:'Collected (before GST)', kind:'money' }, { k:'bal', label:'Not yet collected', kind:'money' }], rows:rows2, total:['n', 'value', 'coll', 'bal'],
+        note:'Open sales orders only (cancelled and inter-company left out). Click a row for its sales orders.' + (by === 'stage' && !idx ? ' Production readiness is not shown to your team, so orders in production appear as "POs raised".' : '') };
+    } },
+  { id:'collections', team:'MIS', title:'Collections by SO date', sub:'Collected before GST on sales orders dated in a period.',
+    can:function(){ return can('payables'); },
+    controls:[{ id:'range', label:'SO dated', options:[['week', 'This week'], ['month', 'This month'], ['lastmonth', 'Last month'], ['custom', 'Between two dates']] }, { id:'from', label:'From', type:'date', when:'custom' }, { id:'to', label:'To', type:'date', when:'custom' }],
+    build:function(o){
+      var t = today(), r = o.range || 'month', from, to = t;
+      if (r === 'week') from = monday(t); else if (r === 'month') from = t.slice(0, 8) + '01';
+      else if (r === 'lastmonth'){ var d = new Date(t.slice(0, 8) + '01T00:00:00Z'); d.setUTCMonth(d.getUTCMonth() - 1); from = d.toISOString().slice(0, 10); to = addD(t.slice(0, 8) + '01', -1); }
+      else { from = o.from || t.slice(0, 8) + '01'; to = o.to || t; }
+      var rows = heads().filter(function(h){ return h.date && h.date >= from && h.date <= to; }).sort(function(a, b){ return (b.collectedExTax || 0) - (a.collectedExTax || 0); }).map(function(h){ return { so:h.so, customer:h.customer, date:h.date, city:h.city, value:+h.value || 0, coll:+h.collectedExTax || 0, bal:Math.max(0, (+h.value || 0) - (+h.collectedExTax || 0)) }; });
+      return { cols:[{ k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'date', label:'SO date', kind:'date' }, { k:'city', label:'Site' }, { k:'value', label:'Order value (before GST)', kind:'money' }, { k:'coll', label:'Collected (before GST)', kind:'money' }, { k:'bal', label:'Not yet collected', kind:'money' }], rows:rows, total:['value', 'coll', 'bal'],
+        summary:'Sales orders dated ' + fmtD(from) + ' to ' + fmtD(to), note:'This is money collected so far on sales orders dated in the period. It is not "money received in the period": the ERP exports carry no collection dates.' };
+    } },
+  { id:'plan', team:'Factory', title:'Weekly plan', sub:'Open factory lines by week, then by readiness C1, C2, C4, C3, C0.',
+    can:function(){ return !!call('xCatOn') && can('deadlines'); },
+    build:function(){
+      var t = today(), w0 = monday(t), buf = +g('DL_BUF') || 5;
+      var rows = openRows().map(function(r){ var o = r.o, b = lineBase(r), f = call('effF', o), d, basis;
+        if (f){ d = f; basis = 'Factory date'; } else if (o.committedDeadline){ d = addD(o.committedDeadline, -buf); basis = 'Client date − ' + buf + ' days'; } else { d = b.poDate || ''; basis = b.poDate ? 'PO date' : 'No date'; }
+        var wk = d ? monday(d) : ''; b.wk = !d ? 'No date' : wk < w0 ? 'Before this week' : 'Week of ' + fmtD(wk); b._wk = !d ? '9999' : wk < w0 ? '0000' : wk; b.d = d; b.basis = basis; b.c = r.c; b.cat = { t:r.c, cls:catCls(r.c) }; b.jc = (call('xJcInfo', o) || {}).lab || 'No job card'; b.why = call('xCatReason', r) || ''; return b; });
+      rows.sort(function(a, b){ return a._wk.localeCompare(b._wk) || CORD.indexOf(a.c) - CORD.indexOf(b.c) || String(a.d).localeCompare(String(b.d)) || a.so.localeCompare(b.so); });
+      var n = { f:0, c:0, p:0 }; rows.forEach(function(x){ if (x.basis === 'Factory date') n.f++; else if (/^Client/.test(x.basis)) n.c++; else n.p++; });
+      return { cols:[{ k:'wk', label:'Week' }, { k:'d', label:'Date', kind:'date' }, { k:'basis', label:'Sorted by' }, { k:'cat', label:'Readiness', kind:'pill' }, { k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'article', label:'Article' }, { k:'qty', label:'Qty', kind:'num' }, { k:'po', label:'PO', kind:'po' }, { k:'jc', label:'Job card' }, { k:'why', label:'Why' }], rows:rows,
+        summary:rows.length + ' open factory lines: ' + n.f + ' sorted by factory date, ' + n.c + ' by client date − ' + buf + ' days, ' + n.p + ' by PO date',
+        note:'A line is placed by its agreed factory date. Where there is none yet, by the client date less ' + buf + ' days, and failing that by its PO date. Packed lines are left out.' };
+    } },
+  { id:'rm', team:'Factory', title:'Raw material pending', sub:'Open factory lines whose job card does not confirm raw material (C3, C4).',
+    can:function(){ return !!call('xCatOn') && can('jobcards'); },
+    build:function(){
+      var rows = openRows().filter(function(r){ return r.c === 'C3' || r.c === 'C4'; }).map(function(r){ var b = lineBase(r); b.cat = { t:r.c, cls:catCls(r.c) }; b.card = r.jc ? r.jc.jobCardNumber : ''; b.jc = (call('xJcInfo', r.o) || {}).lab || ''; b.fab = r.fab.ok ? 'Fabric in' : 'Fabric pending'; return b; })
+        .sort(function(a, b){ return String(a.poDate).localeCompare(String(b.poDate)) || a.so.localeCompare(b.so); });
+      return { cols:[{ k:'cat', label:'Readiness', kind:'pill' }, { k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'article', label:'Article' }, { k:'qty', label:'Qty', kind:'num' }, { k:'po', label:'PO', kind:'po' }, { k:'poDate', label:'PO date', kind:'date' }, { k:'card', label:'Job card' }, { k:'jc', label:'Stage' }, { k:'fab', label:'Fabric' }], rows:rows,
+        note:'Oldest PO first. Lines with no job card at all (C0) are not listed here; see the weekly plan.' };
+    } },
+  { id:'fabric', team:'Factory and Supply', title:'Fabric pending', sub:'Fabric not yet received at the factory, and who has to act (C2, C3).',
+    can:function(){ return !!call('xCatOn') && can('fabric'); },
+    build:function(){
+      var ST = { in_transit:['In transit', 'Factory to confirm receipt'], awaiting_dispatch:['Tagged, not sent', 'Supply to send'], no_tag:['No tag yet', 'Supply to log'] }, rows = [];
+      openRows().filter(function(r){ return r.c === 'C2' || r.c === 'C3'; }).forEach(function(r){ var b = lineBase(r);
+        if (r.fab.note) rows.push(Object.assign({}, b, { cat:{ t:r.c, cls:catCls(r.c) }, fabric:'(fabric details missing)', status:r.fab.note, next:'Sales to fill in the fabric', tag:'' }));
+        (r.fab.items || []).forEach(function(i){ if (i.status === 'received') return; var s = ST[i.status] || [i.status, '']; rows.push(Object.assign({}, b, { cat:{ t:r.c, cls:catCls(r.c) }, fabric:i.name || i.sku, status:s[0], next:s[1], tag:i.tag || '' })); }); });
+      rows.sort(function(a, b){ return a.next.localeCompare(b.next) || String(a.poDate).localeCompare(String(b.poDate)) || a.so.localeCompare(b.so); });
+      var n = {}; rows.forEach(function(x){ var k = x.next.split(' ')[0]; n[k] = (n[k] || 0) + 1; });
+      return { cols:[{ k:'next', label:'Next step' }, { k:'fabric', label:'Fabric' }, { k:'status', label:'Status' }, { k:'tag', label:'Tag' }, { k:'cat', label:'Readiness', kind:'pill' }, { k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'article', label:'For article' }, { k:'po', label:'PO', kind:'po' }, { k:'poDate', label:'PO date', kind:'date' }], rows:rows,
+        summary:rows.length + ' fabric items pending' + (rows.length ? ': ' + Object.keys(n).map(function(k){ return n[k] + ' with ' + k; }).join(', ') : '') };
+    } },
+  { id:'flush', team:'Supply', title:'Easiest orders to flush out', sub:'Fully raised sales orders, fewest factory lines not ready first.',
+    can:function(){ return !!call('xCatOn') && can('payables'); },
+    build:function(){
+      var idx = call('xCatIndex'), disp = dispatchedSos(), per = {};
+      idx.byLine.forEach(function(r){ var a = per[r.o.so] = per[r.o.so] || { lines:0, notReady:0, worst:'' }; a.lines++; if (!r.packed && r.c !== 'C1'){ a.notReady++; if (!a.worst || CORD.indexOf(r.c) > CORD.indexOf(a.worst)) a.worst = r.c; } });
+      var rows = heads().filter(function(h){ return (call('poStatusOf', h) || {}).key === 'full' && (+h.value || 0) - (disp[h.so] || 0) > 0.5; }).map(function(h){ var a = per[h.so] || { lines:0, notReady:0, worst:'' };
+        return { so:h.so, customer:h.customer, city:h.city, lines:a.lines, notReady:a.notReady, cat:a.lines ? (a.notReady ? { t:idx.soCat[h.so] || a.worst, cls:catCls(idx.soCat[h.so] || a.worst) } : { t:'Ready', cls:'good' }) : { t:'No factory line', cls:'' }, bal:Math.max(0, (+h.total || 0) - (+h.collected || 0)), rem:Math.max(0, (+h.value || 0) - (disp[h.so] || 0)) }; })
+        .sort(function(a, b){ return a.notReady - b.notReady || b.bal - a.bal || a.so.localeCompare(b.so); });
+      rows.forEach(function(x, i){ x.rank = i + 1; });
+      return { cols:[{ k:'rank', label:'#', kind:'num' }, { k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'city', label:'Site' }, { k:'lines', label:'Factory lines', kind:'num' }, { k:'notReady', label:'Not ready', kind:'num' }, { k:'cat', label:'Worst line', kind:'pill' }, { k:'bal', label:'Balance collectible (with GST)', kind:'money' }, { k:'rem', label:'Still to dispatch (before GST)', kind:'money' }], rows:rows, total:['bal', 'rem'],
+        summary:rows.length + ' fully raised sales orders with something still to dispatch; ' + rows.filter(function(x){ return !x.notReady; }).length + ' have no factory line waiting',
+        note:'Ready means the line is C1 or packed. Ties go to the larger balance collectible. Sales orders with no factory line (bought-in items) count as nothing waiting; check their stock before promising a date.' };
+    } },
+  { id:'flushweek', team:'Supply', title:'Flushout value by week', sub:'Value expected to flush out each week, from dispatch bookings and factory dates.',
+    can:function(){ return (g('state') || {}).role === 'admin' && can('payables'); },
+    build:function(o){
+      var pr = call('xProjCompute') || { items:[], today:today() }, w0 = monday(pr.today), it = pr.items.filter(function(i){ return i.kind === 'flush'; });
+      var keyOf = function(i){ return !i.date ? 'No date yet' : i.overdue ? 'Overdue (due now)' : 'Week of ' + fmtD(monday(i.date)); }, ord = function(i){ return !i.date ? '9999' : i.overdue ? '0000' : monday(i.date); };
+      if (o.drill != null){ var rs = it.filter(function(i){ return keyOf(i) === o.drill; }).sort(function(a, b){ return b.amount - a.amount; }).map(function(i){ return { so:i.so, customer:headOf(i.so).customer || '', po:i.po, date:i.date || '', amount:i.amount, basis:i.basis }; });
+        return { crumb:o.drill, cols:[{ k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'po', label:'PO(s)' }, { k:'date', label:'Expected', kind:'date' }, { k:'amount', label:'Flushout value (before GST)', kind:'money' }, { k:'basis', label:'Based on' }], rows:rs, total:['amount'] }; }
+      var G = {}; it.forEach(function(i){ var k = keyOf(i), a = G[k] = G[k] || { group:k, _o:ord(i), _drill:k, sos:{}, amount:0 }; a.sos[i.so] = 1; a.amount += i.amount; });
+      var rows = Object.keys(G).map(function(k){ G[k].n = Object.keys(G[k].sos).length; return G[k]; }).sort(function(a, b){ return a._o.localeCompare(b._o); });
+      return { cols:[{ k:'group', label:'Week', kind:'drill' }, { k:'n', label:'Sales orders', kind:'num' }, { k:'amount', label:'Flushout value (before GST)', kind:'money' }], rows:rows, total:['amount'],
+        note:'Same figures as Payables & Flushout › Projection Analysis: value still to dispatch, dated by the dispatch booking, or the factory date plus 5 working days. A line with neither falls under "No date yet". Click a row for its sales orders.' };
+    } },
+  { id:'deviations', team:'Sales', title:'Deadline deviations', sub:'Lines where the factory date is later than the client date, or a date change is open.',
+    can:function(){ return can('deadlines'); },
+    build:function(){
+      var rows = [], dl = g('PO_DL') || {};
+      (g('ORDERS') || []).forEach(function(o){ if (!o.po || o.lifecycle !== 'po_confirmed' || !call('factoryLine', o) || headOf(o.so).cancelled) return;
+        var f = call('effF', o), fv = f ? call('viewF', f) : '', cv = o.committedDeadline ? call('viewC', o.committedDeadline) : '';
+        var neg = o.deadlineNeg || (dl[o.po] || {}).neg, hist = (o.deadlineNegHistory || []).length + (((dl[o.po] || {}).negHistory || []).length);
+        var late = fv && cv && fv > cv ? Math.round((Date.parse(fv) - Date.parse(cv)) / 864e5) : 0;
+        if (!late && !neg && !hist) return;
+        rows.push({ so:o.so, customer:headOf(o.so).customer || o.customer || '', article:o.article || '', po:o.po, cv:cv, fv:fv, late:late, status:neg ? (neg.status === 'awaiting_sales' ? 'Waiting for sales to answer' : neg.status === 'awaiting_factory' ? 'Waiting for the factory to answer' : 'Under discussion') : late ? 'Agreed later than the client date' : 'Date change settled', rounds:hist + (neg ? 1 : 0) }); });
+      rows.sort(function(a, b){ return (a.status.indexOf('Waiting') === 0 ? 0 : 1) - (b.status.indexOf('Waiting') === 0 ? 0 : 1) || b.late - a.late || a.so.localeCompare(b.so); });
+      return { cols:[{ k:'status', label:'Status' }, { k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'article', label:'Article' }, { k:'po', label:'PO', kind:'po' }, { k:'cv', label:'Client date', kind:'date' }, { k:'fv', label:'Factory date', kind:'date' }, { k:'late', label:'Days late', kind:'num' }, { k:'rounds', label:'Date changes', kind:'num' }], rows:rows,
+        summary:rows.length + ' lines: ' + rows.filter(function(x){ return x.status.indexOf('Waiting') === 0; }).length + ' with a date change open, ' + rows.filter(function(x){ return x.late > 0; }).length + ' later than the client date',
+        note:'Dates are shown the way your team sees them in Order Deadlines.' };
+    } },
+];
+function repById(id){ for (var i = 0; i < REPORTS.length; i++) if (REPORTS[i].id === id) return REPORTS[i]; return null; }
+function cellHtml(c, row){
+  var v = row[c.k];
+  if (c.kind === 'so') return '<button class="link" type="button" data-so="' + esc(v) + '">' + esc(v) + '</button>';
+  if (c.kind === 'po') return v ? '<button class="link" type="button" data-po="' + esc(v) + '">' + esc(v) + '</button>' : '';
+  if (c.kind === 'drill') return '<button class="link" type="button" data-drill="' + esc(row._drill) + '">' + esc(v) + '</button>';
+  if (c.kind === 'date') return esc(fmtD(v));
+  if (c.kind === 'money') return esc(inr(v));
+  if (c.kind === 'num') return esc(num(v));
+  if (c.kind === 'pill') return v ? pill(v.t, v.cls) : '';
+  return esc(v);
+}
+function cellCsv(c, row){ var v = row[c.k]; if (c.kind === 'pill') v = v ? v.t : ''; if (c.kind === 'money') v = Math.round(+v || 0); if (v == null) v = '';
+  v = String(v); if (/^\d{11,}$/.test(v)) return '"=""' + v + '"""'; return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }
+function csvOf(R){ var q = function(v){ return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; }; return [R.cols.map(function(c){ return q(c.label); }).join(',')].concat(R.rows.map(function(r){ return R.cols.map(function(c){ return cellCsv(c, r); }).join(','); })).join('\r\n'); }
+var LIMIT = 300, curRep = null, curData = null;
+function showReport(id, opts){
+  var rp = repById(id); if (!rp || !rp.can()) return home({ err:true, text:'That report is not available to your team.' });
+  opts = opts || {}; var R; try { R = rp.build(opts); } catch(e){ return home({ err:true, text:'Could not build the report: ' + e.message }); }
+  cur = null; curRep = { id:id, opts:opts }; curData = R;
+  var ctl = (rp.controls || []).filter(function(c){ return !c.when || opts.range === c.when; }).map(function(c){
+    return '<label class="ctl">' + esc(c.label) + ' ' + (c.type === 'date' ? '<input type="date" data-ctl="' + c.id + '" value="' + esc(opts[c.id] || '') + '">' : '<select data-ctl="' + c.id + '">' + c.options.map(function(x){ return '<option value="' + x[0] + '"' + ((opts[c.id] || c.options[0][0]) === x[0] ? ' selected' : '') + '>' + esc(x[1]) + '</option>'; }).join('') + '</select>') + '</label>'; }).join('');
+  var tot = R.total && R.rows.length ? '<tr class="tot"><td>' + (R.cols[0].kind === 'num' ? '' : 'Total') + '</td>' + R.cols.slice(1).map(function(c){ return '<td class="' + (c.kind === 'money' || c.kind === 'num' ? 'num' : '') + '">' + (R.total.indexOf(c.k) >= 0 ? esc((c.kind === 'money' ? inr : num)(R.rows.reduce(function(s, r){ return s + (+r[c.k] || 0); }, 0))) : '') + '</td>'; }).join('') + '</tr>' : '';
+  out.innerHTML = '<section class="card"><div class="row"><div class="grow"><h2>' + esc(rp.title) + (R.crumb != null ? ' › ' + esc(R.crumb) : '') + '</h2><div class="sub">' + esc(R.summary || rp.sub) + '</div></div>'
+    + (R.crumb != null ? '<button type="button" id="btnUp">Back to the groups</button>' : '') + '<button type="button" id="btnCsv">Download CSV</button><button type="button" id="btnHome">All reports</button></div>'
+    + (ctl && R.crumb == null ? '<div class="row" style="margin-top:10px">' + ctl + '</div>' : '') + '</section>'
+    + '<section class="card">' + (R.rows.length ? '<div class="scroll"><table><thead><tr>' + R.cols.map(function(c){ return '<th class="' + (c.kind === 'money' || c.kind === 'num' ? 'num' : '') + '">' + esc(c.label) + '</th>'; }).join('') + '</tr></thead><tbody>'
+      + R.rows.slice(0, LIMIT).map(function(r){ return '<tr>' + R.cols.map(function(c){ return '<td class="' + (c.kind === 'money' || c.kind === 'num' ? 'num' : '') + '">' + cellHtml(c, r) + '</td>'; }).join('') + '</tr>'; }).join('') + tot + '</tbody></table></div>'
+      + (R.rows.length > LIMIT ? '<p class="note">Showing the first ' + LIMIT + ' of ' + R.rows.length + ' rows. The total and the CSV cover all of them.</p>' : '') : '<p class="note" style="margin:0">Nothing to show.</p>') + '</section>'
+    + (R.note ? '<p class="note">' + esc(R.note) + '</p>' : '');
+  out.scrollTop = 0; P.wide(true); wide = true; var bw = document.getElementById('btnWide'); bw.textContent = 'Narrower'; bw.setAttribute('aria-pressed', 'true');
+  footData();
+}
+function footData(){ var meta = (g('X') || {}).builtAt; document.getElementById('foot').textContent = 'Read-only. ERP data as of ' + (fmtD(meta) || 'the last upload') + '; work saved in Order Bridge is live.'; }
+function download(name, text){ var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + text], { type:'text/csv;charset=utf-8' })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 500); }
+
 // ------------------------------------------------------------------ page
-var cur = null, recent = [];
+var cur = null, recent = [], wide = false;
 function home(msg){
   cur = null;
   out.innerHTML = (msg ? '<div class="card"><p class="' + (msg.err ? 'err' : 'note') + '" style="margin:0">' + esc(msg.text) + '</p></div>' : '')
     + '<div class="card"><h2>Find an order</h2><p class="note" style="margin:6px 0 0">Type a sales order or PO number (the last few digits are enough), a job card number, or part of a customer name. You get the order on one page: POs, dates, job card stage, fabric, packages, dispatch and history.</p></div>'
+    + reportList()
     + (recent.length ? '<div class="card"><h3>Looked at in this session</h3><ul class="plain">' + recent.map(function(r){ return '<li><button class="link" type="button" data-' + (r.so ? 'so' : 'po') + '="' + esc(r.so || r.po) + '">' + esc((r.so ? 'SO ' : 'PO ') + (r.so || r.po)) + '</button> <span class="sub">' + esc(r.sub) + '</span></li>'; }).join('') + '</ul></div>' : '');
+}
+function reportList(){
+  var av = REPORTS.filter(function(r){ try { return r.can(); } catch(e){ return false; } }); if (!av.length) return '';
+  return '<div class="card"><h3>Reports</h3><ul class="plain">' + av.map(function(r){ return '<li><button class="link" type="button" data-report="' + r.id + '">' + esc(r.title) + '</button> <span class="pill">' + esc(r.team) + '</span><div class="sub">' + esc(r.sub) + '</div></li>'; }).join('') + '</ul></div>';
 }
 function show(ref){
   var C = ref.so ? buildSo(ref.so) : buildPo(ref.po);
   if (!C) return home({ err:true, text:'Nothing found for ' + (ref.so || ref.po) + '.' });
-  cur = C; out.innerHTML = renderCard(C); out.scrollTop = 0;
+  cur = C; curRep = null; curData = null; out.innerHTML = renderCard(C); out.scrollTop = 0;
   var key = ref.so || ref.po; recent = recent.filter(function(r){ return (r.so || r.po) !== key; });
   recent.unshift({ so:ref.so, po:ref.po, sub:ref.so ? C.head.customer : C.head.supplier }); recent = recent.slice(0, 8);
-  var meta = (g('X') || {}).builtAt; document.getElementById('foot').textContent = 'Read-only. ERP data as of ' + (fmtD(meta) || 'the last upload') + '; work saved in Order Bridge is live.';
+  footData();
 }
 function run(q){
   if (!P.can()) return home({ err:true, text:'The Assistant is not switched on for your team.' });
@@ -295,16 +467,21 @@ out.addEventListener('click', function(e){
   var t = e.target.closest('button'); if (!t) return;
   if (t.dataset.so){ qEl.value = t.dataset.so; return show({ so:t.dataset.so }); }
   if (t.dataset.po){ qEl.value = t.dataset.po; return show({ po:t.dataset.po }); }
+  if (t.dataset.report) return showReport(t.dataset.report, {});
+  if (t.dataset.drill != null && curRep) return showReport(curRep.id, Object.assign({}, curRep.opts, { drill:t.dataset.drill }));
+  if (t.id === 'btnUp' && curRep){ var o2 = Object.assign({}, curRep.opts); delete o2.drill; return showReport(curRep.id, o2); }
+  if (t.id === 'btnHome') return home();
+  if (t.id === 'btnCsv' && curRep && curData) return download('order-bridge-' + curRep.id + (curData.crumb != null ? '-' + String(curData.crumb).replace(/[^A-Za-z0-9]+/g, '-').slice(0, 30) : '') + '-' + today() + '.csv', csvOf(curData));
   if (t.dataset.line){ P.nav({ module:'confirmations', openOrderId:t.dataset.line }); return; }
   if (t.id === 'btnCopy' && cur){ var txt = textOf(cur), done = function(){ t.textContent = 'Copied'; setTimeout(function(){ t.textContent = 'Copy as text'; }, 1500); };
     if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, function(){ fallbackCopy(txt); done(); }); else { fallbackCopy(txt); done(); } }
 });
 function fallbackCopy(txt){ var ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); } catch(e){} ta.remove(); }
-var wide = false;
+out.addEventListener('change', function(e){ var c = e.target.dataset && e.target.dataset.ctl; if (!c || !curRep) return; var o = Object.assign({}, curRep.opts); o[c] = e.target.value; delete o.drill; showReport(curRep.id, o); });
 document.getElementById('btnWide').addEventListener('click', function(){ wide = !wide; P.wide(wide); this.textContent = wide ? 'Narrower' : 'Wider'; this.setAttribute('aria-pressed', wide ? 'true' : 'false'); });
 document.getElementById('btnClose').addEventListener('click', function(){ P.close(); });
 document.addEventListener('keydown', function(e){ if (e.key === 'Escape') P.close(); });
 P.onOpen = function(q){ if (q){ qEl.value = q; run(q); } else qEl.focus(); };
-window.__asst = { find:find, buildSo:buildSo, buildPo:buildPo, textOf:textOf };   // for tests
+window.__asst = { find:find, buildSo:buildSo, buildPo:buildPo, textOf:textOf, REPORTS:REPORTS, csvOf:csvOf };   // for tests
 if (P.pending){ var q0 = P.pending; P.pending = null; qEl.value = q0; run(q0); } else { home(); qEl.focus(); }
 })();
