@@ -4,7 +4,7 @@
 //   cfg_asst            -> { providers:{ gemini:{key,models[],on}, groq:{...}, custom:{key,url,models[],on} }, order:[...], perUser, perDay }
 //   asst_cool           -> { "<provider>|<model>": { until, why } }
 //   asst_use_<yyyymmdd> -> { models:{ id:{ok,fail} }, users:{ uid:n }, total }   (IST day)
-//   asst_log            -> last 100 questions [{ at, by, role, q, did, provider, model, ok, ms, err }]
+//   asst_log            -> last 100 questions [{ at, by, role, q, did, provider, model, ok, ms, err, detail }]
 // The page sends prompts in which customer, vendor and staff names, amounts and phone numbers are already
 // replaced by placeholders; the question kept in the log is the user's own wording, on our own storage.
 import { getJSON, putJSON } from './kv.js';
@@ -74,58 +74,72 @@ function nextReset(p, now) {
   return r.getTime();
 }
 function restFor(p, http, msg, now) {
-  const m = String(msg || '').toLowerCase();
+  const m = String(msg || '').toLowerCase(), says = re => re.test(m);
   if (http === 429) {
-    if (/per ?day|perday|daily|requests per day|quota.*day|day.*quota|exceeded your current quota|free.*(token|quota).*(used|exhaust)/.test(m)) return { until: nextReset(p, now), why: 'Daily free limit used up' };
+    if (says(/per ?day|perday|daily|requests per day|quota.*day|day.*quota|exceeded your current quota|free.*(token|quota).*(used|exhaust)/)) return { until: nextReset(p, now), why: 'Daily free limit used up' };
     return { until: now + 65e3, why: 'Per-minute limit, resting a minute' };
   }
-  if (http === 401 || http === 403 || /api key not valid|invalid api key|api_key_invalid|unauthori[sz]ed/.test(m)) return { until: now + 30 * 60e3, why: 'Key refused (check the key)', all: true };
-  if (http === 402) return { until: now + 6 * 3600e3, why: 'Free allowance used up', all: true };
-  if (http === 404 || (http === 400 && /model|not found|not supported|does not exist|invalid model/.test(m))) return { until: now + 6 * 3600e3, why: 'Model not available on this key' };
-  if (http === 503 || http === 504) return { until: now + 10 * 60e3, why: http === 503 ? 'Busy, resting 10 minutes' : 'Too slow (timed out), resting 10 minutes' };
-  if (http >= 500) return { until: now + 2 * 60e3, why: 'Service error, resting 2 minutes' };
-  return null;
+  if (http === 402 || says(/payment required|billing|insufficient.*(quota|balance|credit)/)) return { until: now + 6 * 3600e3, why: 'Free allowance used up', all: true };
+  if (says(/api[_ ]?key not valid|invalid api[_ ]?key|api_key_invalid|api key expired|unauthori[sz]ed|permission denied|caller does not have permission/)) return { until: now + 30 * 60e3, why: 'Key refused (check the key)', all: true };
+  if (says(/model/) && says(/not found|not supported|does not exist|invalid|unavailable|deprecat/)) return { until: now + 6 * 3600e3, why: 'Model not available on this key' };
+  if (says(/location|region|country|territory/) && says(/not supported|unsupported|not available|restricted/)) return { until: now + 5 * 60e3, why: 'Refused the place this request was handled from', soft: true };
+  if (http === 503) return { until: now + 10 * 60e3, why: 'Busy, resting 10 minutes' };
+  if (http === 504) return { until: now + 10 * 60e3, why: 'Too slow (timed out), resting 10 minutes' };
+  if (http >= 500) return { until: now + 2 * 60e3, why: 'Service error, resting 2 minutes', soft: true };
+  // Anything else -- a bare 403 "Forbidden", a bare 404, an HTML error page -- means the request never reached the
+  // service properly, usually the network or the place the edge node sits. That says nothing about the key or the
+  // model, so rest this one model briefly and never the whole service, and let the next call try it again.
+  return { until: now + 2 * 60e3, why: 'Could not reach the service (HTTP ' + http + ')', soft: true };
 }
+
 
 // One question. Tries models in order but stops starting new ones after ~8 s, so the function stays inside
 // EdgeOne's time limit; the page then asks again and the chain carries on from the models now resting.
 export async function ask({ sys, user, wantJson, who, log }) {
   const cfg = await loadCfg();
-  if (!anyReady(cfg)) return { ok: false, code: 'nokey', error: 'No AI key has been added yet. An admin can add one under Assistant › Settings.' };
+  if (!anyReady(cfg)) return { ok: false, code: 'nokey', error: 'No AI key has been added yet. An admin can add one under Assistant \u203a Settings.' };
   const day = 'asst_use_' + istDay();
   const use = (await getJSON(AUTH, day)) || {}; use.models = use.models || {}; use.users = use.users || {}; use.total = use.total || 0;
   if (use.total >= cfg.perDay) return { ok: false, code: 'daycap', error: `Today's limit of ${cfg.perDay} AI questions for the whole team is used up. Order pages and reports still work.` };
   if ((use.users[who.uid] || 0) >= cfg.perUser) return { ok: false, code: 'usercap', error: `You have used today's ${cfg.perUser} AI questions. Order pages and reports still work.` };
   const cool = (await getJSON(AUTH, 'asst_cool')) || {};
-  const start = Date.now(); let coolChanged = false, more = false, last = '', out = null, used = null;
-  outer: for (const p of cfg.order) {
-    const P = cfg.providers[p];
-    if (!P || !P.key || P.on === false || (p === 'custom' && !P.url)) continue;
-    if (cool[p + '|*'] && cool[p + '|*'].until > Date.now()) { last = last || cool[p + '|*'].why; continue; }
-    for (const model of P.models) {
-      const id = p + '|' + model;
-      if (cool[id] && cool[id].until > Date.now()) { last = last || cool[id].why; continue; }
-      if (Date.now() - start > 8000) { more = true; break outer; }
-      const t0 = Date.now(); let r;
-      try { r = await callProvider(p, P, model, sys, user, wantJson); } catch (e) { r = { ok: false, http: 503, msg: 'Could not reach the service' }; }
-      const m = use.models[id] = use.models[id] || { ok: 0, fail: 0 }; m[r.ok ? 'ok' : 'fail']++;
-      if (r.ok) { out = r.text; used = { provider: p, model, label: PROVIDERS[p].label, ms: Date.now() - t0 }; break outer; }
-      last = `${PROVIDERS[p].label}: ${r.msg}`;
-      const rest = restFor(p, r.http, r.msg, Date.now());
-      if (rest) { cool[rest.all ? p + '|*' : id] = { until: rest.until, why: rest.why, at: Date.now() }; coolChanged = true; if (rest.all) break; }
+  const start = Date.now(), tried = []; let coolChanged = false, more = false, last = '', out = null, used = null;
+  const resting = (id, ignoreSoft) => { const c = cool[id]; if (!c || c.until <= Date.now()) return ''; if (ignoreSoft && c.soft) return ''; return c.why || 'resting'; };
+  async function pass(ignoreSoft) {
+    for (const p of cfg.order) {
+      const P = cfg.providers[p];
+      if (!P || !P.key || P.on === false || (p === 'custom' && !P.url)) continue;
+      const pr = resting(p + '|*', ignoreSoft); if (pr) { last = last || PROVIDERS[p].label + ': ' + pr; continue; }
+      for (const model of P.models) {
+        const id = p + '|' + model;
+        const mr = resting(id, ignoreSoft); if (mr) { last = last || PROVIDERS[p].label + ': ' + mr; continue; }
+        if (Date.now() - start > 8000) { more = true; return; }
+        const t0 = Date.now(); let r;
+        try { r = await callProvider(p, P, model, sys, user, wantJson); } catch (e) { r = { ok: false, http: 0, msg: 'Could not reach the service' }; }
+        const u = use.models[id] = use.models[id] || { ok: 0, fail: 0 }; u[r.ok ? 'ok' : 'fail']++;
+        if (r.ok) { out = r.text; used = { provider: p, model, label: PROVIDERS[p].label, ms: Date.now() - t0 }; return; }
+        tried.push(model + ' \u2192 HTTP ' + r.http + ': ' + String(r.msg).slice(0, 90));
+        last = `${PROVIDERS[p].label}: ${r.msg}`;
+        const rest = restFor(p, r.http, r.msg, Date.now());
+        if (rest) { cool[rest.all ? p + '|*' : id] = { until: rest.until, why: rest.why, soft: !!rest.soft, at: Date.now() }; coolChanged = true; if (rest.all) break; }
+      }
     }
   }
+  await pass(false);
+  // Every model was resting for a reason that may have been a one-off (network, a bare refusal, a server error):
+  // try the best one anyway, so one bad minute cannot keep the whole team waiting.
+  if (!out && !more && !tried.length) { last = ''; await pass(true); }
   if (out) { use.total++; use.users[who.uid] = (use.users[who.uid] || 0) + 1; }
   await putJSON(AUTH, day, use);
   if (coolChanged) await putJSON(AUTH, 'asst_cool', cool);
   if (log && (out || !more)) {
     const l = (await getJSON(AUTH, 'asst_log')) || [];
-    l.unshift({ at: new Date().toISOString(), by: who.name || who.email, role: who.role, q: String(log.q || '').slice(0, 300), did: String(log.did || '').slice(0, 120), provider: used ? used.provider : '', model: used ? used.model : '', ok: !!out, ms: Date.now() - start, err: out ? '' : String(last).slice(0, 160) });
+    l.unshift({ at: new Date().toISOString(), by: who.name || who.email, role: who.role, q: String(log.q || '').slice(0, 300), did: String(log.did || '').slice(0, 120), provider: used ? used.provider : '', model: used ? used.model : '', ok: !!out, ms: Date.now() - start, err: out ? '' : String(last).slice(0, 160), detail: out ? '' : tried.slice(0, 5).join(' \u00b7 ').slice(0, 400) });
     await putJSON(AUTH, 'asst_log', l.slice(0, LOG_KEEP));
   }
   if (out) return { ok: true, text: out, provider: used.provider, model: used.model, label: used.label };
   if (more) return { ok: false, code: 'again', error: 'Still trying other models' };
-  return { ok: false, code: 'resting', error: 'No AI model could answer just now' + (last ? ' (' + last + ')' : '') + '. Order pages and reports still work; try the question again in a few minutes.' };
+  return { ok: false, code: 'resting', error: 'No AI model could answer just now' + (last ? ' (' + last + ')' : '') + '. Order pages and reports still work; the AI usually works again within a few minutes, so try the question again.' };
 }
 
 export async function testProvider(p) {
