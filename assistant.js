@@ -465,8 +465,241 @@ function paintReport(rp, id, opts, R, lead){
   out.scrollTop = 0; P.wide(true); wide = true; var bw = document.getElementById('btnWide'); bw.textContent = 'Narrower'; bw.setAttribute('aria-pressed', 'true');
   footData();
 }
+function paintQuery(R, how, lead){
+  cur = null; curRep = { id:R.table === 'find' ? 'search' : 'query', opts:{} }; curData = R;
+  var tot = R.total && R.total.length && R.rows.length ? '<tr class="tot"><td>Total</td>' + R.cols.slice(1).map(function(c){ return '<td class="' + (c.kind === 'money' || c.kind === 'num' ? 'num' : '') + '">' + (R.total.indexOf(c.k) >= 0 ? esc((c.kind === 'money' ? inr : num)(R.rows.reduce(function(s2, r){ return s2 + (+r[c.k] || 0); }, 0))) : '') + '</td>'; }).join('') + '</tr>' : '';
+  out.innerHTML = (lead || '') + '<section class="card"><div class="row"><div class="grow"><h2>' + esc(R.table === 'find' ? 'Search' : R.table === 'cards' ? 'Job cards' : 'Order lines') + '</h2><div class="sub">' + esc(R.summary || '') + '</div></div><button type="button" id="btnCsv">Download CSV</button><button type="button" id="btnHome">All reports</button></div>'
+    + (R.extra ? '<p class="sub" style="margin:8px 0 0">' + esc(R.extra) + '</p>' : '') + '</section>'
+    + '<section class="card">' + (R.rows.length ? '<div class="scroll"><table><thead><tr>' + R.cols.map(function(c){ return '<th class="' + (c.kind === 'money' || c.kind === 'num' ? 'num' : '') + '">' + esc(c.label) + '</th>'; }).join('') + '</tr></thead><tbody>'
+      + R.rows.slice(0, LIMIT).map(function(r){ return '<tr>' + R.cols.map(function(c){ return '<td class="' + (c.kind === 'money' || c.kind === 'num' ? 'num' : '') + '">' + cellHtml(c, r) + '</td>'; }).join('') + '</tr>'; }).join('') + tot + '</tbody></table></div>'
+      + (R.rows.length > LIMIT ? '<p class="note">Showing the first ' + LIMIT + ' of ' + R.rows.length + ' rows. The total and the CSV cover all of them.</p>' : '') : '<p class="note" style="margin:0">Nothing matched.</p>') + '</section>'
+    + (R.note ? '<p class="note">' + esc(R.note) + '</p>' : '');
+  out.scrollTop = 0; P.wide(true); wide = true; var bw = document.getElementById('btnWide'); bw.textContent = 'Narrower'; bw.setAttribute('aria-pressed', 'true'); footData();
+}
 function footData(){ var meta = (g('X') || {}).builtAt; document.getElementById('foot').textContent = 'Read-only. ERP data as of ' + (fmtD(meta) || 'the last upload') + '; work saved in Order Bridge is live.'; }
 function download(name, text){ var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + text], { type:'text/csv;charset=utf-8' })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 500); }
+
+// ------------------------------------------------------------------ one flat table of order lines (phase 3b, 13 Nov 2026)
+// Free-form questions are answered by querying this table, not by giving order data to the AI. The model writes a
+// filter/grouping/total spec against the columns below; runQuery does the work here, so every figure is the app's own.
+// A column the signed-in team cannot see is dropped from the table, from the spec the model is told about, and from
+// any result, so a question can never reach around the menu permissions.
+var QCOL = [
+  { k:'so', label:'SO', kind:'so' },
+  { k:'customer', label:'Customer', need:'confirmations', mask:'C' },
+  { k:'site', label:'Site', enu:true },
+  { k:'soDate', label:'SO date', kind:'date' },
+  { k:'rep', label:'Sales rep', mask:'P' },
+  { k:'vertical', label:'Vertical', enu:true },
+  { k:'po', label:'PO', kind:'po' },
+  { k:'poDate', label:'PO date', kind:'date' },
+  { k:'vendor', label:'Vendor', need:'confirmations', mask:'V' },
+  { k:'article', label:'Article' },
+  { k:'sku', label:'SKU code' },
+  { k:'qty', label:'Qty', kind:'num' },
+  { k:'uom', label:'Unit', enu:true },
+  { k:'stage', label:'Stage', vals:['draft', 'sent to supply', 'marked raised', 'PO raised'] },
+  { k:'madeBy', label:'Made by', vals:['MFPL factory', 'bought in'] },
+  { k:'clientDate', label:'Client date', kind:'date', need:'deadlines' },
+  { k:'factoryDate', label:'Factory date', kind:'date', need:'deadlines' },
+  { k:'dateStatus', label:'Factory date status', need:'deadlines', vals:['agreed', 'awaiting factory', 'not applicable'] },
+  { k:'negotiation', label:'Date change', need:'deadlines', vals:['open', 'settled', 'none'] },
+  { k:'daysLate', label:'Days later than the client date', kind:'num', need:'deadlines' },
+  { k:'readiness', label:'Readiness', need:'cat', vals:['C0', 'C1', 'C2', 'C3', 'C4', 'packed'] },
+  { k:'readinessWhy', label:'Readiness reason', need:'cat' },
+  { k:'next', label:'Next to act', need:'cat', vals:['Factory', 'Supply', 'Sales', ''] },
+  { k:'jobCard', label:'Job card', need:'jobcards' },
+  { k:'jobCardStage', label:'Job card stage', need:'jobcards' },
+  { k:'rawMaterial', label:'Raw material', need:'jobcards', vals:['confirmed', 'not confirmed', 'no job card'] },
+  { k:'fabric', label:'Fabric', need:'fabric', vals:['received', 'in transit', 'tagged not sent', 'no tag', 'details missing', 'none needed'] },
+  { k:'fabricNames', label:'Fabric names', need:'fabric', text:true },
+  { k:'packagesTagged', label:'Packages tagged', kind:'num', need:'warehousetag' },
+  { k:'packagesSent', label:'Packages left the factory', kind:'num', need:'warehousetag' },
+  { k:'packagesAtWarehouse', label:'Packages at the warehouse', kind:'num', need:'warehousetag' },
+  { k:'booking', label:'Dispatch booking', need:'slots', vals:['none', 'requested', 'approved', 'in transit', 'delivered', 'installed', 'cancelled'] },
+  { k:'bookingDate', label:'Booking date', kind:'date', need:'slots' },
+  { k:'stockBlock', label:'Stock block', need:'stockblock', vals:['none', 'requested', 'approved', 'rejected', 'released'] },
+  { k:'revision', label:'SO revision', need:'sorevision', vals:['none', 'open', 'done'] },
+  { k:'soValue', label:'SO value before GST', kind:'money', need:'payables' },
+  { k:'soCollected', label:'SO collected before GST', kind:'money', need:'payables' },
+  { k:'soBalance', label:'SO balance with GST', kind:'money', need:'payables' },
+  { k:'notes', label:'Notes and remarks', text:true },
+];
+var CCOL = [
+  { k:'cardNo', label:'Job card' }, { k:'cardDate', label:'Card date', kind:'date' }, { k:'deadline', label:'Deadline on the card', kind:'date' },
+  { k:'po', label:'PO', kind:'po' }, { k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer', mask:'C' }, { k:'article', label:'Article' }, { k:'qty', label:'Qty', kind:'num' },
+  { k:'stage', label:'Stage reached' }, { k:'rawMaterial', label:'Raw material', vals:['confirmed', 'not confirmed'] }, { k:'linked', label:'Tied to a PO line', vals:['yes', 'no'] },
+  { k:'scans', label:'Times photographed', kind:'num' }, { k:'lastScan', label:'Last photographed', kind:'date' }, { k:'scannedBy', label:'Photographed by', mask:'P' },
+  { k:'remarks', label:'Remarks', text:true }, { k:'materials', label:'Materials used', text:true },
+];
+var TABLES = { lines:{ cols:QCOL, label:'one row per SKU line of an order', need:'confirmations' }, cards:{ cols:CCOL, label:'one row per job card', need:'jobcards' } };
+function colsFor(t){ return (TABLES[t] || TABLES.lines).cols.filter(function(c){ return !c.need || (c.need === 'cat' ? !!call('xCatOn') : can(c.need)); }); }
+function tableOk(t){ var T = TABLES[t]; return !!T && (!T.need || can(T.need)) && (t !== 'cards' || can('jobcards')); }
+
+var QC = { at:'', lines:null, cards:null };
+function fresh(){ var m = (g('X') || {}).builtAt || ''; if (QC.at !== m){ QC.at = m; QC.lines = null; QC.cards = null; } }
+function cardsByLine(){
+  var m = {}; (g('JOB_CARDS') || []).forEach(function(j){ if (!j.linkedPo) return; var k = j.linkedPo + '|' + (j.linkedArticleCode || ''); (m[k] = m[k] || []).push(j); (m[j.linkedPo] = m[j.linkedPo] || []).push(j); });
+  return m;
+}
+function jcStageOf(j){ var st = j.stages || [], done = -1; st.forEach(function(s, i){ if (s.endDateISO || s.endDateRaw || s.supervisorSigned) done = i; }); return done < 0 ? 'Not started' : done === st.length - 1 ? 'Packing done' : (st[done].label || '') + ' done'; }
+function rmOf(j){ return j && j.rmBlocked && j.rmBlocked.on ? 'confirmed' : 'not confirmed'; }
+function lineRows(){
+  fresh(); if (QC.lines) return QC.lines;
+  var O = g('ORDERS') || [], D = g('DPI_BY_SO') || {}, idx = call('xCatOn') ? call('xCatIndex') : null, buf = +g('DL_BUF') || 5;
+  var fabBy = {}, wtBy = {}, sbBy = {}, srBy = {}, bkBy = {}, jcBy = cardsByLine();
+  (g('FABRIC_ENTRIES') || []).forEach(function(e){ if (e.po) (fabBy[e.po] = fabBy[e.po] || []).push(e); });
+  (g('WAREHOUSE_TAGS') || []).forEach(function(t){ var k = t.so + '|' + t.sku; (wtBy[k] = wtBy[k] || []).push(t); });
+  (g('STOCK_BLOCK_REQUESTS') || []).forEach(function(r){ var k = r.so + '|' + (r.article || r.sku); (sbBy[k] = sbBy[k] || []).push(r); });
+  (g('SO_REVISION_REQUESTS') || []).forEach(function(r){ (srBy[r.so] = srBy[r.so] || []).push(r); (r.newSos || []).forEach(function(n){ (srBy[n.so] = srBy[n.so] || []).push(r); }); });
+  (g('SLOT_BOOKINGS') || []).forEach(function(bk){ if (bk.type !== 'installation') (bkBy[bk.so] = bkBy[bk.so] || []).push(bk); });
+  var ST = { draft:'draft', submitted:'sent to supply', po_raised:'marked raised', po_confirmed:'PO raised' };
+  var FST = { received:'received', in_transit:'in transit', awaiting_dispatch:'tagged not sent', no_tag:'no tag' };
+  var rows = O.map(function(o){
+    var h = D[o.so] || {}, fac = !!call('factoryLine', o), r = idx && idx.byLine ? idx.byLine.get(o.id) : null;
+    var f = call('effF', o), fv = f ? call('viewF', f) : '', cv = o.committedDeadline ? call('viewC', o.committedDeadline) : '';
+    var row = { _id:o.id, so:o.so, customer:h.customer || o.customer || '', site:h.city || '', soDate:h.date || o.soDate || '', rep:h.rep || '', vertical:h.vertical || o.vertical || '',
+      po:o.po || '', poDate:o.po ? (call('poDateOf', o) || '') : '', vendor:o.supplier || '', article:o.article || '', sku:o.sku || '', qty:+(o.poQty || o.qty) || 0, uom:o.uom || '',
+      stage:ST[o.lifecycle] || o.lifecycle || '', madeBy:fac ? 'MFPL factory' : 'bought in',
+      clientDate:cv, factoryDate:fv, dateStatus:!fac ? 'not applicable' : fv ? 'agreed' : 'awaiting factory',
+      negotiation:(o.deadlineNeg && o.deadlineNeg.status) ? 'open' : ((o.deadlineNegHistory || []).length || (o.deadlineHistory || []).length) ? 'settled' : 'none',
+      daysLate:fv && cv && fv > cv ? Math.round((Date.parse(fv) - Date.parse(cv)) / 864e5) : 0,
+      soValue:+h.value || 0, soCollected:+h.collectedExTax || 0, soBalance:Math.max(0, (+h.total || 0) - (+h.collected || 0)) };
+    if (r) { row.readiness = r.packed ? 'packed' : r.c; row.readinessWhy = r.packed ? 'packed' : (call('xCatReason', r) || ''); var ow = call('xCatOwners', r) || {}; row.next = r.packed ? '' : ((ow.list || [])[0] ? (({ factory:'Factory', supply:'Supply', sales:'Sales' })[(ow.list || [])[0]] || '') : ''); }
+    else { row.readiness = ''; row.readinessWhy = ''; row.next = ''; }
+    var cds = (o.po ? (jcBy[o.po + '|' + o.sku] || jcBy[o.po] || []) : []);
+    if (cds.length){ var pick = cds.slice().sort(function(a, b){ return (a.stages || []).filter(function(s){ return s.endDateISO || s.endDateRaw; }).length - (b.stages || []).filter(function(s){ return s.endDateISO || s.endDateRaw; }).length; })[0];
+      row.jobCard = pick.jobCardNumber || ''; row.jobCardStage = jcStageOf(pick); row.rawMaterial = rmOf(pick); }
+    else { row.jobCard = ''; row.jobCardStage = ''; row.rawMaterial = fac ? 'no job card' : ''; }
+    if (r && r.fab){ row.fabric = r.fab.note ? 'details missing' : !(r.fab.items || []).length ? 'none needed' : (r.fab.items.every(function(i){ return i.status === 'received'; }) ? 'received' : FST[(r.fab.items.filter(function(i){ return i.status !== 'received'; })[0] || {}).status] || '');
+      row.fabricNames = (r.fab.items || []).map(function(i){ return i.name || i.sku; }).join(', '); }
+    else { row.fabric = ''; row.fabricNames = ''; }
+    var wt = wtBy[o.so + '|' + o.sku] || []; row.packagesTagged = wt.length; row.packagesSent = wt.filter(function(t){ return (t.dispatches || []).length; }).length; row.packagesAtWarehouse = wt.filter(function(t){ return (t.receipts || []).length; }).length;
+    var bk = (bkBy[o.so] || []).filter(function(x){ return (x.items || []).some(function(i){ return i.sku === o.sku; }) || !(x.items || []).length; });
+    var last = bk.sort(function(a, b){ return String(a.date).localeCompare(String(b.date)); })[bk.length - 1];
+    row.booking = last ? (/delivered|completed/.test(last.status) ? 'delivered' : /installed/.test(last.status) ? 'installed' : /cancel|declin|reject/.test(last.status) ? 'cancelled' : last.status === 'dispatched' ? 'in transit' : last.status === 'approved' ? 'approved' : 'requested') : 'none';
+    row.bookingDate = last ? last.date || '' : '';
+    var sb = (sbBy[o.so + '|' + (o.article || o.sku)] || [])[0]; row.stockBlock = sb ? sb.status : 'none';
+    var sr = (srBy[o.so] || [])[0]; row.revision = sr ? (/completed|rejected|withdrawn/.test(sr.status) ? 'done' : 'open') : 'none';
+    var notes = (o.clarifications || []).map(function(c){ return (c.text || '') + ' ' + (c.reply || ''); });
+    if (o.detail && o.detail.remarks) notes.push(o.detail.remarks);
+    (call('lineRisks', o) || []).forEach(function(x){ notes.push(x.text); });
+    if (cds.length && cds[0].factoryRemarks) notes.push(cds[0].factoryRemarks);
+    row.notes = notes.join(' · ').slice(0, 400);
+    return row;
+  });
+  return QC.lines = rows;
+}
+function cardRows(){
+  fresh(); if (QC.cards) return QC.cards;
+  var D = g('DPI_BY_SO') || {}, O = g('ORDERS') || [], soOf = {};
+  O.forEach(function(o){ if (o.po) soOf[o.po] = o.so; });
+  return QC.cards = (g('JOB_CARDS') || []).map(function(j){
+    var so = j.linkedPo ? soOf[j.linkedPo] || '' : '', sc = (j.scanHistory || []).slice().sort(function(a, b){ return String(a.scannedAt).localeCompare(String(b.scannedAt)); }), lastSc = sc[sc.length - 1] || {};
+    return { _id:j.id, cardNo:j.jobCardNumber || '', cardDate:j.cardDateISO || '', deadline:j.deadlineDate || '', po:j.linkedPo || '', so:so, customer:j.linkedCustomerName || j.clientName || (D[so] || {}).customer || '',
+      article:j.linkedArticleName || j.linkedArticleCode || j.productCode || '', qty:+j.qty || 0, stage:jcStageOf(j), rawMaterial:rmOf(j), linked:j.linkedPo ? 'yes' : 'no',
+      scans:+j.scanCount || (j.scanHistory || []).length, lastScan:(lastSc.scannedAt || '').slice(0, 10), scannedBy:lastSc.scannedBy || '',
+      remarks:[j.factoryRemarks, j.designTeamRemarks].filter(Boolean).join(' · ').slice(0, 400), materials:String(j.materials || '').slice(0, 400) };
+  });
+}
+function qRows(t){ return t === 'cards' ? cardRows() : lineRows(); }
+
+var OPS = { is:'is', not:'is not', contains:'contains', gt:'above', lt:'below', gte:'at least', lte:'at most', empty:'is blank', notempty:'is filled in' };
+function matches(c, row, w){
+  var v = row[c.k], val = String(w.value == null ? '' : w.value).trim(), op = w.op || 'contains';
+  if (op === 'empty') return v == null || v === '' || v === 0 && c.kind === 'num';
+  if (op === 'notempty') return !(v == null || v === '' || v === 0 && c.kind === 'num');
+  if (c.kind === 'num' || c.kind === 'money'){ var n = parseFloat(String(val).replace(/[^\d.-]/g, '')), x = +v || 0;
+    return op === 'is' ? x === n : op === 'not' ? x !== n : op === 'gt' ? x > n : op === 'lt' ? x < n : op === 'gte' ? x >= n : op === 'lte' ? x <= n : String(x).indexOf(val) >= 0; }
+  if (c.kind === 'date'){ var d = day(v), t = day(dateVal(val));
+    return op === 'is' ? d === t : op === 'not' ? d !== t : op === 'gt' ? d > t : op === 'lt' ? !!d && d < t : op === 'gte' ? d >= t : op === 'lte' ? !!d && d <= t : d.indexOf(t) >= 0; }
+  var s = String(v == null ? '' : v).toLowerCase(), q = val.toLowerCase();
+  if (op === 'is') return s === q; if (op === 'not') return s !== q;
+  if (op === 'in') return String(w.value || '').toLowerCase().split(/\s*[,|]\s*/).indexOf(s) >= 0;
+  return s.indexOf(q) >= 0;
+}
+function dateVal(v){
+  var s = String(v || '').trim(); if (/^\d{4}-\d\d-\d\d/.test(s)) return s.slice(0, 10);
+  var m = s.match(/^(\d{1,2}) ([A-Za-z]{3,})[a-z]* (\d{4})$/); if (m){ var mo = MON.indexOf(m[2].charAt(0).toUpperCase() + m[2].slice(1, 3).toLowerCase()); if (mo >= 0) return m[3] + '-' + ('0' + (mo + 1)).slice(-2) + '-' + ('0' + m[1]).slice(-2); }
+  var t = Date.parse(s); return isNaN(t) ? s : new Date(t).toISOString().slice(0, 10);
+}
+function runQuery(spec){
+  var t = spec.from === 'cards' ? 'cards' : 'lines';
+  if (!tableOk(t)) throw new Error('That needs a section your team does not have.');
+  var cols = colsFor(t), by = {}; cols.forEach(function(c){ by[c.k] = c; });
+  var rows = qRows(t), said = [], dropped = [];
+  (Array.isArray(spec.where) ? spec.where : []).slice(0, 8).forEach(function(w){
+    var c = by[w && w.col]; if (!c){ if (w && w.col) dropped.push(w.col); return; }
+    var val = unmask(String(w.value == null ? '' : w.value));
+    rows = rows.filter(function(r){ return matches(c, r, { col:c.k, op:w.op, value:val }); });
+    said.push(c.label + ' ' + (OPS[w.op] || 'contains') + (/^(empty|notempty)$/.test(w.op || '') ? '' : ' "' + val + '"'));
+  });
+  var gcols = (Array.isArray(spec.group) ? spec.group : spec.group ? [spec.group] : []).map(function(k){ return by[k]; }).filter(Boolean).slice(0, 3);
+  var aggs = (Array.isArray(spec.agg) ? spec.agg : []).map(function(a){ var c = by[a && a.col]; var fn = String(a && a.fn || '').toLowerCase();
+    return fn === 'count' ? { fn:'count', label:'Rows', k:'_n' } : c && /^(sum|avg|min|max)$/.test(fn) && (c.kind === 'num' || c.kind === 'money') ? { fn:fn, col:c, k:fn + '_' + c.k, label:({ sum:'Total ', avg:'Average ', min:'Lowest ', max:'Highest ' })[fn] + c.label } : null; }).filter(Boolean);
+  var out;
+  if (gcols.length){
+    if (!aggs.length) aggs = [{ fn:'count', label:'Rows', k:'_n' }];
+    var G = {};
+    rows.forEach(function(r){ var key = gcols.map(function(c){ return c.kind === 'date' ? fmtD(r[c.k]) : String(r[c.k] == null || r[c.k] === '' ? '(blank)' : r[c.k]); }).join(' · ');
+      var a = G[key] = G[key] || { _n:0, _vals:{} }; a._n++;
+      gcols.forEach(function(c, i){ a[c.k] = key.split(' · ')[i]; });
+      aggs.forEach(function(x){ if (x.col){ (a._vals[x.k] = a._vals[x.k] || []).push(+r[x.col.k] || 0); } }); });
+    var grows = Object.keys(G).map(function(key){ var a = G[key];
+      aggs.forEach(function(x){ if (!x.col) return; var v = a._vals[x.k] || [];
+        a[x.k] = x.fn === 'sum' ? v.reduce(function(s, n){ return s + n; }, 0) : x.fn === 'avg' ? (v.length ? v.reduce(function(s, n){ return s + n; }, 0) / v.length : 0) : x.fn === 'min' ? Math.min.apply(null, v.concat([Infinity])) : Math.max.apply(null, v.concat([-Infinity])); });
+      return a; });
+    var gc = gcols.map(function(c){ return { k:c.k, label:c.label, mask:c.mask, kind:c.kind === 'date' ? '' : c.kind === 'money' || c.kind === 'num' ? '' : c.kind }; });
+    out = { cols:gc.concat(aggs.map(function(x){ return { k:x.k, label:x.label, kind:x.col && x.col.kind === 'money' ? 'money' : 'num' }; })), rows:grows, total:aggs.filter(function(x){ return x.fn === 'count' || x.fn === 'sum'; }).map(function(x){ return x.k; }) };
+    said.push('grouped by ' + gcols.map(function(c){ return c.label; }).join(' and '));
+  } else {
+    var sel = (Array.isArray(spec.select) ? spec.select : []).map(function(k){ return by[k]; }).filter(Boolean);
+    if (!sel.length){ var want = ['so', 'customer', 'article', 'qty', 'po', 'stage', 'readiness', 'factoryDate', 'clientDate', 'fabric', 'jobCard', 'next', 'cardNo', 'cardDate', 'linked', 'rawMaterial', 'stage', 'scannedBy'];
+      sel = cols.filter(function(c){ return want.indexOf(c.k) >= 0; }).slice(0, 9); if (!sel.length) sel = cols.slice(0, 8); }
+    out = { cols:sel, rows:rows, total:sel.filter(function(c){ return c.kind === 'money'; }).map(function(c){ return c.k; }) };
+    if (aggs.length){ var tot = {}; aggs.forEach(function(x){ tot[x.k] = x.col ? rows.reduce(function(s, r){ return s + (+r[x.col.k] || 0); }, 0) : rows.length; });
+      out.extra = aggs.map(function(x){ return x.label + ': ' + (x.col && x.col.kind === 'money' ? inr(tot[x.k]) : num(tot[x.k])); }).join(' · '); }
+  }
+  var sc = by[spec.sort] || out.cols.filter(function(c){ return c.k === spec.sort; })[0];
+  if (sc){ var dir = spec.desc ? -1 : 1, nm = sc.kind === 'money' || sc.kind === 'num';
+    out.rows.sort(function(a, b){ var x = a[sc.k], y = b[sc.k]; return (nm ? (+x || 0) - (+y || 0) : String(x == null ? '' : x).localeCompare(String(y == null ? '' : y))) * dir; }); said.push('sorted by ' + sc.label + (spec.desc ? ', largest first' : '')); }
+  else if (out.total.length && out.rows.length && gcols.length) out.rows.sort(function(a, b){ return (+b[out.total[0]] || 0) - (+a[out.total[0]] || 0); });
+  var lim = Math.round(+spec.limit); if (lim > 0 && lim < out.rows.length){ out.rows = out.rows.slice(0, lim); said.push('first ' + lim); }
+  out.summary = (t === 'cards' ? 'Job cards' : 'Order lines') + (said.length ? ' — ' + said.join('; ') : '');
+  out.note = 'Worked out here from Order Bridge’s own records' + (dropped.length ? '. Ignored, because there is no such column: ' + dropped.join(', ') : '') + '.';
+  out.said = said; out.table = t;
+  return out;
+}
+function findText(q){
+  var words = String(q || '').toLowerCase().split(/\s+/).filter(function(w){ return w.length > 2; }).slice(0, 6);
+  if (!words.length) throw new Error('Type a word or two to search for.');
+  var hits = [], seen = 0;
+  [['lines', colsFor('lines')], ['cards', tableOk('cards') ? colsFor('cards') : []]].forEach(function(pair){
+    var tcols = pair[1].filter(function(c){ return c.text; }); if (!tcols.length) return;
+    qRows(pair[0]).forEach(function(r){ tcols.forEach(function(c){ var s = String(r[c.k] || ''); if (!s) return; var low = s.toLowerCase();
+      if (!words.every(function(w){ return low.indexOf(w) >= 0; })) return; seen++;
+      if (hits.length >= 200) return;
+      var at = low.indexOf(words[0]), from = Math.max(0, at - 60);
+      hits.push({ where:pair[0] === 'cards' ? 'Job card ' + r.cardNo : 'SO ' + r.so, so:r.so || '', po:r.po || '', article:r.article || '', field:c.label, snippet:(from ? '…' : '') + s.slice(from, from + 160) + (s.length > from + 160 ? '…' : '') }); }); });
+  });
+  return { cols:[{ k:'where', label:'Found in' }, { k:'so', label:'SO', kind:'so' }, { k:'po', label:'PO', kind:'po' }, { k:'article', label:'Article' }, { k:'field', label:'Field' }, { k:'snippet', label:'Text' }],
+    rows:hits, summary:seen + ' place' + (seen === 1 ? '' : 's') + ' mention ' + words.map(function(w){ return '"' + w + '"'; }).join(' and ') + (seen > hits.length ? ' (first ' + hits.length + ' shown)' : ''),
+    note:'Plain word search over remarks, clarifications, fabric names, materials used and delay reasons. No AI was used to find these.', table:'find' };
+}
+function schemaFor(){
+  var out = [];
+  ['lines', 'cards'].forEach(function(t){ if (!tableOk(t)) return;
+    var cols = colsFor(t), rows = null;
+    out.push('TABLE "' + t + '" (' + TABLES[t].label + '), columns:');
+    out.push(cols.map(function(c){
+      var kind = c.kind === 'money' ? 'amount' : c.kind === 'num' ? 'number' : c.kind === 'date' ? 'date YYYY-MM-DD' : 'text';
+      var vals = c.vals ? c.vals.map(function(v){ return v || '(blank)'; }) : null;
+      if (!vals && c.enu && !c.mask){ rows = rows || qRows(t); var s = {}; rows.forEach(function(r){ var v = r[c.k]; if (v) s[v] = 1; }); var ks = Object.keys(s); if (ks.length && ks.length <= 12) vals = ks; }   // never list the values of a column whose contents are hidden from the AI
+      return '  ' + c.k + ' (' + kind + (vals ? '; one of: ' + vals.join(', ') : '') + ')';
+    }).join('\n'));
+  });
+  return out.join('\n');
+}
 
 // ------------------------------------------------------------------ AI layer (phase 3, 13 Nov 2026)
 // The model never sees a real name, amount or phone number and never does arithmetic. The page (a) swaps
@@ -505,7 +738,7 @@ function askModel(sys, prompt, wantJson, logq, did, tries){
     var e = new Error((r && r.error) || 'The AI service did not answer.'); e.code = r && r.code; throw e; });
 }
 function parseJson(text){ var t = String(text || '').replace(/^```(?:json)?/i, '').replace(/```\s*$/, '').trim(), a = t.indexOf('{'), b = t.lastIndexOf('}'); if (a < 0 || b < a) throw new Error('The AI reply could not be read.'); return JSON.parse(t.slice(a, b + 1)); }
-function colMask(c, R){ return c.kind === 'so' || c.kind === 'po' ? tN : c.kind === 'money' ? tA : c.kind === 'date' ? tD : c.k === 'customer' || c.mask === 'C' ? tC : c.k === 'rep' || c.mask === 'P' ? tP : null; }
+function colMask(c){ return c.kind === 'so' || c.kind === 'po' ? tN : c.kind === 'money' ? tA : c.kind === 'date' ? tD : c.mask === 'C' || c.k === 'customer' ? tC : c.mask === 'V' || c.k === 'vendor' ? tV : c.mask === 'P' || c.k === 'rep' || c.k === 'scannedBy' ? tP : null; }
 function cellFact(c, row){ var v = row[c.k]; if (c.kind === 'pill') v = v ? v.t : ''; if (v == null || v === '') return '-'; var f = colMask(c); if (f) return f(v); if (c.kind === 'num') return num(v); return maskText(String(v)).slice(0, 140); }
 function plainVal(c, row){ var v = row[c.k]; if (c.kind === 'pill') v = v ? v.t : ''; return v == null ? '' : v; }
 function refine(R, act, title){   // filters, grouping and sorting asked for by the model, done here
@@ -571,8 +804,18 @@ function routeSys(){
     + '{"action":"order","ref":"<placeholder or words that identify one sales order, PO, job card or customer>"}  for anything about one order\n'
     + '{"action":"report","id":"<report id>","opts":{},"where":[{"col":"<column key>","op":"is|contains|gt|lt|gte|lte","value":"<text, number or placeholder>"}],"group":"<column key or empty>","sort":"<column key or empty>","desc":true,"limit":0}  for lists, counts, totals and planning\n'
     + (canEmail() ? '{"action":"email","ref":"<order placeholder>","about":"<what the email to the customer should say>","tone":"formal|friendly|firm"}  for an email or message draft\n' : '')
+    + '{"action":"query","from":"lines|cards","where":[{"col":"<column>","op":"is|not|contains|gt|lt|gte|lte|in|empty|notempty","value":"<text, number, YYYY-MM-DD or placeholder>"}],"group":["<column>"],"agg":[{"fn":"count|sum|avg|min|max","col":"<number or amount column>"}],"select":["<column>"],"sort":"<column>","desc":true,"limit":50}\n'
+    + '    for any other question about orders, lines or job cards: counts, lists, totals, "how many", "which", "by site", "pending". Leave out any part you do not need. Every figure is worked out here, not by you.\n'
+    + '{"action":"find","text":"<one to three words>"}  to search wording written by people: remarks, clarifications, materials used, fabric names, delay reasons.\n'
     + '{"action":"say","text":"<one or two sentences>"}  only to explain what you can do, or when nothing fits. Never state order facts, numbers or dates in "say".\n'
-    + 'Use only these reports and column keys:\n' + reportMenu() + '\n'
+    + 'Prefer a ready report when one matches the question; use "query" for everything else.\n'
+    + 'Reports:\n' + reportMenu() + '\n'
+    + schemaFor() + '\n'
+    + 'Query examples. "how many job cards issued and how many pending": {"action":"query","from":"lines","where":[{"col":"madeBy","op":"is","value":"MFPL factory"}],"group":["jobCard"]} is wrong (one row per card number); use {"action":"query","from":"lines","where":[{"col":"madeBy","op":"is","value":"MFPL factory"}],"group":["rawMaterial"],"agg":[{"fn":"count"}]} when the question is about raw material, or group by "jobCardStage" for the stage reached, or two queries with where jobCard empty / notempty for issued against not issued.\n'
+    + '"orders for a site with fabric pending": {"action":"query","from":"lines","where":[{"col":"site","op":"is","value":"BNG"},{"col":"fabric","op":"in","value":"in transit,tagged not sent,no tag,details missing"}]}\n'
+    + '"value by site": {"action":"query","from":"lines","group":["site"],"agg":[{"fn":"count"},{"fn":"sum","col":"soValue"}]}\n'
+    + '"lines whose factory date is end of November": {"action":"query","from":"lines","where":[{"col":"factoryDate","op":"gte","value":"2026-11-24"},{"col":"factoryDate","op":"lte","value":"2026-11-30"}]}. "Readiness date" means the factory date.\n'
+    + 'A sales order can have several lines, so a count of lines is not a count of orders: to count orders, group by "so" and say in the wording how many groups there are.\n'
     + 'Readiness codes: C0 no job card; C1 raw material confirmed and fabric in; C2 raw material confirmed, fabric pending; C3 raw material not confirmed, fabric pending; C4 raw material not confirmed, fabric in.\n'
     + 'Today is ' + today() + '. The user is in the ' + ((g('ROLES') || {})[(g('state') || {}).role] || {}).label + ' team.';
 }
@@ -596,6 +839,13 @@ function askAI(question){
       show(rf); var C = cur, body = out.innerHTML; out.insertAdjacentHTML('afterbegin', '<div class="card" id="wait"><p class="note" style="margin:0">Wording the answer…</p></div>');
       return askModel(WRITE_SYS, 'Question: ' + mq + '\n\nFacts:\n' + cardFacts(C, false), false, '', '').then(function(w){ if (tk !== seq || cur !== C) return; var warns = []; var txt = unmask(w.text, warns); if (leak(w.text)) warns.push('This answer contains a figure or date that did not come from Order Bridge. Check it against the order page below.');
         out.innerHTML = answerCard(txt, 'Looked up ' + (C.kind === 'so' ? 'SO ' + C.so : 'PO ' + C.po), w, warns) + body; }); }
+    if (act.action === 'query' || act.action === 'find'){
+      var R = act.action === 'find' ? findText(unmask(String(act.text || q))) : runQuery(act);
+      var how = act.action === 'find' ? 'Searched the wording people have written' : 'Queried ' + (R.table === 'cards' ? 'job cards' : 'order lines') + (R.said.length ? ', ' + R.said.join('; ') : '');
+      paintQuery(R, how, '<div class="card" id="wait"><p class="note" style="margin:0">Wording the answer…</p></div>'); var mine0 = curData;
+      return askModel(WRITE_SYS, 'Question: ' + mq + '\n\nFacts:\n' + tableFacts(R, how), false, '', how.slice(0, 110)).then(function(w){ if (tk !== seq || curData !== mine0) return; var warns = []; var txt = unmask(w.text, warns); if (leak(w.text)) warns.push('This answer contains a figure or date that did not come from Order Bridge. Check it against the table below.');
+        var el = document.getElementById('wait'); if (el) el.outerHTML = answerCard(txt, how, w, warns); });
+    }
     if (act.action === 'report'){ var rp = repById(act.id); if (!rp || !rp.can()) throw new Error('That needs a report your team does not have.');
       var o = {}; (rp.controls || []).forEach(function(c){ var v = act.opts && act.opts[c.id]; if (v == null) return; v = unmask(String(v)); if (c.options ? c.options.some(function(x){ return x[0] === v; }) : /^\d{4}-\d\d-\d\d$/.test(v)) o[c.id] = v; });
       return Promise.resolve(rp.build(o)).then(function(R){ if (tk !== seq) return; var R2 = refine(R, act, rp.title), how = 'Ran the report "' + rp.title + '"' + (R2.said.length ? ', ' + R2.said.join('; ') : '');
@@ -659,7 +909,7 @@ var cur = null, recent = [], wide = false;
 function home(msg){
   cur = null;
   out.innerHTML = (msg ? '<div class="card"><p class="' + (msg.err ? 'err' : 'note') + '" style="margin:0">' + esc(msg.text) + '</p></div>' : '')
-    + '<div class="card"><h2>' + (AI.ready ? 'Ask, or find an order' : 'Find an order') + '</h2><p class="note" style="margin:6px 0 0">Type a sales order or PO number (the last few digits are enough), a job card number, or part of a customer name. You get the order on one page: POs, dates, job card stage, fabric, packages, dispatch and history.</p>' + (AI.ready ? '<p class="note" style="margin:6px 0 0">Or ask in your own words, for example "which fabrics is supply still to send?" or "draft a delay email for SO 0128". Every figure comes from Order Bridge; the AI only chooses the look-up and words the answer.</p>' : '') + '</div>'
+    + '<div class="card"><h2>' + (AI.ready ? 'Ask, or find an order' : 'Find an order') + '</h2><p class="note" style="margin:6px 0 0">Type a sales order or PO number (the last few digits are enough), a job card number, or part of a customer name. You get the order on one page: POs, dates, job card stage, fabric, packages, dispatch and history.</p>' + (AI.ready ? '<p class="note" style="margin:6px 0 0">Or ask in your own words, for example "how many job cards are pending by site?", "which lines have fabric pending in BNG?" or "draft a delay email for SO 0128". Every figure is worked out from Order Bridge\u2019s own records; the AI only chooses what to look up and words the answer.</p>' : '') + '</div>'
     + reportList()
     + (recent.length ? '<div class="card"><h3>Looked at in this session</h3><ul class="plain">' + recent.map(function(r){ return '<li><button class="link" type="button" data-' + (r.so ? 'so' : 'po') + '="' + esc(r.so || r.po) + '">' + esc((r.so ? 'SO ' : 'PO ') + (r.so || r.po)) + '</button> <span class="sub">' + esc(r.sub) + '</span></li>'; }).join('') + '</ul></div>' : '');
 }
@@ -711,7 +961,7 @@ document.getElementById('btnClose').addEventListener('click', function(){ P.clos
 document.getElementById('btnSet').addEventListener('click', function(){ settings(); });
 document.addEventListener('keydown', function(e){ if (e.key === 'Escape') P.close(); });
 P.onOpen = function(q){ if (q){ qEl.value = q; run(q); } else qEl.focus(); };
-window.__asst = { find:find, buildSo:buildSo, buildPo:buildPo, textOf:textOf, REPORTS:REPORTS, csvOf:csvOf, maskText:maskText, unmask:unmask, leak:leak, cardFacts:cardFacts, tableFacts:tableFacts, refine:refine, MK:MK, AI:AI, routeSys:routeSys };   // for tests
+window.__asst = { runQuery:runQuery, findText:findText, lineRows:lineRows, cardRows:cardRows, colsFor:colsFor, schemaFor:schemaFor, find:find, buildSo:buildSo, buildPo:buildPo, textOf:textOf, REPORTS:REPORTS, csvOf:csvOf, maskText:maskText, unmask:unmask, leak:leak, cardFacts:cardFacts, tableFacts:tableFacts, refine:refine, MK:MK, AI:AI, routeSys:routeSys };   // for tests
 paintAsk(); var hadQ = !!P.pending;
 if (P.pending){ var q0 = P.pending; P.pending = null; qEl.value = q0; run(q0); } else { home(); qEl.focus(); }
 refreshAI().then(function(){ if (!hadQ && !cur && !curRep && out.querySelector('h2') && /Find an order/.test(out.querySelector('h2').textContent)) home(); });
