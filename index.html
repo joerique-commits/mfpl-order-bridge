@@ -16410,6 +16410,98 @@ renderAdminUploads = function(){
 };
 window.__xcorr = { list:CORR, locks:xLocks, reopenActive, revisable, isFurn, factoryLine, jobCardOf, can:k => dlCanStart(tFromKey(k)), addD, todayStr, inbox:() => inboxItems() };
 
+// ---------------------------------------------------------------- Assistant panel hook (JK, 13 Nov 2026)
+// The assistant itself lives in /assistant.html + /assistant.js (separate files). This block only:
+//   1. adds the "Assistant" menu item (User Permissions › Menu visibility decides which teams see it; off until an admin ticks it),
+//   2. opens those files in a side panel (a same-origin frame), and
+//   3. hands the frame read access to the lists and rule functions already in memory (window.__obAsst.get).
+// It never saves anything. If any of it fails, the rest of Order Bridge carries on.
+(function(){
+  if (location.protocol === 'file:') return;   // the offline training file has no assistant
+  try {
+    const G = {
+      // lists
+      X:() => X, ORDERS:() => ORDERS, JOB_CARDS:() => JOB_CARDS, FABRIC_ENTRIES:() => FABRIC_ENTRIES, FABRIC_CHALLANS:() => FABRIC_CHALLANS, FABRIC_RECEIPTS:() => FABRIC_RECEIPTS,
+      WAREHOUSE_TAGS:() => WAREHOUSE_TAGS, SLOT_BOOKINGS:() => SLOT_BOOKINGS, STOCK_BLOCK_REQUESTS:() => STOCK_BLOCK_REQUESTS, SO_REVISION_REQUESTS:() => SO_REVISION_REQUESTS,
+      DPI_BY_SO:() => DPI_BY_SO, LINES_BY_SO:() => LINES_BY_SO, POL_BY_PO:() => POL_BY_PO, SOL_BY_SO:() => SOL_BY_SO, SO_LINE_RES:() => SO_LINE_RES, PO_DL:() => PO_DL, CORR:() => CORR,
+      NAV:() => NAV, ROLES:() => ROLES, state:() => state, WH:() => WH, XCAT_INFO:() => XCAT_INFO, REASON_TYPES:() => REASON_TYPES, DL_BUF:() => DL_BUF, DL_WINDOW:() => DL_WINDOW,
+      // rules (the app's own functions, so the assistant can't drift from the screens)
+      canViewSection:() => canViewSection, canEditSection:() => canEditSection, todayStr:() => todayStr, addD:() => addD, entryStatus:() => entryStatus, rupees:() => rupees,
+      fabricDisplayName:() => fabricDisplayName, stoneDisplay:() => stoneDisplay, whLabel:() => whLabel, baseCode:() => baseCode, stockInHand:() => stockInHand,
+      soArticles:() => soArticles, poArticles:() => poArticles, poStatusOf:() => poStatusOf, soLineState:() => soLineState, needsPo:() => needsPo, productLines:() => productLines,
+      factoryLine:() => factoryLine, isFactoryLine:() => isFactoryLine, poDateOf:() => poDateOf, effF:() => effF, viewC:() => viewC, viewF:() => viewF,
+      dlStatusOf:() => dlStatusOf, dlDateOf:() => dlDateOf, dlInScope:() => dlInScope, dlAge:() => dlAge, riskGoLive:() => riskGoLive, riskIndex:() => riskIndex, lineRisks:() => lineRisks,
+      jobCardOf:() => jobCardOf, xJcCards:() => xJcCards, xJcInfo:() => xJcInfo, xCatOn:() => xCatOn, xCatIndex:() => xCatIndex, xCatReason:() => xCatReason, xCatOwners:() => xCatOwners,
+      ddList:() => ddList, ddFor:() => ddFor, ddBalance:() => ddBalance, ddComplete:() => ddComplete, ddMissing:() => ddMissing, clientDateFor:() => clientDateFor, heldQty:() => heldQty,
+      xSbLeft:() => xSbLeft, xSbDisp:() => xSbDisp, xProjCompute:() => xProjCompute, pfCompute:() => pfCompute, soCompletion:() => soCompletion, actEvents:() => actEvents,
+    };
+    const VER = '1';
+    const A = window.__obAsst = {
+      v:1, names:Object.keys(G), pending:null, onOpen:null,
+      get:n => { try { return G[n] ? G[n]() : undefined; } catch(e){ return undefined; } },
+      can:() => canViewSection('assistant', state.role),
+      user:() => ({ name:(state.currentUser || {}).name || '', role:state.role, ownRole:(state.currentUser || {}).role || '' }),
+      nav:patch => { Object.assign(state, patch || {}); renderAll(); window.scrollTo(0, 0); },
+      open:q => openPanel(q), close:() => closePanel(),
+      wide:on => { const el = document.getElementById('obAsstPanel'); if (el) el.classList.toggle('wide', !!on); },
+    };
+
+    ICONS.chat = '<path d="M5 5.5h14a1.5 1.5 0 0 1 1.5 1.5v8a1.5 1.5 0 0 1-1.5 1.5h-6.5L8 20v-3.5H5A1.5 1.5 0 0 1 3.500 15V7A1.5 1.5 0 0 1 5 5.500z" stroke-linejoin="round"/><path d="M8 9.500h8M8 12.500h5" stroke-linecap="round"/>';
+    const at = NAV.findIndex(n => n.id === 'adminuploads');
+    NAV.splice(at < 0 ? NAV.length : at, 0, { id:'assistant', label:'Assistant', icon:'chat' });
+
+    // Seen only by admins until an admin ticks a team under User Permissions › Menu visibility.
+    const _cv = canViewSection;
+    canViewSection = function(id, role){ if (id !== 'assistant') return _cv.apply(this, arguments); return role === 'admin' || !!((state.permissions.visibility.assistant || {})[role]); };
+    const _ce = canEditSection;
+    canEditSection = function(id){ return id === 'assistant' ? true : _ce.apply(this, arguments); };   // nothing to edit: no "view" tag on the menu item
+    const _pm = permMatrixRows;
+    permMatrixRows = function(){ return _pm.apply(this, arguments).filter(n => n.id !== 'assistant'); };
+
+    const st = document.createElement('style');
+    st.textContent = '#obAsstPanel{position:fixed;top:0;right:0;bottom:0;width:min(640px,100vw);z-index:900;background:var(--surface,#fff);border-left:1px solid var(--line,#d9d9d9);box-shadow:-8px 0 28px rgba(0,0,0,.16);display:none}'
+      + '#obAsstPanel.wide{width:min(1180px,100vw)}#obAsstPanel iframe{width:100%;height:100%;border:0;display:block}'
+      + '.ob-asst-open{display:flex;justify-content:flex-end;margin:0 0 10px}';
+    document.head.appendChild(st);
+
+    function openPanel(q){
+      if (!A.can()) return;
+      let el = document.getElementById('obAsstPanel');
+      A.pending = q || null;
+      if (!el){
+        el = document.createElement('div'); el.id = 'obAsstPanel';
+        const f = document.createElement('iframe'); f.title = 'Order Bridge Assistant'; f.src = 'assistant.html?v=' + VER;
+        el.appendChild(f); document.body.appendChild(el);
+      } else if (A.onOpen){ try { A.onOpen(A.pending); A.pending = null; } catch(e){ console.error('assistant', e); } }
+      el.style.display = 'block';
+    }
+    function closePanel(){ const el = document.getElementById('obAsstPanel'); if (el) el.style.display = 'none'; }
+
+    const _go = goTo;
+    goTo = function(id){ if (id === 'assistant') return openPanel(); return _go.apply(this, arguments); };
+
+    // "Open in Assistant" on a SKU line's page; the panel goes away when the signed-in team can no longer see it.
+    const _ra = renderAll;
+    renderAll = function(){
+      const r = _ra.apply(this, arguments);
+      try {
+        const el = document.getElementById('obAsstPanel');
+        if (el && (!state.currentUser || !A.can())) el.remove();
+        if (state.currentUser && A.can() && state.module === 'confirmations' && state.openOrderId){
+          const o = ORDERS.find(x => x.id === state.openOrderId), c = document.getElementById('content');
+          if (o && o.so && c && !c.querySelector('.ob-asst-open')){
+            const d = document.createElement('div'); d.className = 'ob-asst-open';
+            const b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-sm'; b.textContent = 'Open this order in Assistant';
+            b.addEventListener('click', () => openPanel(o.so));
+            d.appendChild(b); c.insertBefore(d, c.firstChild);
+          }
+        }
+      } catch(e){ console.error('assistant', e); }
+      return r;
+    };
+  } catch(e){ console.error('assistant hook', e); }
+})();
+
 if (!routePublic() && state.currentUser) renderAll();
 })();
 
