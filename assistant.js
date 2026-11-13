@@ -328,12 +328,12 @@ var REPORTS = [
       var t = today(), w0 = monday(t), buf = +g('DL_BUF') || 5;
       var rows = openRows().map(function(r){ var o = r.o, b = lineBase(r), f = call('effF', o), d, basis;
         if (f){ d = f; basis = 'Factory date'; } else if (o.committedDeadline){ d = addD(o.committedDeadline, -buf); basis = 'Client date − ' + buf + ' days'; } else { d = b.poDate || ''; basis = b.poDate ? 'PO date' : 'No date'; }
-        var wk = d ? monday(d) : ''; b.wk = !d ? 'No date' : wk < w0 ? 'Before this week' : 'Week of ' + fmtD(wk); b._wk = !d ? '9999' : wk < w0 ? '0000' : wk; b.d = d; b.basis = basis; b.c = r.c; b.cat = { t:r.c, cls:catCls(r.c) }; b.jc = (call('xJcInfo', o) || {}).lab || 'No job card'; b.why = call('xCatReason', r) || ''; return b; });
+        var wk = d ? monday(d) : '', agreed = basis !== 'PO date' && !!d; b.wk = !d ? 'No date' : !agreed ? 'No date agreed yet' : wk < w0 ? 'Before this week' : 'Week of ' + fmtD(wk); b._wk = !d ? '9999' : !agreed ? '9998' : wk < w0 ? '0000' : wk; b.d = d; b.basis = basis; b.c = r.c; b.cat = { t:r.c, cls:catCls(r.c) }; b.jc = (call('xJcInfo', o) || {}).lab || 'No job card'; b.why = call('xCatReason', r) || ''; return b; });
       rows.sort(function(a, b){ return a._wk.localeCompare(b._wk) || CORD.indexOf(a.c) - CORD.indexOf(b.c) || String(a.d).localeCompare(String(b.d)) || a.so.localeCompare(b.so); });
       var n = { f:0, c:0, p:0 }; rows.forEach(function(x){ if (x.basis === 'Factory date') n.f++; else if (/^Client/.test(x.basis)) n.c++; else n.p++; });
       return { cols:[{ k:'wk', label:'Week' }, { k:'d', label:'Date', kind:'date' }, { k:'basis', label:'Sorted by' }, { k:'cat', label:'Readiness', kind:'pill' }, { k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'article', label:'Article' }, { k:'qty', label:'Qty', kind:'num' }, { k:'po', label:'PO', kind:'po' }, { k:'jc', label:'Job card' }, { k:'why', label:'Why' }], rows:rows,
         summary:rows.length + ' open factory lines: ' + n.f + ' sorted by factory date, ' + n.c + ' by client date − ' + buf + ' days, ' + n.p + ' by PO date',
-        note:'A line is placed by its agreed factory date. Where there is none yet, by the client date less ' + buf + ' days, and failing that by its PO date. Packed lines are left out.' };
+        note:'A line is placed in the week of its agreed factory date. Where there is none yet, the client date less ' + buf + ' days is used. Lines with neither are listed last under "No date agreed yet", by readiness and then oldest PO first. Packed lines are left out.' };
     } },
   { id:'rm', team:'Factory', title:'Raw material pending', sub:'Open factory lines whose job card does not confirm raw material (C3, C4).',
     can:function(){ return !!call('xCatOn') && can('jobcards'); },
