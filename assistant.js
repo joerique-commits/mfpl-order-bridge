@@ -906,6 +906,22 @@ function isQuestion(q){ return /\?/.test(q) || q.trim().split(/\s+/).length >= 4
 
 // ------------------------------------------------------------------ page
 var cur = null, recent = [], wide = false;
+// Back: every view is remembered as it looked, so returning to a list of results never runs the question again.
+var HIST = [];
+function paintBack(){ var b = document.getElementById('btnBack'); if (b) b.style.display = HIST.length ? '' : 'none'; }
+function pushHist(){
+  var html = out.innerHTML; if (!html.trim()) return;
+  var w = document.createElement('div'); w.innerHTML = html; var pend = w.querySelector('#wait'); if (pend) pend.remove();   // never bring back a half-finished answer
+  HIST.push({ html:w.innerHTML, cur:cur, curRep:curRep, curData:curData, q:qEl.value, scroll:out.scrollTop });
+  if (HIST.length > 12) HIST.shift();
+  paintBack();
+}
+function back(){
+  var h = HIST.pop(); if (!h) return;
+  seq++;   // drop anything still being worded for the view we are leaving
+  out.innerHTML = h.html; cur = h.cur; curRep = h.curRep; curData = h.curData; qEl.value = h.q; out.scrollTop = h.scroll;
+  paintBack(); footData();
+}
 function home(msg){
   cur = null;
   out.innerHTML = (msg ? '<div class="card"><p class="' + (msg.err ? 'err' : 'note') + '" style="margin:0">' + esc(msg.text) + '</p></div>' : '')
@@ -936,9 +952,10 @@ function run(q){
   cur = null;
   out.innerHTML = '<div class="card"><h3>' + r.hits.length + ' matches for "' + esc(r.q) + '"' + (r.hits.length > 40 ? ' (first 40 shown)' : '') + '</h3><ul class="plain">' + r.hits.slice(0, 40).map(function(x){ return '<li><button class="link" type="button" data-' + (x.so ? 'so' : 'po') + '="' + esc(x.so || x.po) + '">' + esc(x.label) + '</button> <span class="sub">' + esc(x.sub) + '</span></li>'; }).join('') + '</ul></div>';
 }
-document.getElementById('f').addEventListener('submit', function(e){ e.preventDefault(); run(qEl.value); });
+document.getElementById('f').addEventListener('submit', function(e){ e.preventDefault(); pushHist(); run(qEl.value); });
 out.addEventListener('click', function(e){
   var t = e.target.closest('button'); if (!t) return;
+  if (t.dataset.so || t.dataset.po || t.dataset.report || t.dataset.drill != null || t.id === 'btnHome' || t.id === 'btnUp') pushHist();
   if (t.dataset.so){ qEl.value = t.dataset.so; return show({ so:t.dataset.so }); }
   if (t.dataset.po){ qEl.value = t.dataset.po; return show({ po:t.dataset.po }); }
   if (t.id === 'mailGo'){ var ab = document.getElementById('mailAbout').value.trim(); if (!ab){ document.getElementById('mailAbout').focus(); return; } return draftEmail(ab, document.getElementById('mailTone').value); }
@@ -957,11 +974,12 @@ out.addEventListener('click', function(e){
 function fallbackCopy(txt){ var ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); } catch(e){} ta.remove(); }
 out.addEventListener('change', function(e){ var c = e.target.dataset && e.target.dataset.ctl; if (!c || !curRep) return; var o = Object.assign({}, curRep.opts); o[c] = e.target.value; delete o.drill; showReport(curRep.id, o); });
 document.getElementById('btnWide').addEventListener('click', function(){ wide = !wide; P.wide(wide); this.textContent = wide ? 'Narrower' : 'Wider'; this.setAttribute('aria-pressed', wide ? 'true' : 'false'); });
+document.getElementById('btnBack').addEventListener('click', back);
 document.getElementById('btnClose').addEventListener('click', function(){ P.close(); });
 document.getElementById('btnSet').addEventListener('click', function(){ settings(); });
 document.addEventListener('keydown', function(e){ if (e.key === 'Escape') P.close(); });
-P.onOpen = function(q){ if (q){ qEl.value = q; run(q); } else qEl.focus(); };
-window.__asst = { runQuery:runQuery, findText:findText, lineRows:lineRows, cardRows:cardRows, colsFor:colsFor, schemaFor:schemaFor, find:find, buildSo:buildSo, buildPo:buildPo, textOf:textOf, REPORTS:REPORTS, csvOf:csvOf, maskText:maskText, unmask:unmask, leak:leak, cardFacts:cardFacts, tableFacts:tableFacts, refine:refine, MK:MK, AI:AI, routeSys:routeSys };   // for tests
+P.onOpen = function(q){ if (q){ pushHist(); qEl.value = q; run(q); } else qEl.focus(); };
+window.__asst = { HIST:function(){ return HIST; }, back:back, runQuery:runQuery, findText:findText, lineRows:lineRows, cardRows:cardRows, colsFor:colsFor, schemaFor:schemaFor, find:find, buildSo:buildSo, buildPo:buildPo, textOf:textOf, REPORTS:REPORTS, csvOf:csvOf, maskText:maskText, unmask:unmask, leak:leak, cardFacts:cardFacts, tableFacts:tableFacts, refine:refine, MK:MK, AI:AI, routeSys:routeSys };   // for tests
 paintAsk(); var hadQ = !!P.pending;
 if (P.pending){ var q0 = P.pending; P.pending = null; qEl.value = q0; run(q0); } else { home(); qEl.focus(); }
 refreshAI().then(function(){ if (!hadQ && !cur && !curRep && out.querySelector('h2') && /Find an order/.test(out.querySelector('h2').textContent)) home(); });
