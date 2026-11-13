@@ -25,7 +25,12 @@ export async function onRequestPost({ request }) {
   if (!(await allowed(auth.user))) return errorJson('The Assistant is not switched on for your team', 403);
   let b; try { b = await request.json(); } catch (e) { return errorJson('Request body must be valid JSON', 400); }
   const sys = String((b && b.sys) || ''), prompt = String((b && b.prompt) || '');
-  if (!prompt.trim() || prompt.length > 24000 || sys.length > 8000) return errorJson('Question missing or too long', 400);
+  // Generous caps. The instructions (sys) carry the list of reports and the column schema, which grows as columns are
+  // added, so this must stay well clear of it: it was 8,000 and the schema pushed the prompt past it, which failed
+  // every question until it was raised. t_query.js checks the real prompt still fits with room to spare.
+  if (!prompt.trim()) return errorJson('No question was sent', 400);
+  if (sys.length > 40000) return errorJson('The assistant\'s instructions are too long (' + sys.length + ' characters); tell an admin', 400);
+  if (prompt.length > 40000 || sys.length + prompt.length > 60000) return errorJson('Too much to send at once; narrow the question', 400);
   const r = await ask({ sys, user: prompt, wantJson: !!b.json, who: auth.user, log: b.q ? { q: b.q, did: b.did } : null });
   return json(r, 200);
 }
