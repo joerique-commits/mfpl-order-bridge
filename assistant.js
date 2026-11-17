@@ -292,6 +292,7 @@ function soStage(h, ctx){
 var STAGE_SORT = ['No PO yet', 'Part of the POs raised', 'In production · C0', 'In production · C3', 'In production · C4', 'In production · C2', 'In production · C1', 'POs raised', 'Packed, not dispatched', 'Dispatched', 'Delivered'];
 function stageRank(s){ for (var i = 0; i < STAGE_SORT.length; i++) if (s.indexOf(STAGE_SORT[i]) === 0) return i; return 50; }
 
+function openFactory(){ return lineRows().filter(function(r){ return r.madeBy === 'MFPL factory' && r.readiness && r.readiness !== 'packed'; }); }
 var REPORTS = [
   { id:'orders', team:'MIS', title:'Orders and values', sub:'Open sales orders by stage, vertical, site or sales rep, with value and collections before GST.',
     can:function(){ return can('payables') && can('confirmations'); },
@@ -410,6 +411,114 @@ var REPORTS = [
       var rows = Object.keys(G).map(function(k){ G[k].n = Object.keys(G[k].sos).length; return G[k]; }).sort(function(a, b){ return a._o.localeCompare(b._o); });
       return { cols:[{ k:'group', label:'Week', kind:'drill' }, { k:'n', label:'Sales orders', kind:'num' }, { k:'amount', label:'Flushout value (before GST)', kind:'money' }], rows:rows, total:['amount'],
         note:'Same figures as Payables & Flushout › Projection Analysis: value still to dispatch, dated by the dispatch booking, or the factory date plus 5 working days. A line with neither falls under "No date yet". Click a row for its sales orders.' };
+    } },
+  { id:'nodate', team:'Factory and Supply', title:'Waiting for a factory date', sub:'Open factory lines where no factory date has been agreed, oldest PO first.',
+    colsHint:'po (PO), poDate (PO date), waiting (Days since the PO), so (SO), customer (Customer), article (Article), qty (Qty), site (Site), clientDate (Client date), readiness (Readiness)',
+    can:function(){ return !!call('xCatOn') && can('deadlines'); },
+    build:function(){
+      var t = today(), rows = openFactory().filter(function(r){ return r.dateStatus === 'awaiting factory'; }).map(function(r){
+        return { po:r.po, poDate:r.poDate, waiting:r.poDate ? Math.round((Date.parse(t) - Date.parse(r.poDate)) / 864e5) : 0, so:r.so, customer:r.customer, article:r.article, qty:r.qty, site:r.site,
+          clientDate:r.clientDate, readiness:r.readiness ? { t:r.readiness, cls:catCls(r.readiness) } : null }; })
+        .sort(function(a, b){ return String(a.poDate || '9').localeCompare(String(b.poDate || '9')) || a.so.localeCompare(b.so); });
+      var po = {}; rows.forEach(function(r){ po[r.po] = 1; });
+      return { cols:[{ k:'waiting', label:'Days since the PO', kind:'num' }, { k:'poDate', label:'PO date', kind:'date' }, { k:'po', label:'PO', kind:'po' }, { k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'article', label:'Article' }, { k:'qty', label:'Qty', kind:'num' }, { k:'site', label:'Site' }, { k:'clientDate', label:'Client date', kind:'date' }, { k:'readiness', label:'Readiness', kind:'pill' }], rows:rows,
+        summary:rows.length + ' lines on ' + Object.keys(po).length + ' POs are waiting for the factory to agree a date',
+        note:'Until a date is agreed here, the weekly plan, the delay risk and the flushout forecast have nothing to work from. Packed lines are left out.' };
+    } },
+  { id:'nojc', team:'Factory', title:'No job card yet', sub:'Open factory lines with no job card at all (C0), oldest PO first.',
+    colsHint:'po (PO), poDate (PO date), waiting (Days since the PO), so (SO), customer (Customer), article (Article), qty (Qty), site (Site)',
+    can:function(){ return !!call('xCatOn') && can('jobcards'); },
+    build:function(){
+      var t = today(), rows = openFactory().filter(function(r){ return r.readiness === 'C0'; }).map(function(r){
+        return { po:r.po, poDate:r.poDate, waiting:r.poDate ? Math.round((Date.parse(t) - Date.parse(r.poDate)) / 864e5) : 0, so:r.so, customer:r.customer, article:r.article, qty:r.qty, site:r.site, vendor:r.vendor }; })
+        .sort(function(a, b){ return String(a.poDate || '9').localeCompare(String(b.poDate || '9')); });
+      var recent = rows.filter(function(r){ return r.waiting <= 90; }).length;
+      return { cols:[{ k:'waiting', label:'Days since the PO', kind:'num' }, { k:'poDate', label:'PO date', kind:'date' }, { k:'po', label:'PO', kind:'po' }, { k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'article', label:'Article' }, { k:'qty', label:'Qty', kind:'num' }, { k:'site', label:'Site' }], rows:rows,
+        summary:rows.length + ' lines have no job card; ' + recent + ' of them are on POs from the last 90 days',
+        note:'A line with no job card cannot be planned or tracked on the floor. Older lines may be finished work that was never carded, so treat the top of this list as the real queue.' };
+    } },
+  { id:'jcstage', team:'Factory', title:'Job cards by stage', sub:'Where every job card sits, and how long it has been there.',
+    colsHint:'stage (Stage reached), n (Cards), oldest (Oldest card), notLinked (Not tied to a PO line)',
+    can:function(){ return can('jobcards'); },
+    build:function(o){
+      var ORD = ['Not started', 'Pre Frame done', 'Post Frame done', 'Fabrication - QC done', 'Polishing - QC done', 'Upholstery - QC done', 'Factory - QC done', 'Packing done'];
+      var rank = function(s){ var i = ORD.indexOf(s); return i < 0 ? 50 : i; }, t = today();
+      var all = cardRows().map(function(c){ return Object.assign({}, c, { age:c.cardDate ? Math.round((Date.parse(t) - Date.parse(c.cardDate)) / 864e5) : 0, quiet:c.lastScan ? Math.round((Date.parse(t) - Date.parse(c.lastScan)) / 864e5) : 0 }); });
+      if (o.drill != null){
+        var rows2 = all.filter(function(c){ return c.stage === o.drill; }).sort(function(a, b){ return b.age - a.age; });
+        return { crumb:o.drill, cols:[{ k:'cardNo', label:'Job card' }, { k:'age', label:'Days since the card date', kind:'num' }, { k:'quiet', label:'Days since the last photo', kind:'num' }, { k:'po', label:'PO', kind:'po' }, { k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer', mask:'C' }, { k:'article', label:'Article' }, { k:'qty', label:'Qty', kind:'num' }, { k:'linked', label:'Tied to a PO line' }], rows:rows2 };
+      }
+      var G = {}; all.forEach(function(c){ var a = G[c.stage] = G[c.stage] || { stage:c.stage, _drill:c.stage, n:0, notLinked:0, oldest:'', quiet:0 };
+        a.n++; if (c.linked === 'no') a.notLinked++; if (!a.oldest || (c.cardDate && c.cardDate < a.oldest)) a.oldest = c.cardDate; a.quiet = Math.max(a.quiet, c.quiet); });
+      var rows = Object.keys(G).map(function(k){ return G[k]; }).sort(function(a, b){ return rank(a.stage) - rank(b.stage); });
+      var un = all.filter(function(c){ return c.linked === 'no'; }).length;
+      return { cols:[{ k:'stage', label:'Stage reached', kind:'drill' }, { k:'n', label:'Cards', kind:'num' }, { k:'notLinked', label:'Not tied to a PO line', kind:'num' }, { k:'oldest', label:'Oldest card', kind:'date' }, { k:'quiet', label:'Longest since a photo (days)', kind:'num' }], rows:rows, total:['n', 'notLinked'],
+        summary:all.length + ' job cards; ' + un + ' are not tied to any PO line, so they count for nothing in readiness',
+        note:'The stage is the last one with an end date or a supervisor signature on the card. Click a stage for its cards, oldest first.' };
+    } },
+  { id:'backlog', team:'Supply', title:'Open factory backlog by vendor', sub:'How old the open factory work is, by vendor.',
+    colsHint:'vendor (Vendor), n (Open lines), qty (Qty), oldest (Oldest PO), d90 (0-90 days), d180 (91-180 days), older (Over 180 days)',
+    can:function(){ return !!call('xCatOn') && can('confirmations'); },
+    build:function(o){
+      var t = today(), rows = openFactory().map(function(r){ return Object.assign({}, r, { age:r.poDate ? Math.round((Date.parse(t) - Date.parse(r.poDate)) / 864e5) : 0 }); });
+      if (o.drill != null){
+        var rs = rows.filter(function(r){ return (r.vendor || '(none)') === o.drill; }).sort(function(a, b){ return b.age - a.age; });
+        return { crumb:o.drill, cols:[{ k:'age', label:'Days since the PO', kind:'num' }, { k:'poDate', label:'PO date', kind:'date' }, { k:'po', label:'PO', kind:'po' }, { k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'article', label:'Article' }, { k:'qty', label:'Qty', kind:'num' }, { k:'readiness', label:'Readiness' }], rows:rs.map(function(r){ return Object.assign({}, r, { readiness:r.readiness }); }) };
+      }
+      var G = {}; rows.forEach(function(r){ var k = r.vendor || '(none)', a = G[k] = G[k] || { vendor:k, _drill:k, n:0, qty:0, oldest:'', d90:0, d180:0, older:0 };
+        a.n++; a.qty += r.qty; if (!a.oldest || (r.poDate && r.poDate < a.oldest)) a.oldest = r.poDate;
+        if (r.age <= 90) a.d90++; else if (r.age <= 180) a.d180++; else a.older++; });
+      var out = Object.keys(G).map(function(k){ return G[k]; }).sort(function(a, b){ return b.older - a.older || b.n - a.n; });
+      var tot = rows.filter(function(r){ return r.age > 180; }).length;
+      return { cols:[{ k:'vendor', label:'Vendor', kind:'drill' }, { k:'n', label:'Open lines', kind:'num' }, { k:'qty', label:'Qty', kind:'num' }, { k:'oldest', label:'Oldest PO', kind:'date' }, { k:'d90', label:'0-90 days', kind:'num' }, { k:'d180', label:'91-180 days', kind:'num' }, { k:'older', label:'Over 180 days', kind:'num' }], rows:out, total:['n', 'qty', 'd90', 'd180', 'older'],
+        summary:rows.length + ' open factory lines; ' + tot + ' sit on POs raised more than 180 days ago',
+        note:'Open means the line has a confirmed PO and is not packed. A long tail usually means work that was finished or dropped without being closed here, so this is a list to clean up as much as to chase. Click a vendor for its lines.' };
+    } },
+  { id:'fabmissing', team:'Sales', title:'Fabric not filled in', sub:'Lines on POs raised since go-live where the fabric has not been entered.',
+    colsHint:'po (PO), poDate (PO date), waiting (Days since the PO), so (SO), customer (Customer), rep (Sales rep), article (Article), qty (Qty)',
+    can:function(){ return !!call('xCatOn') && can('fabric'); },
+    build:function(){
+      var t = today(), rows = openFactory().filter(function(r){ return r.fabric === 'details missing'; }).map(function(r){
+        return { po:r.po, poDate:r.poDate, waiting:r.poDate ? Math.round((Date.parse(t) - Date.parse(r.poDate)) / 864e5) : 0, so:r.so, customer:r.customer, rep:r.rep, article:r.article, qty:r.qty, site:r.site, readiness:r.readiness ? { t:r.readiness, cls:catCls(r.readiness) } : null }; })
+        .sort(function(a, b){ return String(a.poDate || '9').localeCompare(String(b.poDate || '9')); });
+      return { cols:[{ k:'waiting', label:'Days since the PO', kind:'num' }, { k:'poDate', label:'PO date', kind:'date' }, { k:'po', label:'PO', kind:'po' }, { k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'rep', label:'Sales rep' }, { k:'article', label:'Article' }, { k:'qty', label:'Qty', kind:'num' }, { k:'readiness', label:'Readiness', kind:'pill' }], rows:rows,
+        summary:rows.length + ' lines are waiting for sales to enter the fabric',
+        note:'Only POs raised on or after 2 November 2026 count. A PO raised before go-live has its fabric in email, so Order Bridge treats it as needing none unless a fabric tag exists for it.' };
+    } },
+  { id:'stockcover', team:'Supply', title:'Open lines with stock in hand', sub:'Articles on open factory lines that already have stock somewhere.',
+    colsHint:'article (Article), sku (SKU code), lineQty (Qty on the line), stock (Stock in hand), so (SO), customer (Customer), po (PO)',
+    can:function(){ return !!call('xCatOn') && can('stockblock'); },
+    build:function(){
+      var byCode = {}; ((g('X') || {}).stock || []).forEach(function(s){ if (!(+s.qty > 0)) return; var a = byCode[s.code] = byCode[s.code] || { total:0, where:{} }; a.total += +s.qty || 0; a.where[s.wh] = (a.where[s.wh] || 0) + (+s.qty || 0); });
+      var rows = openFactory().map(function(r){ var st = byCode[r.sku]; if (!st) return null;
+        return { article:r.article, sku:r.sku, lineQty:r.qty, stock:st.total, where:Object.keys(st.where).map(function(w){ return w + ' ' + num(st.where[w]); }).join(', '), so:r.so, customer:r.customer, po:r.po, poDate:r.poDate, readiness:r.readiness }; }).filter(Boolean)
+        .sort(function(a, b){ return b.stock - a.stock || String(a.poDate).localeCompare(String(b.poDate)); });
+      var arts = {}; rows.forEach(function(r){ arts[r.sku] = 1; });
+      return { cols:[{ k:'article', label:'Article' }, { k:'sku', label:'SKU code' }, { k:'lineQty', label:'Qty on the line', kind:'num' }, { k:'stock', label:'Stock in hand', kind:'num' }, { k:'where', label:'Where' }, { k:'so', label:'SO', kind:'so' }, { k:'customer', label:'Customer' }, { k:'po', label:'PO', kind:'po' }, { k:'poDate', label:'PO date', kind:'date' }, { k:'readiness', label:'Readiness' }], rows:rows,
+        summary:rows.length + ' open lines cover ' + Object.keys(arts).length + ' articles that have stock somewhere',
+        note:'Stock in hand is the whole warehouse figure for that article code, not an amount set aside for this line, and several lines here may be eyeing the same pieces. Check the Stock Block Station before promising any of it.' };
+    } },
+  { id:'today', team:'Everyone', title:'What moved', sub:'How much happened today, yesterday and over the last weeks.',
+    colsHint:'what (What), d0 (Today), d1 (Yesterday), d7 (Last 7 days), d30 (Last 30 days)',
+    can:function(){ return can('confirmations'); },
+    build:function(){
+      var t = today(), y = addD(t, -1), w = addD(t, -6), m = addD(t, -29), rows = [];
+      var add = function(what, dates, note){ var d = dates.filter(Boolean).map(day);
+        rows.push({ what:what, d0:d.filter(function(x){ return x === t; }).length, d1:d.filter(function(x){ return x === y; }).length, d7:d.filter(function(x){ return x >= w; }).length, d30:d.filter(function(x){ return x >= m; }).length, note:note || '' }); };
+      var D = g('DPI_BY_SO') || {}, X = g('X') || {};
+      add('Sales orders dated', Object.keys(D).filter(function(so){ return !D[so].ic; }).map(function(so){ return D[so].date; }), 'from the ERP');
+      add('PO lines raised', (X.poLines || []).map(function(l){ return l.poDate; }), 'from the ERP');
+      add('PO requests sent to supply', (g('ORDERS') || []).filter(function(o){ return o.appNative && o.submittedAt; }).map(function(o){ return o.submittedAt; }), 'typed here');
+      if (can('jobcards')){ var J = g('JOB_CARDS') || [];
+        add('Job cards photographed', J.reduce(function(a, j){ return a.concat((j.scanHistory || []).map(function(s){ return s.scannedAt; })); }, []), 'typed here');
+        add('Job cards saved for the first time', J.map(function(j){ return j.createdAt; }), 'typed here'); }
+      if (can('fabric')) add('Fabric tags logged', (g('FABRIC_ENTRIES') || []).map(function(e){ return e.addedAt || e.received; }), 'typed here');
+      if (can('warehousetag')) add('Packages tagged', (g('WAREHOUSE_TAGS') || []).map(function(x){ return x.packedAt; }), 'typed here');
+      if (can('slots')) add('Dispatch slots booked', (g('SLOT_BOOKINGS') || []).map(function(b){ return b.bookedAt; }), 'typed here');
+      add('Dispatches in the ERP', (X.dispatches || []).map(function(d){ return d.date; }), 'from the ERP');
+      return { cols:[{ k:'what', label:'What' }, { k:'d0', label:'Today', kind:'num' }, { k:'d1', label:'Yesterday', kind:'num' }, { k:'d7', label:'Last 7 days', kind:'num' }, { k:'d30', label:'Last 30 days', kind:'num' }, { k:'note', label:'Source' }], rows:rows,
+        summary:'As of the ERP data built ' + (fmtD((g('X') || {}).builtAt) || 'at the last upload'),
+        note:'Rows marked "from the ERP" only change when the day’s export is uploaded, so today’s figure for those stays at zero until that happens. Rows marked "typed here" are live.' };
     } },
   { id:'deviations', team:'Sales', title:'Deadline deviations', sub:'Lines where the factory date is later than the client date, or a date change is open.',
     can:function(){ return can('deadlines'); },
@@ -571,9 +680,15 @@ function lineRows(){
     if (cds.length){ var pick = cds.slice().sort(function(a, b){ return (a.stages || []).filter(function(s){ return s.endDateISO || s.endDateRaw; }).length - (b.stages || []).filter(function(s){ return s.endDateISO || s.endDateRaw; }).length; })[0];
       row.jobCard = pick.jobCardNumber || ''; row.jobCardStage = jcStageOf(pick); row.rawMaterial = rmOf(pick); }
     else { row.jobCard = ''; row.jobCardStage = ''; row.rawMaterial = fac ? 'no job card' : ''; }
-    if (r && r.fab){ row.fabric = r.fab.note ? 'details missing' : !(r.fab.items || []).length ? 'none needed' : (r.fab.items.every(function(i){ return i.status === 'received'; }) ? 'received' : FST[(r.fab.items.filter(function(i){ return i.status !== 'received'; })[0] || {}).status] || '');
-      row.fabricNames = (r.fab.items || []).map(function(i){ return i.name || i.sku; }).join(', '); }
-    else { row.fabric = ''; row.fabricNames = ''; }
+    if (r && r.fab){
+      // xFabState says ok with no items in two cases that are NOT a missing entry: the line is marked NA, and a PO
+      // raised before go-live with no fabric tags (its details live in email). Only a line it reports as not ok with
+      // no items is genuinely waiting on sales.
+      var fit = r.fab.items || [];
+      row.fabric = fit.length ? (fit.every(function(i){ return i.status === 'received'; }) ? 'received' : FST[(fit.filter(function(i){ return i.status !== 'received'; })[0] || {}).status] || '')
+        : r.fab.ok ? 'none needed' : 'details missing';
+      row.fabricNames = fit.map(function(i){ return i.name || i.sku; }).join(', '); row.fabricNote = r.fab.note || ''; }
+    else { row.fabric = ''; row.fabricNames = ''; row.fabricNote = ''; }
     var wt = wtBy[o.so + '|' + o.sku] || []; row.packagesTagged = wt.length; row.packagesSent = wt.filter(function(t){ return (t.dispatches || []).length; }).length; row.packagesAtWarehouse = wt.filter(function(t){ return (t.receipts || []).length; }).length;
     var bk = (bkBy[o.so] || []).filter(function(x){ return (x.items || []).some(function(i){ return i.sku === o.sku; }) || !(x.items || []).length; });
     var last = bk.sort(function(a, b){ return String(a.date).localeCompare(String(b.date)); })[bk.length - 1];
