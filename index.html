@@ -768,7 +768,8 @@ var STORES = {
   ob_fab_locations:{ t:'value' },
   ob_route_units:{ t:'value' },
   ob_migrations:{ t:'value' },
-  ob_corrections:{ t:'list', n:8, dir:'desc' }
+  ob_corrections:{ t:'list', n:8, dir:'desc' },
+  ob_keep_sos:{ t:'value' }
 };
 var USER_RE = /^ob_(profiles$|approver_me$|inbox_read_|inbox_seen_|mute_|unfollow_)/;   // kept per signed-in user
 function cfgFor(k){ if (Object.prototype.hasOwnProperty.call(STORES, k)) return STORES[k]; if (USER_RE.test(k) && /^[A-Za-z0-9_]+$/.test(k)) return { t:'user' }; return null; }
@@ -1141,12 +1142,16 @@ OB.expPick = async function(fileList, redraw){
   ex.busy = false; redraw();
 };
 OB.expClear = function(redraw){ OB.exp.picked = []; OB.exp.msg = ''; redraw(); };
-OB.expPublish = async function(redraw){
-  var ex = OB.exp, say = function(t){ ex.msg = t; ex.kind = 'info'; redraw(); };
+OB.expPublish = async function(redraw, opt){
+  var ex = OB.exp, say = function(t){ ex.msg = t; ex.kind = 'info'; redraw(); }, rebuild = !!(opt && opt.rebuild);
+  if (ex.busy) return;
   ex.busy = true; redraw();
   try {
-    var use = ex.picked.filter(function(p){ return p.info.slot && !p.dup; });
-    if (!use.length) throw new Error('None of the chosen files is a recognised export.');
+    // rebuild: no new files, just the stored exports again (Keep SOs changed)
+    var use = rebuild ? [] : (ex.picked || []).filter(function(p){ return p.info.slot && !p.dup; });
+    if (!rebuild && !use.length) throw new Error('None of the chosen files is a recognised export.');
+    if (rebuild && !ex.metaLoaded) ex.meta = ((await api('/api/exports', { cache:'no-store' })) || {}).meta || { slots:{} };
+    if (rebuild && !(ex.meta && ex.meta.slots && ex.meta.slots.po_summary)) throw new Error('There are no stored exports to rebuild from yet.');
     var slots = (ex.meta && ex.meta.slots) || {}, have = {};
     use.forEach(function(p){ have[p.info.slot] = 1; });
     var files = use.map(function(p){ return { name:p.name, wb:p.wb }; });
@@ -1166,7 +1171,7 @@ OB.expPublish = async function(redraw){
     say('Building the data from ' + files.length + ' export(s)…');
     await new Promise(function(r){ setTimeout(r, 30); });
     // SOs with saved work are never trimmed by the Open SOs list: pass the saved stores' text (SO numbers are long and unique)
-    var savedText = '', NOT_WORK = /^ob_(activity|act_parts|permissions|slot_settings|approvers|fab_locations|risk_golive|route_units)$/;
+    var savedText = '', NOT_WORK = /^ob_(activity|act_parts|permissions|slot_settings|approvers|fab_locations|risk_golive|route_units|keep_sos|migrations)$/;
     // only records with a real value count: the blank placeholder detail every PO line gets doesn't
     var strip = function(v){ if (v === null || v === '' || v === false) return undefined; if (Array.isArray(v)){ var a = v.map(strip).filter(function(x){ return x !== undefined; }); return a.length ? a : undefined; }
       if (typeof v === 'object'){ var o = {}, n = 0; Object.keys(v).forEach(function(k){ if (k === '_k') return; var x = strip(v[k]); if (x !== undefined){ o[k] = x; n++; } }); return n ? o : undefined; } return v; };
@@ -1176,7 +1181,8 @@ OB.expPublish = async function(redraw){
     var remap = [];
     try { var rv = base.ob_so_revisions || {}; Object.keys(rv).forEach(function(k){ var r = null; try { r = JSON.parse(rv[k].j); } catch(e){}
       (Array.isArray(r) ? r : [r]).forEach(function(x){ if (!x || x.status !== 'approved' || x.poCancellation === 'Yes' || !x.so) return; (x.newSos || []).forEach(function(n){ if (n && n.so && n.so !== x.so) remap.push([x.so, n.so]); }); }); }); } catch(e){}
-    var res = window.OBBuild.build(files, { keepText:savedText, remap:remap }), d = res.data;
+    var keepMap = safeParse(rawGet.call(LS, 'ob_keep_sos')) || {};
+    var res = window.OBBuild.build(files, { keepText:savedText, remap:remap, keepSos:Object.keys(keepMap) }), d = res.data;
     // store the new exports first: the data file below is built from them
     var entries = [];
     for (var i = 0; i < use.length; i++){
@@ -1187,17 +1193,29 @@ OB.expPublish = async function(redraw){
       }
       entries.push({ slot:p.info.slot, id:id, chunks:cnt, bytes:bytes.length, file:p.name, type:p.info.type, label:p.info.label, rows:p.info.rows, oldest:p.info.oldest, newest:p.info.newest });
     }
-    ex.meta = ((await api('/api/exports/commit', { body:{ files:entries, remove:[] } })) || {}).meta || ex.meta;
+    if (entries.length) ex.meta = ((await api('/api/exports/commit', { body:{ files:entries, remove:[] } })) || {}).meta || ex.meta;
     var text = JSON.stringify(d);
     await publishDataText(text, d, function(n, t){ say('Publishing the data… ' + Math.round(n * 100 / t) + '%'); });
     ex.picked = []; ex.kind = 'ok';
+    // Keep SOs: an SO now on the Open SOs list (and in the PI Revenue Report) doesn't need keeping any more
+    var kr = d.keepReport || [], cleared = [];
+    ex.keepReport = kr;   // the Keep SOs table shows this until the page is reloaded with the new data
+    if (kr.length){
+      var km = safeParse(rawGet.call(LS, 'ob_keep_sos')) || {};
+      kr.forEach(function(r){ if (r.listed && !r.stub && km[r.so]){ delete km[r.so]; cleared.push(r.so); } });   // a basic-row SO stays: without the keep entry it has no row at all
+      if (cleared.length) LS.setItem('ob_keep_sos', JSON.stringify(km));
+    }
+    var keepMsg = kr.length ? (function(){ var kept = kr.filter(function(r){ return r.found && cleared.indexOf(r.so) < 0; }), stub = kept.filter(function(r){ return r.stub; }), miss = kr.filter(function(r){ return !r.found; });
+      return ' Keep SOs: ' + kept.length + ' kept' + (stub.length ? ' (' + stub.length + ' with a basic row from PO Summary)' : '')
+        + (cleared.length ? '; ' + cleared.length + ' now on the Open SOs list, taken off the keep list' : '')
+        + (miss.length ? '; not in any export: ' + miss.map(function(r){ return r.so; }).join(', ') : '') + '.'; })() : '';
     var of = d.openFilter;
-    ex.msg = 'Published: ' + d.orders.length + ' order lines, ' + d.dpi.length + ' SOs, ' + d.soLines.length + ' SO lines, built from ' + files.length + ' export(s).'
+    ex.msg = (rebuild ? 'Rebuilt from the stored exports. ' : '') + 'Published: ' + d.orders.length + ' order lines, ' + d.dpi.length + ' SOs, ' + d.soLines.length + ' SO lines, built from ' + files.length + ' export(s).'
       + (of ? ' Open SOs list (as on ' + of.asOn + '): ' + of.removedSos + ' closed SO(s) left out' + (of.keptForSavedWork ? ', ' + of.keptForSavedWork + ' kept because they have saved work' : '') + (of.listedNotInDataCount ? '; ' + of.listedNotInDataCount + ' listed SO(s) not found in the exports: ' + of.listedNotInData.slice(0, 10).join(', ') + (of.listedNotInDataCount > 10 ? '…' : '') : '') + '.' : '')
       + (d.carryOver ? (function(c){ return ' Revised SOs: ' + c.movedLines + ' PO line(s) on ' + c.movedPos + ' PO(s) moved to the new SO' + (c.movedWithoutMatchCount ? ' (' + c.movedWithoutMatchCount + ' without a matching article, e.g. fabric)' : '')
           + (c.unmatchedCount ? '; ' + c.unmatchedCount + ' left on the cancelled SO (no matching article on any of its new SOs): ' + c.unmatched.slice(0, 5).map(function(u){ return u.old + ' / PO ' + u.po + ' ' + u.code; }).join(', ') + (c.unmatchedCount > 5 ? '…' : '') : '')
           + (c.newSosNotInData.length ? '; new SO(s) not in the exports: ' + c.newSosNotInData.slice(0, 10).join(', ') : '') + '.'; })(d.carryOver) : '')
-      + ' Reload to see it here; everyone else gets it the next time they open or reload Order Bridge.';
+      + keepMsg + ' Reload to see it here; everyone else gets it the next time they open or reload Order Bridge.';
   } catch(e){ ex.kind = 'error'; ex.msg = 'Not published: ' + (e.message || e); }
   ex.busy = false; redraw();
 };
@@ -1717,6 +1735,26 @@ function build(files, opts){
     DPI[so] = h; dpi.push(h);
   });
 
+  // 18 Nov (JK): SOs an admin keeps (Admin Uploads > Keep SOs) that aren't in the PI Revenue Report get a basic row from
+  // PO Summary (Store SO / SO number, its date and customer) so they can be chosen; the full row replaces it once a PI export has the SO.
+  var keepSos = (opts.keepSos || []).map(function(x){ return s_(x).replace(/^'+/, ''); }).filter(Boolean), stubs = 0;
+  if (keepSos.length){
+    var cityByPrefix = {}, cnt = {};
+    dpi.forEach(function(h){ var p = h.so.slice(0, 6); if (!h.city) return; cnt[p] = cnt[p] || {}; cnt[p][h.city] = (cnt[p][h.city] || 0) + 1; });
+    Object.keys(cnt).forEach(function(p){ cityByPrefix[p] = Object.keys(cnt[p]).sort(function(a, b){ return cnt[p][b] - cnt[p][a]; })[0]; });
+    var want = {}; keepSos.forEach(function(so){ if (!DPI[so]) want[so] = 1; });
+    pos.rows.forEach(function(r){
+      var g = function(n){ return G(pos, r, n); }, pick = null;
+      var sso = s_(g('Store SO Number')).replace(/^'+/, ''), so = s_(g('SO Number')).replace(/^'+/, '');
+      if (want[sso] && !DPI[sso]) pick = { so:sso, date:iso(g('Store SO date')), cust:g('Store Customer Name') };
+      else if (want[so] && !DPI[so]) pick = { so:so, date:iso(g('SO Date')), cust:g('Customer Name') };
+      if (!pick) return;
+      var h = { so:pick.so, site:'', city:cityByPrefix[pick.so.slice(0, 6)] || '', date:pick.date, customer:cleanName(pick.cust), custCode:code(pick.cust), value:0, basic:0, total:0, cost:0,
+        collected:0, collectedExTax:0, cancelled:false, ic:isIc(pick.cust), rep:'', vertical:'', nArt:0, qArt:0, remark:'', stub:true };
+      DPI[h.so] = h; dpi.push(h); stubs++;
+    });
+  }
+
   // PO lines (PO Summary)
   function resolvedCustomer(g){
     if (!isIc(g('Customer Name')) && s_(g('Customer Name'))) return cleanName(g('Customer Name'));
@@ -1913,8 +1951,12 @@ function build(files, opts){
     var asOn = null;
     by.open_sos.forEach(function(x){ var d = asOnFromName(x.file); if (d && (!asOn || d > asOn)) asOn = d; });
     var drops = []; if (by.so_drop.length){ var dDf = cat('so_drop'); dDf.rows.forEach(function(r){ var so = s_(G(dDf, r, 'Drop SO')).replace(/^'+/, ''); if (so) drops.push(so); }); }
-    data.openFilter = applyOpenFilter(data, listed, asOn, opts.keepSos || [], opts.keepText || '', Object.keys(listSites), drops);
+    var keepSet = {}; keepSos.forEach(function(so){ keepSet[so] = 1; });
+    data.openFilter = applyOpenFilter(data, listed, asOn, keepSos, opts.keepText || '', Object.keys(listSites), drops.filter(function(so){ return !keepSet[so]; }));
   }
+  // what happened to each kept SO: on the Open SOs list (no longer needs keeping), kept, kept with a basic row, or in no export
+  if (keepSos.length) data.keepReport = keepSos.map(function(so){ var h = DPI[so];
+    return { so:so, listed:!!(typeof listed !== 'undefined' && listed[so]), found:!!h, stub:!!(h && h.stub), customer:h ? h.customer : '', date:h ? h.date : '' }; });
 
   // per-file report: what each file was read as, and the newest date in it
   var report = found.map(function(x){
@@ -16513,6 +16555,74 @@ window.__xcorr = { list:CORR, locks:xLocks, reopenActive, revisable, isFurn, fac
     };
   } catch(e){ console.error('assistant hook', e); }
 })();
+
+// ================================================================ 18 Nov 2026 (JK): Keep SOs
+// The Open SOs list trims every SO that isn't on it. Admins can keep named SOs anyway (an old SO still awaiting dispatch,
+// say). Saved in ob_keep_sos as { so: { reason, by, at } }. Adding or removing one rebuilds the data from the stored exports.
+// An SO missing from the PI Revenue Report gets a basic row from PO Summary (see exports-build.js); an SO that turns up on a
+// later Open SOs list comes off the keep list by itself once it is also in the PI Revenue Report (loader.js, after publishing).
+const xKeepGet = () => { try { return JSON.parse(localStorage.getItem('ob_keep_sos') || '{}') || {}; } catch(e){ return {}; } };
+const xKeepPut = m => { try { localStorage.setItem('ob_keep_sos', JSON.stringify(m)); } catch(e){} };
+const xKeepState = () => state.xKeep || (state.xKeep = { so:'', reason:'', msg:null, confirm:null });
+const xKeepRebuild = () => window.__OB && window.__OB.expPublish && window.__OB.expPublish(() => renderAll(), { rebuild:true });
+const xKeepStatus = so => {
+  const fresh = ((window.__OB.exp || {}).keepReport || []).find(r => r.so === so);
+  if (fresh){
+    if (!fresh.found) return `<span class="pill warn">Not in any export</span><div class="cell-sub">Not in the PI Revenue Report or PO Summary. Check the number.</div>`;
+    return `<span class="pill ok">Kept</span><div class="cell-sub">${fresh.stub ? 'Basic row from PO Summary: ' : ''}${xe(fresh.customer || '—')}${fresh.date ? ' · SO date ' + fmtDate(fresh.date) : ''}. Reload to see it in the lists.</div>`;
+  }
+  const h = DPI_BY_SO[so], rep = (X.keepReport || []).find(r => r.so === so);
+  if (h && h.stub) return `<span class="pill ok">Kept</span><div class="cell-sub">Basic row from PO Summary: ${xe(h.customer || '—')}${h.date ? ' · SO date ' + fmtDate(h.date) : ''}. No PI Revenue figures until a PI export includes it.</div>`;
+  if (h) return `<span class="pill ok">Kept</span><div class="cell-sub">${xe(h.customer || '')}${h.date ? ' · ' + fmtDate(h.date) : ''}</div>`;
+  if (rep && !rep.found) return `<span class="pill warn">Not in any export</span><div class="cell-sub">Not in the PI Revenue Report or PO Summary. Check the number.</div>`;
+  return `<span class="pill">Waiting for the rebuild</span>`;
+};
+const xKeepHtml = () => {
+  const m = xKeepGet(), k = xKeepState(), busy = !!(window.__OB.exp && window.__OB.exp.busy), list = Object.keys(m).sort((a, b) => String(m[b].at).localeCompare(String(m[a].at)));
+  return `<div class="group-label" style="margin-top:16px;">Keep SOs</div>
+    <div class="cell-sub">The Open SOs list leaves out every SO that isn't on it. Add an SO here to keep it anyway (an older SO still waiting to be dispatched, say). Saving rebuilds the data from the exports above. An SO comes off this list by itself once an Open SOs list and the PI Revenue Report both include it.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px;">
+      <div class="field" style="margin:0;min-width:200px;"><label>SO number</label><input id="xKeepSo" value="${xe(k.so)}" placeholder="e.g. 3110020002000410" autocomplete="off"></div>
+      <div class="field" style="margin:0;flex:1;min-width:240px;"><label>Reason</label><input id="xKeepReason" value="${xe(k.reason)}" placeholder="Why it's still needed, e.g. dispatch still pending" autocomplete="off"></div>
+      <button class="btn btn-primary" id="xKeepAdd" ${busy ? 'disabled' : ''}>Keep &amp; rebuild</button>
+    </div>
+    ${k.msg ? `<div class="${k.msg.ok ? 'cell-sub' : 'scan-error'}" style="margin-top:6px;">${xe(k.msg.text)}</div>` : ''}
+    ${list.length ? `<div class="card table-wrap" style="margin-top:10px;"><table class="grid-table"><thead><tr><th>SO</th><th>Status</th><th>Reason</th><th>Added</th><th></th></tr></thead><tbody>
+      ${list.map(so => `<tr><td class="cell-primary mono">${xe(so)}</td><td>${xKeepStatus(so)}</td><td>${xe(m[so].reason || '')}</td><td>${m[so].at ? fmtDT(m[so].at) : ''}<div class="cell-sub">${xe(m[so].by || '')}</div></td>
+        <td><button class="btn-text" data-xkeep-rm="${xe(so)}" ${busy ? 'disabled' : ''}>${k.confirm === so ? 'Click again to remove' : 'Remove'}</button></td></tr>`).join('')}
+      </tbody></table></div>
+      <div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" id="xKeepRebuild" ${busy ? 'disabled' : ''}>${busy ? 'Working…' : 'Rebuild now'}</button></div>` : ''}`;
+};
+const _rauN8 = renderAdminUploads;
+renderAdminUploads = function(){
+  const h = _rauN8.apply(this, arguments), at = '<div class="group-label" style="margin-top:16px;">Exports in use</div>';
+  return state.role === 'admin' && h.indexOf(at) >= 0 ? h.replace(at, xKeepHtml() + at) : h;
+};
+extraWiring.push(() => {
+  const so = document.getElementById('xKeepSo'); if (!so) return;
+  const k = xKeepState(), rs = document.getElementById('xKeepReason');
+  so.addEventListener('input', e => { k.so = e.target.value; });
+  rs.addEventListener('input', e => { k.reason = e.target.value; });
+  document.getElementById('xKeepAdd').addEventListener('click', () => {
+    const v = (String(k.so).match(/\d{10,}/) || [''])[0], m = xKeepGet();
+    if (!v){ k.msg = { ok:false, text:'Type the full SO number (digits only).' }; renderAll(); return; }
+    if (!k.reason.trim()){ k.msg = { ok:false, text:'Add a reason, so whoever reads this list later knows why it is kept.' }; renderAll(); return; }
+    if (m[v]){ k.msg = { ok:false, text:`${v} is already on the keep list.` }; renderAll(); return; }
+    if (SELECTABLE_SET.has(v) && !(DPI_BY_SO[v] || {}).stub){ k.msg = { ok:false, text:`${v} is already in Order Bridge (${(DPI_BY_SO[v] || {}).customer || ''}), so there is nothing to keep.` }; renderAll(); return; }
+    m[v] = { reason:k.reason.trim(), by:actingUserName(), at:nowIso() }; xKeepPut(m);
+    k.so = ''; k.reason = ''; k.msg = { ok:true, text:`${v} added. Rebuilding the data now; this can take a minute.` };
+    renderAll(); xKeepRebuild();
+  });
+  document.querySelectorAll('[data-xkeep-rm]').forEach(b => b.addEventListener('click', () => {
+    const v = b.dataset.xkeepRm;
+    if (k.confirm !== v){ k.confirm = v; renderAll(); return; }
+    const m = xKeepGet(); delete m[v]; xKeepPut(m); k.confirm = null;
+    k.msg = { ok:true, text:`${v} removed. Rebuilding the data now; if it isn't on the Open SOs list it will drop out.` };
+    renderAll(); xKeepRebuild();
+  }));
+  const rb = document.getElementById('xKeepRebuild'); if (rb) rb.addEventListener('click', () => xKeepRebuild());
+});
+window.__xkeep = { get:xKeepGet, status:xKeepStatus };
 
 if (!routePublic() && state.currentUser) renderAll();
 })();
