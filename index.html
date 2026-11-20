@@ -1052,7 +1052,8 @@ function failScreen(msg){
 function loginScreen(err, email){
   card('<h2>Sign in</h2><div class="field"><label>Email</label><input id="li_email" type="email" placeholder="name@magari.in" autocomplete="username" value="' + esc(email || '') + '"></div>' +
     '<div class="field"><label>Password</label><input id="li_password" type="password" placeholder="••••" autocomplete="current-password"></div>' +
-    (err ? '<div class="login-error">' + esc(err) + '</div>' : '') + '<button class="btn btn-primary" id="loginSubmit" style="width:100%;">Sign in</button>');
+    (err ? '<div class="login-error">' + esc(err) + '</div>' : '') + '<button class="btn btn-primary" id="loginSubmit" style="width:100%;">Sign in</button>'
+    + '<div class="cell-sub" style="margin-top:10px;text-align:center;">Order Bridge records which pages you use and for how long, to help improve it.</div>');
   var em = document.getElementById('li_email'), pw = document.getElementById('li_password'), btn = document.getElementById('loginSubmit');
   var go = async function(){
     var e = (em.value || '').trim().toLowerCase(), p = pw.value || '';
@@ -16623,6 +16624,318 @@ extraWiring.push(() => {
   const rb = document.getElementById('xKeepRebuild'); if (rb) rb.addEventListener('click', () => xKeepRebuild());
 });
 window.__xkeep = { get:xKeepGet, status:xKeepStatus };
+
+// ================================================================ 20 Nov 2026 (JK): Usage analytics
+// Records, per person per device per day: visits and active time on each menu / tab, how long each visit took
+// (in buckets), and signs of trouble: error messages, forms left without saving, flipping back and forth between
+// two pages, and repeated clicks on one button. Active time pauses after 2 minutes without a click, key or
+// scroll, and while the tab is hidden. Nothing typed is recorded. Kept in this browser (localStorage obu_<uid>)
+// and sent whole to /api/usage every 3 minutes and when the page is hidden. Admin › Usage reads it back.
+const UZ = (() => {
+  const IDLE = 120e3, SEND = 180e3, MERGE = 15e3, SESSION_GAP = 30 * 60e3;
+  const EDGES = [15, 30, 60, 120, 300, 600, 1200];          // visit length buckets (active seconds): <15s … ≥20 min
+  const off = () => !!window.__OBT || !window.__OB || !window.__OB.api || window.__OB.mode === 'public' || !(window.__OB.user && window.__OB.user.uid) || !state.currentUser;
+  const uid = () => String(window.__OB.user.uid);
+  const dayStr = d => { d = d || new Date(); return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0'); };
+  const hhmm = () => { const d = new Date(); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+  const bucket = s => { let i = 0; while (i < EDGES.length && s >= EDGES[i]) i++; return i; };
+  const devId = () => { try { let d = localStorage.getItem('obu_dev'); if (!d){ d = 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); localStorage.setItem('obu_dev', d); } return d.replace(/[^A-Za-z0-9]/g, '').slice(0, 24); } catch(e){ return 'dnostorage'; } };
+  const kind = () => (matchMedia('(pointer:coarse)').matches && Math.min(screen.width, screen.height) < 820) ? 'phone' : 'desktop';
+  // what the person is looking at: a menu plus its tab (or the record open in it)
+  const pageKey = () => {
+    if (!state.currentUser) return null;
+    const m = state.module;
+    if (m === 'adminuploads' && state.xAdminView === 'usage') return 'usage';
+    if (m === 'confirmations') return state.openOrderId ? 'confirmations:line' : 'confirmations';
+    if (m === 'fabric') return 'fabric:' + (state.fabricTab || 'main');
+    if (m === 'jobcards') return state.jobcardOpenId ? 'jobcards:card' : 'jobcards:' + (state.jobcardTab || 'main');
+    if (m === 'warehousetag') return 'warehousetag:' + (state.whTab || 'main');
+    if (m === 'slots') return 'slots:' + (state.lastMileTab || 'main');
+    if (m === 'userpermissions') return 'userpermissions:' + (state.permTab || 'main');
+    return m;
+  };
+  // ---- in-memory deltas, merged into localStorage every 15 s (several tabs add up correctly)
+  let D = {}, cur = null, visitT = 0, hist = [], seenErr = new Set(), lastInput = Date.now(), lastActive = 0, dirty = null, clicks = [], started = false;
+  const dd = () => { const k = dayStr(); const d = D[k] = D[k] || { s:0, f:'', l:'', p:{}, em:{} }; return d; };
+  const pg = (d, k) => d.p[k] = d.p[k] || { v:0, t:0, e:0, a:0, b:0, r:0, h:[0, 0, 0, 0, 0, 0, 0, 0] };
+  const endVisit = () => {
+    if (!cur) return;
+    const d = dd(), p = pg(d, cur);
+    p.h[bucket(visitT)]++;
+    if (dirty && Date.now() - dirty.at > 3000) pg(d, dirty.page).a++;
+    dirty = null; visitT = 0; seenErr = new Set();
+  };
+  const startVisit = k => {
+    const d = dd(); pg(d, k).v++;
+    const now = Date.now(), prev2 = hist[hist.length - 2];
+    if (prev2 && prev2.k === k && now - prev2.at < 90e3) pg(d, k).b++;   // A → B → A within 90 s
+    hist.push({ k, at:now }); if (hist.length > 6) hist.shift();
+    cur = k; checkErrors();
+  };
+  const sync = () => {
+    if (off()) { if (cur){ endVisit(); cur = null; } return; }
+    const k = pageKey(); if (k === cur) return;
+    endVisit(); if (k) startVisit(k); else cur = null;
+  };
+  const tick = () => {
+    if (off()) return;
+    sync(); if (!cur) return;
+    const now = Date.now();
+    if (document.hidden || now - lastInput > IDLE) return;
+    const d = dd();
+    if (!lastActive || now - lastActive > SESSION_GAP) d.s++;
+    lastActive = now;
+    if (!d.f) d.f = hhmm(); d.l = hhmm();
+    pg(d, cur).t++; visitT++;
+  };
+  // ---- error messages shown in the page
+  const checkErrors = () => {
+    if (!cur) return;
+    document.querySelectorAll('#content .scan-error, #modalRoot .scan-error').forEach(el => {
+      const t = (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 140); if (!t || seenErr.has(t)) return;
+      seenErr.add(t); const d = dd(); pg(d, cur).e++; d.em[cur + '|' + t] = (d.em[cur + '|' + t] || 0) + 1;
+    });
+  };
+  let errT = null; const errSoon = () => { if (errT) return; errT = setTimeout(() => { errT = null; if (!off()) checkErrors(); }, 400); };
+  // ---- storage
+  const lsKey = () => 'obu_' + uid().replace(/[^A-Za-z0-9_]/g, '_');
+  const readDoc = () => { try { return JSON.parse(localStorage.getItem(lsKey()) || 'null') || { months:{} }; } catch(e){ return { months:{} }; } };
+  const merge = () => {
+    if (off() || !Object.keys(D).length) return;
+    const doc = readDoc();
+    Object.keys(D).forEach(day => {
+      const m = day.slice(0, 6), M = doc.months[m] = doc.months[m] || { days:{}, changed:0, sent:0 }, src = D[day];
+      const t = M.days[day] = M.days[day] || { s:0, f:'', l:'', p:{}, em:{} };
+      t.s += src.s; if (src.f && (!t.f || src.f < t.f)) t.f = src.f; if (src.l && src.l > t.l) t.l = src.l;
+      Object.keys(src.p).forEach(k => { const a = src.p[k], b = t.p[k] = t.p[k] || { v:0, t:0, e:0, a:0, b:0, r:0, h:[0, 0, 0, 0, 0, 0, 0, 0] };
+        ['v', 't', 'e', 'a', 'b', 'r'].forEach(f => b[f] += a[f]); a.h.forEach((n, i) => b.h[i] += n); });
+      Object.keys(src.em).forEach(k => { t.em[k] = (t.em[k] || 0) + src.em[k]; });
+      const ek = Object.keys(t.em); if (ek.length > 40) ek.sort((x, y) => t.em[y] - t.em[x]).slice(40).forEach(k => delete t.em[k]);
+      M.changed = Date.now();
+    });
+    const keepFrom = dayStr(new Date(Date.now() - 62 * 864e5)).slice(0, 6);
+    Object.keys(doc.months).forEach(m => { if (m < keepFrom) delete doc.months[m]; });
+    try { localStorage.setItem(lsKey(), JSON.stringify(doc)); D = {}; } catch(e){}
+  };
+  let sending = false;
+  const send = async leaving => {
+    if (off() || sending) return; merge();
+    const doc = readDoc(), dev = devId(), k = kind();
+    const due = Object.keys(doc.months).filter(m => doc.months[m].changed > doc.months[m].sent);
+    if (!due.length) return;
+    sending = true;
+    try {
+      for (const m of due){
+        const body = { month:m, dev, kind:k, days:doc.months[m].days }, size = JSON.stringify(body).length;
+        if (leaving && size > 60000) continue;        // keepalive requests are capped at 64 KB; it goes next time
+        await window.__OB.api('/api/usage', { body, keepalive:!!leaving });
+        const now = readDoc(); if (now.months[m]) { now.months[m].sent = Date.now(); try { localStorage.setItem(lsKey(), JSON.stringify(now)); } catch(e){} }
+      }
+    } catch(e){ /* kept locally; tried again in 3 minutes */ }
+    sending = false;
+  };
+  const start = () => {
+    if (started) return; started = true;
+    ['pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll'].forEach(ev => addEventListener(ev, () => { lastInput = Date.now(); }, { capture:true, passive:true }));
+    // a form started: typing or picking in a field that isn't a search / filter box
+    const fieldEv = e => {
+      if (!e.isTrusted || off()) return; const el = e.target; if (!el || !el.matches || !el.matches('input, textarea, select')) return;
+      if (!el.closest('#content, #modalRoot')) return;
+      if (el.type === 'search' || el.type === 'file' || /search|filter|find|query|sort/i.test((el.id || '') + ' ' + (el.name || '') + ' ' + (el.placeholder || ''))) return;
+      if (el.closest('[data-uz-skip], .filter-bar, .toolbar')) return;
+      if (!dirty && cur) dirty = { page:cur, at:Date.now() };
+    };
+    addEventListener('input', fieldEv, true); addEventListener('change', fieldEv, true);
+    // saved: any write to saved work or any save call to the server
+    const ls = window.localStorage, ls0 = ls.setItem;
+    ls.setItem = function(k, v){ if (/^ob_/.test(k) && !/^ob_(activity|act_parts|inbox_|mute_|unfollow_)/.test(k)) dirty = null; return ls0.apply(this, arguments); };
+    const f0 = window.fetch;
+    window.fetch = function(u, o){ try { const url = String(u && u.url || u); if (o && o.method && o.method !== 'GET' && /\/api\//.test(url) && !/\/api\/(usage|store\/part|store\/keys)/.test(url)) dirty = null; } catch(e){} return f0.apply(this, arguments); };
+    // the same button clicked 3 times inside a second
+    addEventListener('click', e => {
+      if (!e.isTrusted || off() || !cur) return; const el = e.target && e.target.closest && e.target.closest('button, a, [data-nav], [role=button], input[type=checkbox]'); if (!el) return;
+      const sig = el.id || [...el.attributes].filter(x => /^data-/.test(x.name)).map(x => x.name + '=' + x.value).join('&') || el.tagName + ':' + (el.textContent || '').trim().slice(0, 40);   // the page may redraw the button between clicks
+      const now = Date.now(); clicks = clicks.filter(c => now - c.at < 1000 && c.sig === sig); clicks.push({ sig, at:now });
+      if (clicks.length === 3) pg(dd(), cur).r++;
+    }, true);
+    addEventListener('error', e => { if (off() || !cur) return; const d = dd(), t = 'App error: ' + String(e.message || '').slice(0, 120); pg(d, cur).e++; d.em[cur + '|' + t] = (d.em[cur + '|' + t] || 0) + 1; });
+    new MutationObserver(errSoon).observe(document.body, { childList:true, subtree:true });
+    setInterval(tick, 1000); setInterval(merge, MERGE); setInterval(() => send(false), SEND);
+    document.addEventListener('visibilitychange', () => { if (document.hidden){ merge(); send(true); } });
+    addEventListener('pagehide', () => { endVisit(); cur = null; merge(); send(true); });
+  };
+  return { start, sync, pageKey, merge, send, EDGES, D:() => D, endVisit:() => { endVisit(); cur = null; } };
+})();
+window.__uz = UZ;
+try { UZ.start(); } catch(e){ console.warn('usage', e); }
+const _raN9 = renderAll;
+renderAll = function(){ const r = _raN9.apply(this, arguments); try { UZ.sync(); xUsFixShell(); } catch(e){} return r; };
+
+// ---------------------------------------------------------------- Admin › Usage
+ICONS.chart = ICONS.chart || '<path d="M4 20V10M10 20V4M16 20v-7M21 20H3" stroke-linecap="round" stroke-linejoin="round"/>';
+(() => { const at = NAV.findIndex(n => n.id === 'userpermissions'); NAV.splice(at < 0 ? NAV.length : at, 0, { id:'usage', label:'Usage', icon:'chart' }); })();
+const _cvN9 = canViewSection;
+canViewSection = function(id, role){ if (id === 'usage') return role === 'admin'; return _cvN9.apply(this, arguments); };
+const _pmN9 = permMatrixRows;
+permMatrixRows = function(){ return _pmN9.apply(this, arguments).filter(n => n.id !== 'usage'); };
+const _goN9 = goTo;
+goTo = function(id){
+  if (id === 'usage'){ state.xAdminView = 'usage'; return _goN9.call(this, 'adminuploads'); }
+  if (id === 'adminuploads') state.xAdminView = null;
+  else if (state.xAdminView && id !== 'assistant') state.xAdminView = null;   // the Assistant opens as a side panel
+  return _goN9.apply(this, arguments);
+};
+// the shell marks Admin Uploads as current; point it at Usage and set the title
+function xUsFixShell(){
+  if (state.module !== 'adminuploads') return;
+  const u = state.xAdminView === 'usage';
+  document.querySelectorAll('[data-nav]').forEach(b => { if (b.dataset.nav === 'usage') b.setAttribute('aria-current', String(u)); else if (b.dataset.nav === 'adminuploads') b.setAttribute('aria-current', String(!u)); });
+  if (u){ const t = document.getElementById('moduleTitle'), s = document.getElementById('moduleSub'); if (t) t.textContent = 'Usage'; if (s) s.textContent = 'Admin only — which menus get used, by whom, and where people get stuck'; }
+}
+
+const US = { range:30, role:'all', open:null, busy:false, err:'', data:null, loadedAt:0 };
+const US_ROLES = { sales:'Sales', supply:'Supply', production:'Factory', accounts:'Accounts', admin:'Admin', approver:'Approver' };
+const usLabel = k => {
+  if (k === 'usage') return 'Usage';
+  if (k === 'assistant') return 'Assistant';
+  const [m, t] = String(k).split(':'), n = NAV.find(x => x.id === m), base = n ? n.label : m;
+  if (!t) return base;
+  const tl = { line:'one SKU line', card:'one job card', main:'start tab' }[t] || t.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, c => c.toUpperCase());
+  return base + ' › ' + tl;
+};
+const usDur = s => { s = Math.round(s || 0); if (s < 60) return s + ' s'; const m = Math.round(s / 60); if (m < 60) return m + ' min'; return (m / 60).toFixed(m < 600 ? 1 : 0) + ' h'; };
+const usEdge = i => ['15 s', '30 s', '1 min', '2 min', '5 min', '10 min', '20 min'][i];
+const usBucketLabel = i => i === 0 ? 'under 15 s' : i >= 7 ? '20 min or more' : usEdge(i - 1) + '–' + usEdge(i);
+const usMonths = days => { const out = []; const d = new Date(); d.setDate(1); const from = new Date(Date.now() - (days * 2 - 1) * 864e5);
+  while (true){ const m = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0'); out.push(m); if (d.getFullYear() < from.getFullYear() || (d.getFullYear() === from.getFullYear() && d.getMonth() <= from.getMonth()) || out.length >= 4) break; d.setMonth(d.getMonth() - 1); }
+  return out; };
+async function usLoad(){
+  US.busy = true; US.err = ''; renderAll();
+  try {
+    UZ.merge(); await UZ.send(false);
+    const res = await Promise.all(usMonths(US.range).map(m => window.__OB.api('/api/usage?m=' + m, { cache:'no-store' })));
+    const users = {}, docs = [];
+    res.forEach(r => { (r.users || []).forEach(u => { users[u.uid] = u; }); (r.docs || []).forEach(d => docs.push(d)); });
+    US.data = { users, docs }; US.loadedAt = Date.now();
+  } catch(e){ US.err = 'Could not load usage: ' + (e.message || e); }
+  US.busy = false; renderAll();
+}
+// rows: one per person, day and page, summed over that person's devices
+function usRows(fromDay, toDay){
+  const out = [], d = US.data; if (!d) return out;
+  d.docs.forEach(doc => Object.keys(doc.days || {}).forEach(day => { if (day < fromDay || day > toDay) return; const x = doc.days[day];
+    Object.keys(x.p || {}).forEach(k => out.push({ uid:doc.uid, role:doc.role, day, k, kind:doc.kind, s:x.s, f:x.f, l:x.l, ...x.p[k] }));
+    out.push({ uid:doc.uid, role:doc.role, day, k:null, kind:doc.kind, s:x.s || 0, f:x.f, l:x.l, em:x.em || {} }); }));
+  return out;
+}
+const usDay = n => { const d = new Date(Date.now() - n * 864e5); return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0'); };
+const usFmtDay = s => fmtDate(s.slice(0, 4) + '-' + s.slice(4, 6) + '-' + s.slice(6));
+function usAgg(rows){
+  const pages = {}, people = {}, days = {};
+  rows.forEach(r => {
+    const P = people[r.uid] = people[r.uid] || { uid:r.uid, role:r.role, days:new Set(), s:0, t:0, last:'', lastT:'', pages:{}, kinds:new Set() };
+    P.kinds.add(r.kind);
+    if (!r.k){ P.days.add(r.day); P.s += r.s || 0; if (r.day > P.last || (r.day === P.last && (r.l || '') > P.lastT)){ P.last = r.day; P.lastT = r.l || ''; }
+      const D = days[r.day] = days[r.day] || { users:new Set(), s:0, t:0 }; D.users.add(r.uid); D.s += r.s || 0;
+      Object.keys(r.em || {}).forEach(k => { const [pk, msg] = [k.slice(0, k.indexOf('|')), k.slice(k.indexOf('|') + 1)]; const G = pages[pk] = pages[pk] || usPage(pk); G.em[msg] = (G.em[msg] || 0) + r.em[k]; });
+      return; }
+    const G = pages[r.k] = pages[r.k] || usPage(r.k);
+    ['v', 't', 'e', 'a', 'b', 'r'].forEach(f => G[f] += r[f] || 0); (r.h || []).forEach((n, i) => G.h[i] += n);
+    G.people.add(r.uid); G.roles[r.role] = (G.roles[r.role] || 0) + (r.v || 0);
+    const pp = G.by[r.uid] = G.by[r.uid] || { v:0, t:0, e:0, a:0, b:0, r:0, h:[0, 0, 0, 0, 0, 0, 0, 0] }; ['v', 't', 'e', 'a', 'b', 'r'].forEach(f => pp[f] += r[f] || 0); (r.h || []).forEach((n, i) => pp.h[i] += n);
+    P.t += r.t || 0; P.pages[r.k] = (P.pages[r.k] || 0) + (r.t || 0);
+    if (days[r.day]) days[r.day].t += r.t || 0; else days[r.day] = { users:new Set([r.uid]), s:0, t:r.t || 0 };
+  });
+  // usual visit length per page = the bucket holding the middle visit; long = 2 buckets or more above it (and 2 min+)
+  Object.values(pages).forEach(G => {
+    const n = G.h.reduce((a, b) => a + b, 0); let acc = 0, med = 0; for (let i = 0; i < 8; i++){ acc += G.h[i]; if (acc * 2 >= n){ med = i; break; } }
+    G.n = n; G.med = med; const from = Math.max(med + 2, 4);
+    G.long = G.h.slice(from).reduce((a, b) => a + b, 0); G.longFrom = from;
+    Object.values(G.by).forEach(pp => { pp.long = pp.h.slice(from).reduce((a, b) => a + b, 0); pp.score = pp.long + pp.e + pp.a + pp.b + pp.r; });
+    G.score = G.long + G.e + G.a + G.b + G.r;
+  });
+  return { pages, people, days };
+}
+function usPage(k){ return { k, v:0, t:0, e:0, a:0, b:0, r:0, h:[0, 0, 0, 0, 0, 0, 0, 0], people:new Set(), roles:{}, by:{}, em:{} }; }
+function usBars(days, from){
+  const keys = []; for (let i = US.range - 1; i >= 0; i--) keys.push(usDay(i));
+  const vals = keys.map(k => days[k] ? days[k].users.size : 0), max = Math.max(1, ...vals), W = Math.min(720, keys.length * 26), H = 120, bw = W / keys.length;
+  const bars = keys.map((k, i) => { const v = vals[i], h = Math.round((v / max) * (H - 18)), d = days[k];
+    return `<g><title>${usFmtDay(k)}: ${v} people · ${d ? d.s : 0} sessions · ${usDur(d ? d.t : 0)} active</title><rect x="${(i * bw + 1).toFixed(1)}" y="${H - 14 - h}" width="${Math.max(1, bw - 2).toFixed(1)}" height="${Math.max(h, v ? 2 : 0)}" rx="2" fill="var(--accent, #3b6fd8)"></rect></g>`; }).join('');
+  const lab = [0, Math.floor(keys.length / 2), keys.length - 1].map(i => `<text x="${(i * bw + bw / 2).toFixed(1)}" y="${H - 2}" font-size="10" text-anchor="${i === 0 ? 'start' : i === keys.length - 1 ? 'end' : 'middle'}" fill="currentColor" opacity=".6">${usFmtDay(keys[i])}</text>`).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-width:${W}px;display:block" role="img" aria-label="People using Order Bridge per day">${bars}${lab}</svg><div class="cell-sub">Bars: people active each day (most ${max}). Hover a bar for sessions and active time.</div>`;
+}
+function renderUsage(){
+  if (!US.data && !US.busy && !US.err) setTimeout(usLoad, 0);
+  const head = `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+    ${[7, 30, 90].map(n => `<button class="btn btn-sm ${US.range === n ? 'btn-primary' : 'btn-ghost'}" data-us-range="${n}" aria-pressed="${US.range === n}">Last ${n} days</button>`).join('')}
+    <select id="usRole" style="margin-left:6px;"><option value="all">All teams</option>${Object.keys(US_ROLES).map(r => `<option value="${r}" ${US.role === r ? 'selected' : ''}>${US_ROLES[r]}</option>`).join('')}</select>
+    <button class="btn btn-ghost btn-sm" id="usReload" ${US.busy ? 'disabled' : ''}>${US.busy ? 'Loading…' : 'Refresh'}</button>
+    ${US.loadedAt ? `<span class="cell-sub">Loaded ${fmtDT(new Date(US.loadedAt).toISOString())}. Each person's figures can be up to 3 minutes behind.</span>` : ''}</div>`;
+  if (US.err) return head + `<div class="scan-error">${xe(US.err)}</div>`;
+  if (!US.data) return head + `<div class="card" style="padding:16px;">Loading usage…</div>`;
+  const toDay = usDay(0), fromDay = usDay(US.range - 1), pFrom = usDay(US.range * 2 - 1), pTo = usDay(US.range);
+  const flt = r => US.role === 'all' || r.role === US.role;
+  const all = usRows(pFrom, toDay).filter(flt), A = usAgg(all.filter(r => r.day >= fromDay)), Pv = usAgg(all.filter(r => r.day <= pTo));
+  const users = Object.values(US.data.users).filter(u => u.active && (US.role === 'all' || u.role === US.role));
+  const name = uid => (US.data.users[uid] || {}).name || 'Unknown';
+  const firstDay = US.data.docs.reduce((m, d) => Object.keys(d.days || {}).reduce((a, k) => a && a < k ? a : k, m), '');
+  const prevOk = firstDay && firstDay <= pFrom;
+  const totT = Object.values(A.people).reduce((a, p) => a + p.t, 0), totS = Object.values(A.people).reduce((a, p) => a + p.s, 0), act = Object.keys(A.people).length;
+  const pd = Object.values(A.people).reduce((a, p) => a + p.days.size, 0);
+  const tiles = [['People active', `${act}<span class="cell-sub"> of ${users.length}</span>`], ['Sessions', totS], ['Active time', usDur(totT)], ['Per person per day', pd ? usDur(totT / pd) : '—']]
+    .map(([l, v]) => `<div class="card" style="padding:12px 14px;min-width:150px;flex:1;"><div class="cell-sub">${l}</div><div style="font-size:22px;font-weight:600;margin-top:2px;">${v}</div></div>`).join('');
+  const note = !firstDay ? `<div class="card" style="padding:12px 14px;margin-bottom:12px;">No usage recorded yet. Figures start from the 20 Nov 2026 release and arrive within a few minutes of people using Order Bridge.</div>`
+    : (firstDay > fromDay ? `<div class="cell-sub" style="margin-bottom:10px;">Recording started ${usFmtDay(firstDay)}, so this range is partly empty. "Stuck" needs 2–3 weeks of visits per page to judge what's usual.</div>` : '');
+  // 1. menus
+  const groups = {};
+  Object.values(A.pages).forEach(G => { const m = G.k.split(':')[0]; (groups[m] = groups[m] || []).push(G); });
+  const prevV = k => { if (!prevOk) return null; return Object.values(Pv.pages).filter(G => G.k === k || G.k.split(':')[0] === k).reduce((a, G) => a + G.v, 0); };
+  const chg = (now, k) => { const p = prevV(k); if (p === null) return '<span class="cell-sub">—</span>'; if (!p) return now ? '<span class="pill ok">new</span>' : ''; const c = Math.round((now - p) / p * 100); return `<span class="${c < 0 ? 'cell-sub' : ''}">${c > 0 ? '+' : ''}${c}%</span>`; };
+  const rolesWith = new Set(Object.values(A.people).map(p => p.role));
+  const unused = m => [...rolesWith].filter(r => r !== 'admin' && canViewSection(m, r) && !Object.values(A.pages).some(G => G.k.split(':')[0] === m && G.roles[r]));
+  const menuRows = Object.keys(groups).map(m => { const gs = groups[m]; return { m, v:gs.reduce((a, G) => a + G.v, 0), t:gs.reduce((a, G) => a + G.t, 0), people:new Set(gs.flatMap(G => [...G.people])).size, gs }; }).sort((a, b) => b.t - a.t);
+  const neverOpened = NAV.filter(n => !groups[n.id] && (US.role === 'all' ? true : canViewSection(n.id, US.role)) && n.id !== 'usage').map(n => n.label);
+  const menus = `<div class="card table-wrap"><table class="grid-table"><thead><tr><th>Menu</th><th>Visits</th><th>People</th><th>Active time</th><th>Per visit</th><th>Visits vs previous ${US.range} days</th><th>Teams that can see it but didn't open it</th></tr></thead><tbody>
+    ${menuRows.map(r => `<tr><td class="cell-primary">${xe(usLabel(r.m))}</td><td>${r.v}</td><td>${r.people}</td><td>${usDur(r.t)}</td><td>${r.v ? usDur(r.t / r.v) : '—'}</td><td>${chg(r.v, r.m)}</td><td>${unused(r.m).map(x => US_ROLES[x] || x).join(', ') || '<span class="cell-sub">—</span>'}</td></tr>`
+      + (r.gs.length > 1 || (r.gs[0] && r.gs[0].k.includes(':')) ? r.gs.sort((a, b) => b.t - a.t).map(G => `<tr><td style="padding-left:26px;" class="cell-sub">${xe(usLabel(G.k).split(' › ').slice(1).join(' › ') || 'main')}</td><td class="cell-sub">${G.v}</td><td class="cell-sub">${G.people.size}</td><td class="cell-sub">${usDur(G.t)}</td><td class="cell-sub">${G.v ? usDur(G.t / G.v) : '—'}</td><td></td><td></td></tr>`).join('') : '')).join('')
+      || `<tr><td colspan="7" class="cell-sub">No visits in this range.</td></tr>`}
+    </tbody></table></div>${neverOpened.length && firstDay ? `<div class="cell-sub" style="margin-top:6px;">Not opened at all in this range: ${neverOpened.map(xe).join(', ')}.</div>` : ''}`;
+  // 2. stuck
+  const stuckList = Object.values(A.pages).filter(G => G.score > 0).sort((a, b) => b.score - a.score).slice(0, 12);
+  const stuck = `<div class="cell-sub" style="margin-bottom:8px;">Long visits are at least two steps above the page's usual visit (and over 2 minutes). Unsaved forms: typing in a form, then leaving without saving. Back and forth: returning to a page within 90 s of leaving it. Repeated clicks: the same button 3 times in a second. Click a row for the people and messages.</div>
+    <div class="card table-wrap"><table class="grid-table"><thead><tr><th>Page</th><th>Visits</th><th>Usual visit</th><th>Long visits</th><th>Error messages</th><th>Unsaved forms</th><th>Back and forth</th><th>Repeated clicks</th></tr></thead><tbody>
+    ${stuckList.map(G => { const open = US.open === G.k, few = G.n < 20;
+      const ppl = Object.keys(G.by).map(u => [u, G.by[u]]).filter(([, p]) => p.score > 0).sort((a, b) => b[1].score - a[1].score).slice(0, 10);
+      const msgs = Object.keys(G.em).sort((a, b) => G.em[b] - G.em[a]).slice(0, 6);
+      return `<tr data-us-open="${xe(G.k)}" style="cursor:pointer;"><td class="cell-primary">${open ? '▾' : '▸'} ${xe(usLabel(G.k))}</td><td>${G.v}</td><td>${usBucketLabel(G.med)}${few ? '<div class="cell-sub">few visits yet</div>' : ''}</td><td>${G.long || ''}</td><td>${G.e || ''}</td><td>${G.a || ''}</td><td>${G.b || ''}</td><td>${G.r || ''}</td></tr>`
+        + (open ? `<tr><td colspan="8" style="background:var(--surface-2, rgba(0,0,0,.03));"><div style="display:flex;gap:24px;flex-wrap:wrap;">
+          <div style="flex:1;min-width:280px;"><div class="group-label">People affected</div>${ppl.length ? `<table class="grid-table"><thead><tr><th>Person</th><th>Visits</th><th>Long</th><th>Errors</th><th>Unsaved</th><th>Back/forth</th><th>Clicks</th></tr></thead><tbody>${ppl.map(([u, p]) => `<tr><td>${xe(name(u))}<div class="cell-sub">${US_ROLES[(US.data.users[u] || {}).role] || ''}</div></td><td>${p.v}</td><td>${p.long || ''}</td><td>${p.e || ''}</td><td>${p.a || ''}</td><td>${p.b || ''}</td><td>${p.r || ''}</td></tr>`).join('')}</tbody></table>` : '<div class="cell-sub">—</div>'}</div>
+          <div style="flex:1;min-width:240px;"><div class="group-label">Most common messages</div>${msgs.length ? msgs.map(m => `<div style="margin:4px 0;">${xe(m)} <span class="cell-sub">× ${G.em[m]}</span></div>`).join('') : '<div class="cell-sub">No error messages.</div>'}</div></div></td></tr>` : ''); }).join('')
+      || `<tr><td colspan="8" class="cell-sub">Nothing stands out in this range.</td></tr>`}
+    </tbody></table></div>`;
+  // 3. people
+  const ppl = users.map(u => ({ u, p:A.people[u.uid] })).sort((a, b) => (b.p ? b.p.t : -1) - (a.p ? a.p.t : -1));
+  const people = `<div class="card table-wrap"><table class="grid-table"><thead><tr><th>Person</th><th>Team</th><th>Days used</th><th>Sessions</th><th>Active time</th><th>Per day used</th><th>Last seen</th><th>Most time on</th><th>Device</th></tr></thead><tbody>
+    ${ppl.map(({ u, p }) => p ? `<tr><td class="cell-primary">${xe(u.name || u.email)}</td><td>${US_ROLES[u.role] || u.role}</td><td>${p.days.size}</td><td>${p.s}</td><td>${usDur(p.t)}</td><td>${p.days.size ? usDur(p.t / p.days.size) : '—'}</td><td>${p.last ? usFmtDay(p.last) + (p.lastT ? ', ' + p.lastT : '') : ''}</td>
+        <td>${Object.keys(p.pages).sort((a, b) => p.pages[b] - p.pages[a]).slice(0, 3).map(k => xe(usLabel(k))).join('<br>')}</td><td>${[...p.kinds].join(', ')}</td></tr>`
+      : `<tr><td class="cell-primary">${xe(u.name || u.email)}</td><td>${US_ROLES[u.role] || u.role}</td><td colspan="7"><span class="pill warn">Not used in this range</span></td></tr>`).join('')}
+    </tbody></table></div>`;
+  return head + note + `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">${tiles}</div>
+    <div class="group-label">Daily use</div><div class="card" style="padding:12px 14px;margin-bottom:14px;">${usBars(A.days)}</div>
+    <div class="group-label">Menus, by active time</div>${menus}
+    <div class="group-label" style="margin-top:16px;">Where people get stuck</div>${stuck}
+    <div class="group-label" style="margin-top:16px;">People</div>${people}`;
+}
+const _rauN9 = renderAdminUploads;
+renderAdminUploads = function(){ return state.xAdminView === 'usage' && state.role === 'admin' ? renderUsage() : _rauN9.apply(this, arguments); };
+extraWiring.push(() => {
+  document.querySelectorAll('[data-us-range]').forEach(b => b.addEventListener('click', () => { US.range = +b.dataset.usRange; US.open = null; renderAll(); }));
+  const r = document.getElementById('usRole'); if (r) r.addEventListener('change', e => { US.role = e.target.value; US.open = null; renderAll(); });
+  const rl = document.getElementById('usReload'); if (rl) rl.addEventListener('click', () => usLoad());
+  document.querySelectorAll('[data-us-open]').forEach(t => t.addEventListener('click', () => { US.open = US.open === t.dataset.usOpen ? null : t.dataset.usOpen; renderAll(); }));
+});
+window.__xus = { US, usAgg, usRows, renderUsage, load:usLoad };
 
 if (!routePublic() && state.currentUser) renderAll();
 })();
