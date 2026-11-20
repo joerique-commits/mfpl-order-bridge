@@ -16937,6 +16937,282 @@ extraWiring.push(() => {
 });
 window.__xus = { US, usAgg, usRows, renderUsage, load:usLoad };
 
+// ================================================================ 20 Nov 2026 (JK): challan corrections + Last Mile Ops changes
+// A. Furnishings Delivery Challans: admin can correct From / To while none of the challan's tags has been received.
+//    The challan keeps the same number, records each revision (old → new, who, why) and prints "REVISED". The tags'
+//    dispatch lines follow. (Warehouse challans always go factory → Brand Warehouse, so there is nothing to correct.)
+// B. Last Mile Ops bookings: change date / window / address / site POC / notes. Sales change a request supply hasn't
+//    approved yet directly; on an approved booking sales ask and supply approves (the booking stays as it was until then);
+//    supply and admin change directly. Not after dispatch. Every change is kept on the booking.
+// C. Undo a status set by mistake, with a reason: supply within 24 h of the action, admin any time; undoing a delivery
+//    (proof of delivery captured) is admin only.
+
+// ---------------------------------------------------------------- A. challans
+const chEntries = c => (c.items || []).map(i => FABRIC_ENTRIES.find(e => e.id === i.id)).filter(Boolean);
+function chFixBlock(c){
+  const es = chEntries(c);
+  if (es.length !== (c.items || []).length) return 'Some tags on this challan are no longer in the log.';
+  const got = es.filter(e => (e.receipts || []).length); if (got.length) return `Already received: ${got.map(e => e.id).join(', ')}. Void and log again instead.`;
+  const moved = es.filter(e => { const d = (e.dispatches || [])[e.dispatches.length - 1]; return !d || d.challanNo !== c.challanNo; });
+  if (moved.length) return `${moved.map(e => e.id).join(', ')} went out again on a later challan.`;
+  return '';
+}
+const chRevised = c => (c.revisions || []).length > 0;
+const chFixModal = () => {
+  const m = state.xChFix; if (!m) return ''; const c = FABRIC_CHALLANS.find(x => x.id === m.id); if (!c) return '';
+  const block = chFixBlock(c), L = fabLocs();
+  const opts = (k, cur) => (L[k] || []).map(l => `<option value="${xe(l.id)}" ${l.id === cur ? 'selected' : ''}>${xe(l.name)}</option>`).join('');
+  const fromCur = m.from != null ? m.from : (c.fromId || ''), toCur = m.to != null ? m.to : (c.toId || '');
+  const hist = (c.revisions || []).slice().reverse().map(r => `<div class="cell-sub" style="margin:4px 0;">${fmtDT(r.at)} · ${xe(r.by)}: ${Object.keys(r.changes || {}).filter(k => /Label$/.test(k)).map(k => `${k === 'toLabel' ? 'To' : 'From'} ${xe(r.changes[k][0])} → ${xe(r.changes[k][1])}`).join(', ')} — “${xe(r.reason)}”</div>`).join('');
+  return `<div class="modal-overlay" id="xChOverlay"><div class="modal-card" style="max-width:640px;"><div class="modal-head"><div><h3>Correct Delivery Challan ${xe(c.challanNo)}</h3>
+    <div class="modal-sub">${fmtDate(c.date)} · ${c.items.length} tag(s) · ${xe(c.fromLabel)} → ${xe(c.toLabel)}</div></div><button class="modal-close" id="xChClose" aria-label="Close">×</button></div>
+    <div class="modal-body">${block ? `<div class="part-po-note">This challan can't be corrected. ${xe(block)}</div>` : `
+      <div class="cell-sub" style="margin-bottom:8px;">The challan keeps its number and is marked “Revised”. Print the revised copy for the people holding the old one.</div>
+      <div class="field-grid"><div class="field"><label>From (dispatched from)</label><select id="xChFrom">${opts('dispatchers', fromCur)}</select></div>
+      <div class="field"><label>To (sent to)</label><select id="xChTo">${opts('receivers', toCur)}</select></div></div>
+      <div class="field"><label>Reason <span class="req">*</span></label><textarea id="xChReason" rows="2" style="width:100%;" placeholder="What was wrong, e.g. it went to NB, not MFPL">${xe(m.reason || '')}</textarea></div>
+      ${m.err ? `<div class="scan-error">${xe(m.err)}</div>` : ''}
+      <button class="btn btn-primary btn-sm" id="xChSave" style="margin-top:6px;">Save correction</button>`}
+      ${hist ? `<div style="margin-top:12px;"><div class="cell-sub"><b>Earlier corrections</b></div>${hist}</div>` : ''}</div></div></div>`;
+};
+const _rueN10 = renderUserEditModal;
+renderUserEditModal = function(){ return _rueN10.apply(this, arguments) || chFixModal(); };
+const _rflN10 = renderFabricLog;
+renderFabricLog = function(){
+  let h = _rflN10.apply(this, arguments);
+  FABRIC_CHALLANS.forEach(c => {
+    const v = `data-fab-view-challan="${xe(c.id)}">View</button>`;
+    if (h.indexOf(v) < 0) return;
+    h = h.replace(v, v + (state.role === 'admin' ? `<button class="btn-text" data-xch-fix="${xe(c.id)}">Correct</button>` : ''));
+    if (chRevised(c)) h = h.replace(`<td class="mono cell-primary">${xe(c.challanNo)}</td>`, `<td class="mono cell-primary">${xe(c.challanNo)}<div><span class="pill warn" title="Corrected after it was raised">Revised</span></div></td>`);
+  });
+  return h;
+};
+const _pchN10 = printableChallanHtml;
+printableChallanHtml = function(c){
+  const h = _pchN10.apply(this, arguments); if (!chRevised(c)) return h;
+  const r = c.revisions[c.revisions.length - 1];
+  const what = Object.keys(r.changes || {}).filter(k => /Label$/.test(k)).map(k => `${k === 'toLabel' ? 'To' : 'From'}: ${xe(r.changes[k][0])} → ${xe(r.changes[k][1])}`).join('; ');
+  const t = document.createElement('template'); t.innerHTML = h;
+  const tt = t.content.querySelector('.p-challan-title');
+  const note = `<div style="margin-top:6px;padding:6px 8px;border:1.5px solid #111;font-size:12px;font-weight:600;">REVISED ${fmtDate(r.at.slice(0, 10))} — ${what}. Replaces the copy printed on ${fmtDate(c.date)}.</div>`;
+  if (tt) tt.insertAdjacentHTML('afterend', note); else t.content.prepend(document.createRange().createContextualFragment(note));
+  return t.innerHTML;
+};
+function chApplyFix(c, F, T, reason){
+  const at = nowIso(), chg = {};
+  const set = (k, v) => { const o = c[k] == null ? '' : c[k]; if (String(o) !== String(v == null ? '' : v)){ chg[k] = [o, v == null ? '' : v]; c[k] = v == null ? '' : v; } };
+  // only the side that changed is refreshed from the locations list (an unchanged side keeps what was printed)
+  if (F.id !== c.fromId){ set('fromId', F.id); set('fromLabel', F.name); set('fromAddress', F.address); set('fromPoc', F.pocName); set('fromPhone', F.pocPhone); }
+  if (T.id !== c.toId){ set('toId', T.id); set('toLabel', T.name); set('toAddress', T.address); set('toPoc', T.pocName); set('toPhone', T.pocPhone); }
+  if (!Object.keys(chg).length) return false;
+  c.revisions = (c.revisions || []).concat([{ at, by:actingUserName(), reason, changes:chg }]);
+  chEntries(c).forEach(e => (e.dispatches || []).forEach(d => { if (d.challanNo !== c.challanNo) return;
+    if (chg.toLabel){ if (d.toWas == null) d.toWas = d.to; d.to = T.name; }
+    if (chg.fromLabel){ if (d.locationWas == null) d.locationWas = d.location; d.location = F.name; }
+    d.revisedAt = at; }));
+  return true;
+}
+extraWiring.push(() => {
+  document.querySelectorAll('[data-xch-fix]').forEach(b => b.addEventListener('click', ev => { ev.stopPropagation(); state.xChFix = { id:b.dataset.xchFix }; renderAll(); }));
+  const close = () => { state.xChFix = null; renderAll(); };
+  const cl = document.getElementById('xChClose'); if (cl) cl.addEventListener('click', close);
+  const ov = document.getElementById('xChOverlay'); if (ov) ov.addEventListener('click', e => { if (e.target === ov) close(); });
+  const m = state.xChFix; if (!m) return;
+  const f = document.getElementById('xChFrom'), t = document.getElementById('xChTo'), r = document.getElementById('xChReason');
+  if (f) f.addEventListener('change', e => { m.from = e.target.value; });
+  if (t) t.addEventListener('change', e => { m.to = e.target.value; });
+  if (r) r.addEventListener('input', e => { m.reason = e.target.value; });
+  const sv = document.getElementById('xChSave');
+  if (sv) sv.addEventListener('click', () => {
+    const c = FABRIC_CHALLANS.find(x => x.id === m.id); if (!c) return close();
+    if (state.role !== 'admin'){ m.err = 'Only admins can correct a challan.'; return renderAll(); }
+    const block = chFixBlock(c); if (block){ m.err = block; return renderAll(); }
+    const F = fabLoc('dispatchers', f.value), T = fabLoc('receivers', t.value);
+    if (!F || !T){ m.err = 'Choose both locations.'; return renderAll(); }
+    if (words(r.value) < 3){ m.err = 'Give a reason of at least 3 words.'; return renderAll(); }
+    if (!chApplyFix(c, F, T, r.value.trim())){ m.err = 'Nothing changed — pick a different From or To.'; return renderAll(); }
+    state.xChFix = null; state.xChPrint = c.id; renderAll();
+    printDocument(printableChallanHtml(c), { top:true });
+  });
+});
+
+// ---------------------------------------------------------------- B. booking changes
+const BK_FIELDS = [['date', 'Date'], ['window', 'Window'], ['fullAddress', 'Address'], ['pin', 'PIN'], ['mapLink', 'Map link'], ['sitePocName', 'Site POC'], ['sitePocPhone', 'Site POC mobile'], ['notes', 'Notes']];
+const bkOpenStatus = b => ['requested', 'confirmed'].includes(b.status);
+const bkCanAsk = () => ['sales', 'supply', 'admin'].includes(state.role) && canEditSection('slots', state.role);
+const bkDirect = b => isSupplyRole() || state.role === 'admin' || b.status === 'requested';   // sales change an unapproved request themselves
+const bkPending = b => b.change && b.change.status === 'pending' ? b.change : null;
+const bkVal = (k, v) => k === 'date' ? fmtDate(v) : (v || '—');
+function bkSlotFree(b, date, win){
+  const t = slotsForDate(date).find(x => x.window === win); if (!t) return 'That window is not open on this day.';
+  if (blockedOn(date)) return 'That date is blocked.';
+  const n = slotBookingsFor(date, win, b.type).filter(x => x.id !== b.id).length, cap = +t[b.type] || 0;
+  return n >= cap ? `${fmtDate(date)} ${win} is full (${n}/${cap}).` : '';
+}
+function bkApply(b, to, by, reason, how){
+  const before = {}; BK_FIELDS.forEach(([k]) => { if (to[k] !== undefined && String(to[k]) !== String(b[k] || '')) before[k] = b[k] || ''; });
+  const keys = Object.keys(before); if (!keys.length) return null;
+  keys.forEach(k => { b[k] = to[k]; });
+  if (before.fullAddress !== undefined || before.pin !== undefined) b.location = (b.fullAddress || '') + ' — ' + (b.pin || '');
+  if (to.lateReason !== undefined) b.lateReason = to.lateReason;
+  const moved = before.date !== undefined || before.window !== undefined;
+  if (moved) b.reschedules = (b.reschedules || 0) + 1;
+  const rec = { at:nowIso(), by, reason, how, before, after:Object.fromEntries(keys.map(k => [k, b[k]])) };
+  b.changes = (b.changes || []).concat([rec]);
+  if (moved && b.type === 'dispatch'){ const r = ddFor(b.id);
+    if (r && r.snap){ const was = `${fmtDate(r.snap.date)} ${r.snap.window}`; r.snap.date = b.date; r.snap.window = b.window;
+      ddLog(r, `Linked to booking ${b.id}: rescheduled from ${was} to ${fmtDate(b.date)} ${b.window}`); ddSave(); } }
+  return rec;
+}
+function bkFormHtml(b){
+  const f = state.xBk; const late = b.type === 'dispatch' && (() => { const C = clientDateFor(b.so, soArticles(b.so)); return C && f.date > C ? C : null; })();
+  const windows = slotsForDate(f.date);
+  return `<div class="x-bk" style="padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface);">
+    <div class="cell-sub" style="margin-bottom:6px;"><b>${bkDirect(b) ? 'Change booking' : 'Ask supply to change this booking'}</b> ${b.id}${bkDirect(b) ? '' : ' — it stays as it is until supply approves'}</div>
+    <div class="field-grid">
+      <div class="field"><label>Date</label><input type="date" id="xBk_date" value="${xe(f.date)}"></div>
+      <div class="field"><label>Window</label><select id="xBk_window"><option value="">Choose…</option>${windows.map(t => { const n = slotBookingsFor(f.date, t.window, b.type).filter(x => x.id !== b.id).length, cap = +t[b.type] || 0;
+        return `<option value="${xe(t.window)}" ${t.window === f.window ? 'selected' : ''} ${n >= cap && t.window !== b.window ? 'disabled' : ''}>${xe(t.window)} — ${n}/${cap}</option>`; }).join('')}</select></div>
+      <div class="field span2"><label>Delivery address</label><input id="xBk_fullAddress" value="${xe(f.fullAddress)}"></div>
+      <div class="field"><label>PIN code</label><input id="xBk_pin" maxlength="6" value="${xe(f.pin)}"></div>
+      <div class="field"><label>Google Maps link</label><input id="xBk_mapLink" value="${xe(f.mapLink)}"></div>
+      <div class="field"><label>Site POC name</label><input id="xBk_sitePocName" value="${xe(f.sitePocName)}"></div>
+      <div class="field"><label>Site POC mobile</label><input id="xBk_sitePocPhone" value="${xe(f.sitePocPhone)}"></div>
+      <div class="field span2"><label>Notes</label><input id="xBk_notes" value="${xe(f.notes)}"></div>
+      ${late ? `<div class="field span2"><label>After the client date (${fmtDate(late)}) — why? <span class="req">*</span></label><input id="xBk_lateReason" value="${xe(f.lateReason)}"></div>` : ''}
+      <div class="field span2"><label>Reason for the change <span class="req">*</span></label><input id="xBk_reason" placeholder="e.g. Customer asked to move it to next week" value="${xe(f.reason)}"></div>
+    </div>
+    ${f.err ? `<div class="scan-error">${xe(f.err)}</div>` : ''}
+    <div style="margin-top:6px;"><button class="btn btn-primary btn-sm" id="xBkSave">${bkDirect(b) ? 'Save change' : 'Send to supply'}</button> <button class="btn-text" id="xBkCancel">Close</button></div></div>`;
+}
+function bkPendingHtml(b){
+  const c = bkPending(b); if (!c) return '';
+  const diff = Object.keys(c.to).filter(k => BK_FIELDS.some(([x]) => x === k)).map(k => `${(BK_FIELDS.find(([x]) => x === k) || [k, k])[1]}: ${xe(bkVal(k, b[k]))} → <b>${xe(bkVal(k, c.to[k]))}</b>`).join(' · ');
+  const sup = isSupplyRole() || state.role === 'admin';
+  return `<div style="padding:8px 12px;border-left:3px solid var(--warn, #c98a12);background:var(--surface);">
+    <div><span class="pill warn">Change requested</span> by ${xe(c.by)} ${fmtDT(c.at)} — “${xe(c.reason)}”</div><div class="cell-sub" style="margin-top:4px;">${diff}</div>
+    ${sup ? `<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;"><button class="btn btn-primary btn-sm" data-xbk-ok="${b.id}">Approve change</button>
+      <input data-xbk-noreason="${b.id}" placeholder="Reason to decline" style="min-width:220px;"><button class="btn-text" data-xbk-no="${b.id}">Decline</button></div>
+      ${state.xBkErr && state.xBkErr.id === b.id ? `<div class="scan-error">${xe(state.xBkErr.msg)}</div>` : ''}`
+      : (isMine(b, 'bookedBy') || state.role === 'sales') ? `<div style="margin-top:4px;"><button class="btn-text" data-xbk-withdraw="${b.id}">Withdraw request</button></div>` : ''}</div>`;
+}
+const bkHistHtml = b => (b.changes || []).length || b.undos ? `<div class="cell-sub" style="margin-top:2px;">${(b.changes || []).slice(-3).map(r => `Changed ${fmtDate(r.at.slice(0, 10))} by ${xe(r.by)}${r.how === 'approved' ? ' (approved by supply)' : ''}: ${Object.keys(r.before).map(k => `${(BK_FIELDS.find(([x]) => x === k) || [k, k])[1]} ${xe(bkVal(k, r.before[k]))} → ${xe(bkVal(k, r.after[k]))}`).join(', ')}`).join('<br>')}${(b.undos || []).slice(-2).map(u => `<br>Undone ${fmtDate(u.at.slice(0, 10))} by ${xe(u.by)}: ${xe(u.what)} — “${xe(u.reason)}”`).join('')}</div>` : '';
+
+// ---------------------------------------------------------------- C. undo
+const UNDO_H = 24;
+function bkUndo(b){   // what can be undone now, by this person
+  const adm = state.role === 'admin', sup = isSupplyRole() && canEditSection('slots', state.role) && !adm;
+  const fresh = at => at && Date.now() - new Date(at).getTime() < UNDO_H * 3600e3;
+  const ok = at => adm || (sup && fresh(at));
+  if (b.status === 'delivered' && adm) return { what:'Delivered', to:'dispatched' };
+  if (b.status === 'dispatched' && ok(b.dispatchedAt)) return { what:'Dispatched', to:'confirmed' };
+  if (b.status === 'completed' && b.type === 'installation' && ok(b.installedAt)) return { what:'Installation completed', to:'confirmed' };
+  if (b.status === 'cancelled' && ok(b.cancelledAt)) return { what:'Cancelled', to:b.cancelPrev || (b.approvedAt && b.vendor ? 'confirmed' : 'requested') };
+  if (b.status === 'rejected' && ok(b.approvedAt)) return { what:'Not approved', to:'requested' };
+  if (b.type === 'dispatch' && ['delivered', 'completed'].includes(b.status) && b.installedAt && b.installRemarks === 'Installed on the delivery visit' && ok(b.installedAt)) return { what:'Installed on the same visit', to:null, same:true };
+  return null;
+}
+function bkDoUndo(b, u, reason){
+  if (u.same){ ['installedAt', 'installedBy', 'installRemarks'].forEach(k => delete b[k]); }
+  else {
+    if (['requested', 'confirmed'].includes(u.to) && ['cancelled', 'rejected'].includes(b.status)){ const free = bkSlotFree(b, b.date, b.window); if (free) return free + ' Change the booking date first, or free a slot.'; }
+    if (b.status === 'dispatched'){ ['dispatchedAt', 'dispatchedBy'].forEach(k => delete b[k]);
+      state.xSites = ls.get(SITE_KEY, {}); const sr = sites()[b.so];
+      const otherOut = SLOT_BOOKINGS.some(x => x !== b && x.so === b.so && x.type === 'dispatch' && ['dispatched', 'delivered', 'completed'].includes(x.status));
+      if (sr && sr.lockedAt && !otherOut){ delete sr.lockedAt; saveSites(); } }
+    if (b.status === 'delivered'){ b.podUndone = (b.podUndone || []).concat([b.pod]); b.pod = null; ['deliveredAt', 'deliveredBy'].forEach(k => delete b[k]); }
+    if (b.status === 'completed' && b.type === 'installation'){ ['installedAt', 'installedBy'].forEach(k => delete b[k]); }
+    if (b.status === 'cancelled'){ ['cancelledAt', 'cancelledBy'].forEach(k => delete b[k]); }
+    if (b.status === 'rejected'){ ['approvedAt', 'approvedBy'].forEach(k => delete b[k]); }
+    b.status = u.to;
+  }
+  b.undos = (b.undos || []).concat([{ at:nowIso(), by:actingUserName(), role:state.role, what:u.what, reason }]);
+  return '';
+}
+
+// ---------------------------------------------------------------- the booking row
+const _lmrN10 = lmRowHtml;
+lmRowHtml = function(b, withType, actions){
+  let h = _lmrN10.apply(this, arguments);
+  const st = lmStatus(b), u = bkUndo(b), canAsk = bkCanAsk() && bkOpenStatus(b) && !bkPending(b);
+  const btns = [canAsk ? `<button class="btn-text" data-xbk-open="${b.id}">${bkDirect(b) ? 'Change' : 'Request a change'}</button>` : '',
+    u ? `<button class="btn-text" data-xbk-undo="${b.id}">Undo “${xe(u.what)}”</button>` : ''].filter(Boolean).join(' · ');
+  const extra = (b.reschedules ? `<div class="cell-sub">Rescheduled ${b.reschedules}×</div>` : '') + bkHistHtml(b) + (btns ? `<div style="margin-top:4px;">${btns}</div>` : '');
+  if (extra && h.indexOf(st) >= 0) h = h.replace(st, st + extra);
+  const cols = 5 + (withType ? 1 : 0) + (actions ? 1 : 0);
+  const open = state.xBk && state.xBk.id === b.id, und = state.xBkUndo && state.xBkUndo.id === b.id;
+  const sub = (open ? bkFormHtml(b) : '') + bkPendingHtml(b)
+    + (und && u ? `<div style="padding:8px 12px;border-left:3px solid var(--critical);background:var(--surface);"><b>Undo “${xe(u.what)}” on ${b.id}?</b> ${u.same ? '' : `It goes back to “${({ confirmed:'Approved', dispatched:'In transit', requested:'Requested' })[u.to] || u.to}”.`}${u.what === 'Delivered' ? ' The proof of delivery is kept in the history.' : ''}
+        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;"><input id="xBkUndoReason" placeholder="Reason (at least 3 words)" style="min-width:260px;" value="${xe(state.xBkUndo.reason || '')}"><button class="btn btn-primary btn-sm" id="xBkUndoGo">Undo</button><button class="btn-text" id="xBkUndoCancel">Close</button></div>
+        ${state.xBkUndo.err ? `<div class="scan-error">${xe(state.xBkUndo.err)}</div>` : ''}</div>` : '');
+  return sub ? h + `<tr class="x-bk-row"><td colspan="${cols}" style="padding-top:0;">${sub}</td></tr>` : h;
+};
+extraWiring.push(() => {
+  const B = id => SLOT_BOOKINGS.find(x => x.id === id);
+  document.querySelectorAll('[data-xbk-open]').forEach(el => el.addEventListener('click', () => { const b = B(el.dataset.xbkOpen); if (!b) return;
+    state.xBk = { id:b.id, date:b.date, window:b.window, fullAddress:b.fullAddress || '', pin:b.pin || '', mapLink:b.mapLink || '', sitePocName:b.sitePocName || '', sitePocPhone:b.sitePocPhone || '', notes:b.notes || '', lateReason:b.lateReason || '', reason:'', err:'' }; state.xBkUndo = null; renderAll(); }));
+  const f = state.xBk;
+  if (f && document.getElementById('xBkSave')){
+    BK_FIELDS.concat([['lateReason'], ['reason']]).forEach(([k]) => { const el = document.getElementById('xBk_' + k); if (el) el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', e => { f[k] = e.target.value; if (k === 'date'){ renderAll(); } }); });
+    document.getElementById('xBkCancel').addEventListener('click', () => { state.xBk = null; renderAll(); });
+    document.getElementById('xBkSave').addEventListener('click', () => {
+      const b = B(f.id); if (!b) return; const fail = m => { f.err = m; renderAll(); };
+      if (!bkOpenStatus(b)) return fail('This booking can no longer be changed (it has been dispatched, cancelled or not approved).');
+      if (!f.date || !f.window) return fail('Choose the date and window.');
+      if (f.date < todayStr()) return fail('The new date is in the past.');
+      if (f.date !== b.date || f.window !== b.window){ const free = bkSlotFree(b, f.date, f.window); if (free) return fail(free); }
+      if (!f.fullAddress.trim() || !/^\d{6}$/.test(f.pin.trim())) return fail('Enter the address and a 6-digit PIN code.');
+      if (f.mapLink.trim() && !isMapUrl(f.mapLink)) return fail('The map link should be a Google Maps link.');
+      if (!f.sitePocName.trim() || !isPhone(f.sitePocPhone)) return fail('Enter the site POC name and a valid 10-digit mobile.');
+      const C = b.type === 'dispatch' ? clientDateFor(b.so, soArticles(b.so)) : null;
+      if (C && f.date > C && words(f.lateReason) < 2) return fail('Say why it goes after the client date.');
+      if (words(f.reason) < 3) return fail('Give a reason for the change (at least 3 words).');
+      const to = { date:f.date, window:f.window, fullAddress:f.fullAddress.trim(), pin:f.pin.trim(), mapLink:f.mapLink.trim(), sitePocName:f.sitePocName.trim(), sitePocPhone:f.sitePocPhone.trim(), notes:f.notes.trim() };
+      if (C && f.date > C) to.lateReason = f.lateReason.trim();
+      if (!BK_FIELDS.some(([k]) => String(to[k]) !== String(b[k] || ''))) return fail('Nothing changed.');
+      if (bkDirect(b)) bkApply(b, to, actingUserName(), f.reason.trim(), 'direct');
+      else { Object.keys(to).forEach(k => { if (String(to[k]) === String(b[k] || '') && k !== 'lateReason') delete to[k]; });
+        b.change = { status:'pending', to, reason:f.reason.trim(), by:actingUserName(), byKey:userKey(), at:nowIso() }; }
+      state.xBk = null; renderAll();
+    });
+  }
+  document.querySelectorAll('[data-xbk-ok]').forEach(el => el.addEventListener('click', () => { const b = B(el.dataset.xbkOk); const c = b && bkPending(b); if (!c) return;
+    if (!bkOpenStatus(b)){ state.xBkErr = { id:b.id, msg:'The booking has moved on (dispatched or cancelled) — decline this request.' }; return renderAll(); }
+    if (c.to.date && (c.to.date !== b.date || (c.to.window || b.window) !== b.window)){ const free = bkSlotFree(b, c.to.date, c.to.window || b.window); if (free){ state.xBkErr = { id:b.id, msg:free + ' Decline it, or change the booking yourself to another window.' }; return renderAll(); } }
+    bkApply(b, c.to, c.by, c.reason, 'approved'); c.status = 'approved'; c.decidedBy = actingUserName(); c.decidedAt = nowIso();
+    b.changeLog = (b.changeLog || []).concat([c]); delete b.change; state.xBkErr = null; renderAll(); }));
+  document.querySelectorAll('[data-xbk-no]').forEach(el => el.addEventListener('click', () => { const b = B(el.dataset.xbkNo); const c = b && bkPending(b); if (!c) return;
+    const r = document.querySelector(`[data-xbk-noreason="${b.id}"]`); if (!r || words(r.value) < 2){ state.xBkErr = { id:b.id, msg:'Give a short reason for declining.' }; return renderAll(); }
+    Object.assign(c, { status:'declined', decidedBy:actingUserName(), decidedAt:nowIso(), declineReason:r.value.trim() }); b.changeLog = (b.changeLog || []).concat([c]); delete b.change; state.xBkErr = null; renderAll(); }));
+  document.querySelectorAll('[data-xbk-withdraw]').forEach(el => el.addEventListener('click', () => { const b = B(el.dataset.xbkWithdraw); const c = b && bkPending(b); if (!c) return;
+    Object.assign(c, { status:'withdrawn', decidedBy:actingUserName(), decidedAt:nowIso() }); b.changeLog = (b.changeLog || []).concat([c]); delete b.change; renderAll(); }));
+  document.querySelectorAll('[data-xbk-undo]').forEach(el => el.addEventListener('click', () => { state.xBkUndo = { id:el.dataset.xbkUndo, reason:'', err:'' }; state.xBk = null; renderAll(); }));
+  const ur = document.getElementById('xBkUndoReason'); if (ur) ur.addEventListener('input', e => { state.xBkUndo.reason = e.target.value; });
+  const uc = document.getElementById('xBkUndoCancel'); if (uc) uc.addEventListener('click', () => { state.xBkUndo = null; renderAll(); });
+  const ug = document.getElementById('xBkUndoGo'); if (ug) ug.addEventListener('click', () => {
+    const s = state.xBkUndo, b = B(s.id), u = b && bkUndo(b); if (!u){ state.xBkUndo = null; return renderAll(); }
+    if (words(s.reason) < 3){ s.err = 'Give a reason of at least 3 words.'; return renderAll(); }
+    const err = bkDoUndo(b, u, s.reason.trim()); if (err){ s.err = err; return renderAll(); }
+    state.xBkUndo = null; renderAll(); });
+  // remember where a cancelled booking was, so Undo puts it back exactly
+  document.querySelectorAll('[data-xlm2-cancel]').forEach(el => el.addEventListener('click', () => { const b = B(el.dataset.xlm2Cancel); if (b && b.status !== 'cancelled') b.cancelPrev = b.status; }, true));
+});
+// inbox: supply sees change requests; sales see the answer for a week
+inboxItems = (base => function(){
+  const out = base.apply(this, arguments), role = state.role, sup = isSupplyRole() || role === 'admin';
+  const nav = b => ({ module:'slots', set:() => { state.lastMileTab = b.type === 'installation' ? 'installation' : 'dispatch'; } });
+  SLOT_BOOKINGS.forEach(b => {
+    const c = bkPending(b);
+    if (c && sup) out.push({ kind:'action', id:'bk-chg-' + b.id, area:'Last Mile Ops', title:`Change requested on ${lastMileTypeLabel(b.type).toLowerCase()} ${b.id} — SO ${b.so}`, detail:`${c.by}: “${c.reason}”`, nav:nav(b) });
+    const last = (b.changeLog || [])[(b.changeLog || []).length - 1];
+    if (last && role === 'sales' && ['approved', 'declined'].includes(last.status) && Date.now() - new Date(last.decidedAt).getTime() < 7 * 864e5 && (last.byKey === userKey() || isMine(b, 'bookedBy')))
+      out.push({ kind:'update', id:'bk-ans-' + b.id + '-' + last.decidedAt, area:'Last Mile Ops', title:`Change ${last.status} — ${b.id}, SO ${b.so}`, detail:last.status === 'declined' ? `${last.decidedBy}: “${last.declineReason}”` : `By ${last.decidedBy}`, nav:nav(b) });
+  });
+  return out;
+})(inboxItems);
+window.__xbk = { chFixBlock, chApplyFix, bkUndo, bkApply, bkSlotFree, slotCfg, saveSlotCfg, fabLocs, saveFabLocs, slotsForDate, inbox:() => inboxItems() };
+
 if (!routePublic() && state.currentUser) renderAll();
 })();
 
