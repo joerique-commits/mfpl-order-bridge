@@ -7994,7 +7994,7 @@ function renderAll(){
     jobcards: jcTitle ? [jcTitle, 'Production stage history for this job card'] : ['Job Card Station','Production-stage tracking — existing tool'],
     warehousetag:['Warehouse Tag Station','QR-tagged handoff from factory packaging to the brand warehouse'],
     slots:['Last Mile Ops','Coordinate dispatch slots between sales and supply'],
-    soapproval:['SO Approvals','Sales send a new SO for approval — discount, freight and advance checked against the policy, then accounts confirm'],
+    soapproval:['SO Approval Request','Sales send a new SO for approval — discount, freight and advance checked against the policy, then accounts confirm'],
     sorevision:['SO Revision Request','Standalone revision requests — reconciled against the original value and advance collected before sign-off'],
     adminuploads:['Admin Uploads','Admin only — the daily ERP exports, the data file and backups'],
     userpermissions:['User Permissions','Admin-only — user access, menu visibility and edit rights by role'],
@@ -9378,7 +9378,7 @@ renderOrdersList = function(){
         return `<tr class="clickable" data-so-toggle="${h.so}">
           <td class="mono">${open?'−':'+'}</td>
           <td><div class="cell-primary">${h.so}</div><div class="cell-sub">${xe(h.customer)}${h.rep ? ' · ' + xe(h.rep) : ''}${cds.length ? ' · ' + 'committed ' + fmtCv(cds[0]) : ''}</div></td>
-          <td>${fmtDate(h.date)}</td><td>${h.city}</td><td class="num">${fmtRupees(h.value)}</td><td>${status}${soRiskPill(h.so)}${canRequestCsv() && requestLines(h.so).length ? `<div style="margin-top:4px;"><button class="btn-text" data-xcsv-so="${h.so}" title="Fabric, finish, stone, design and site details sales filled in for this SO">⤓ Details CSV (${requestLines(h.so).length} line${requestLines(h.so).length > 1 ? 's' : ''})</button></div>` : ''}</td></tr>
+          <td>${fmtDate(h.date)}</td><td>${h.city}</td><td class="num">${fmtRupees(h.value)}</td><td>${status}${soRiskPill(h.so)}${canRequestCsv() && requestLines(h.so).length ? `<div style="margin-top:4px;"><button class="btn-text" data-xcsv-so="${h.so}" title="Fabric, finish, stone, design and site details sales filled in for this SO">⤓ Details CSV (${requestLines(h.so).length} line${requestLines(h.so).length > 1 ? 's' : ''})</button></div>` : ''}${window.__xcs ? window.__xcs.btn(h.so) : ''}</td></tr>
           ${open ? `<tr><td colspan="6" style="padding:0;">
             ${pos.length ? `<div class="cell-sub" style="padding:10px 34px 0;">${pos.map(p => { const l = POL_BY_PO[p] ? POL_BY_PO[p][0] : null; return `<span class="mono">${p}</span>${l ? ` raised ${fmtDate(l.poDate)} on ${xe(l.supplier)}` : ' (confirmed by supply)'}${xDlLeftTxt(p)}`; }).join(' &nbsp;·&nbsp; ')}</div>` : ''}
             ${lines.length ? renderSoLineSubTable(lines) : (SOL_BY_SO[h.so] ? '' : `<div class="empty-note" style="padding:12px 34px;">No PO in PO Summary for this SO, and the SO isn't in SO Article Breakup. Daily PI Revenue lists ${h.nArt} article(s), ${h.qArt} qty in total, but not which articles.</div>`)}
@@ -9449,7 +9449,7 @@ const uq = a => [...new Set(a)];
 const SRC = { REQ:'ob_po_requests', OPS:'ob_order_ops', LINKS:'ob_po_links' };
 const srcGet = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch(e){ return d; } };
 const srcSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch(e){ return false; } };
-const OPS_FIELDS = ['qcReport','qcTicksBy','factoryOverPo','committedDeadline','committedRule','detail','clarifications','productionDeadline','productionDeadlineSetBy','productionDeadlineSetAt','factoryDateSource','deadlineNeg','deadlineNegHistory','deadlineHistory','pendingDeadlineChange','requestId','linkedFrom','soLineKey'];
+const OPS_FIELDS = ['clientConf','qcReport','qcTicksBy','factoryOverPo','committedDeadline','committedRule','detail','clarifications','productionDeadline','productionDeadlineSetBy','productionDeadlineSetAt','factoryDateSource','deadlineNeg','deadlineNegHistory','deadlineHistory','pendingDeadlineChange','requestId','linkedFrom','soLineKey'];
 const opsJson = o => JSON.stringify(OPS_FIELDS.map(k => o[k] === undefined ? null : o[k]));
 const PRISTINE = {}; ORDERS.forEach(o => { if (!o.appNative) PRISTINE[o.id] = opsJson(o); });
 const ORDER_BY_ID = {}; ORDERS.forEach(o => { ORDER_BY_ID[o.id] = o; });
@@ -9498,7 +9498,7 @@ function unapplyLink(k){
 }
 LINKS.filter(k => k.kind === 'manual').forEach(applyLink);
 // 4 · sales' PO requests, then automatic linking to PO lines that arrived after the request
-const REQ_COPY = ['qcReport','qcTicksBy','factoryOverPo','committedDeadline','committedRule','detail','clarifications','productionDeadline','productionDeadlineSetBy','productionDeadlineSetAt','factoryDateSource','deadlineNeg','deadlineNegHistory','deadlineHistory'];
+const REQ_COPY = ['clientConf','qcReport','qcTicksBy','factoryOverPo','committedDeadline','committedRule','detail','clarifications','productionDeadline','productionDeadlineSetBy','productionDeadlineSetAt','factoryDateSource','deadlineNeg','deadlineNegHistory','deadlineHistory'];
 const emptyOps = v => v == null || v === '' || (Array.isArray(v) && !v.length) || (typeof v === 'object' && !Array.isArray(v) && !Object.values(v).some(x => x && String(x).trim()));
 function dropFromOrders(r){ const i = ORDERS.indexOf(r); if (i >= 0) ORDERS.splice(i, 1); const L = LINES_BY_SO[r.so] || []; const j = L.indexOf(r); if (j >= 0) L.splice(j, 1); }
 function linkReq(r, o, how){
@@ -17480,7 +17480,7 @@ const soapFmtPct = n => (n == null || n === '' ? '—' : `${n}%`);
 const SOAP_ST = () => state.xSoap || (state.xSoap = { tab:'requests', filter:'me', open:null, draft:null, msg:null, set:{ city:'BNG', pinQ:'' } });
 
 function renderSoApprovals(){
-  const U = SOAP_ST(); if (!soapCanSee(state.role)) return '<div class="card" style="padding:16px;">You don’t have access to SO Approvals.</div>';
+  const U = SOAP_ST(); if (!soapCanSee(state.role)) return '<div class="card" style="padding:16px;">You don’t have access to SO Approval Request.</div>';
   const tabs = [['requests', 'Requests'], soapIsSales() ? ['new', 'New request'] : null, ['admin', 'accounts'].includes(state.role) ? ['erp', 'ERP SOs without a request'] : null, ['settings', 'Settings']].filter(Boolean);
   if (!tabs.some(t => t[0] === U.tab)) U.tab = 'requests';
   if (U.tab === 'settings' && state.role === 'admin' && !U.users && !U.usersLoading){ U.usersLoading = true; setTimeout(soapLoadUsers, 0); }
@@ -17658,7 +17658,7 @@ function soapFillPins(city){
 }
 // ---------------------------------------------------------------- module wiring
 ICONS.soap = ICONS.soap || '<path d="M7 3h7l5 5v13H7z" stroke-linejoin="round"/><path d="M14 3v5h5M10 13l2 2 4-4" stroke-linecap="round" stroke-linejoin="round"/>';
-(() => { const at = NAV.findIndex(n => n.id === 'sorevision'); NAV.splice(at < 0 ? NAV.length : at, 0, { id:'soapproval', label:'SO Approvals', icon:'soap' }); })();
+(() => { const at = NAV.findIndex(n => n.id === 'dashboard'); NAV.splice(at < 0 ? 0 : at + 1, 0, { id:'soapproval', label:'SO Approval Request', icon:'soap' }); })();   // 22 Nov: between Dashboard and PO Progress Tracker
 canViewSection = (o => function(id, role){ if (id === 'soapproval') return soapCanSee(role); return o.apply(this, arguments); })(canViewSection);
 permMatrixRows = (o => function(){ return o.apply(this, arguments).filter(n => n.id !== 'soapproval'); })(permMatrixRows);
 window.__soap = { render:renderSoApprovals };
@@ -17785,7 +17785,7 @@ inboxItems = (base => function(){
     const title = (soapIsCoo() || soapIsApprover()) && pend.length ? `Approve SO ${r.so}: ${pend.map(a => a.label).join(' · ')}`
       : state.role === 'accounts' ? `SO ${r.so} — ${A.some(a => a.status === 'pending') ? 'mark the advance payments received' : 'confirm the SO approval'}`
       : `SO ${r.so} needs your changes — ${r.status === 'sent_back' ? 'sent back by accounts' : 'an approval was rejected'}`;
-    out.push({ kind:'action', id:'soap-' + r.id + '-' + (r.updatedAt || r.at), area:'SO Approvals', title, detail:`${r.pdf.customer} · basic ${fmtRupees(r.pdf.totals.net)} · by ${r.by}`, nav:nav(r) }); });
+    out.push({ kind:'action', id:'soap-' + r.id + '-' + (r.updatedAt || r.at), area:'SO Approval Request', title, detail:`${r.pdf.customer} · basic ${fmtRupees(r.pdf.totals.net)} · by ${r.by}`, nav:nav(r) }); });
   return out;
 })(inboxItems);
 
@@ -17805,9 +17805,150 @@ lmRowHtml = (o => function(b){ let h = o.apply(this, arguments); if (b.type !== 
   return h.replace(st, st + `<div class="cell-sub" style="color:var(--critical);">Freight was charged for ${xe(fl.charged)}, but the site is ${xe(fl.actual)} (${xe(fl.how)}). Check the freight before dispatch.</div>`); })(lmRowHtml);
 inboxItems = (base => function(){ const out = base.apply(this, arguments);
   if (['supply', 'accounts', 'admin'].includes(state.role)) SLOT_BOOKINGS.filter(b => b.type === 'dispatch' && ['requested', 'confirmed'].includes(b.status)).forEach(b => { const fl = soapSiteFlag(b.so, b); if (fl)
-    out.push({ kind:'action', id:'soap-site-' + b.id + '-' + fl.actual, area:'SO Approvals', title:`Site for SO ${b.so} is ${fl.actual} — freight charged for ${fl.charged}`, detail:`Booking ${b.id} · ${fmtDate(b.date)} · ${fl.how}`, nav:{ module:'slots', set:() => { state.lastMileTab = 'dispatch'; } } }); });
+    out.push({ kind:'action', id:'soap-site-' + b.id + '-' + fl.actual, area:'SO Approval Request', title:`Site for SO ${b.so} is ${fl.actual} — freight charged for ${fl.charged}`, detail:`Booking ${b.id} · ${fmtDate(b.date)} · ${fl.how}`, nav:{ module:'slots', set:() => { state.lastMileTab = 'dispatch'; } } }); });
   return out; })(inboxItems);
 window.__xsoap = { SOAP, soapSet, soapEval, soapFreightRate, soapBandFor, soapFillPins, soapSiteFlag, soapSyncApprovals, parse:soParseItems, readPdf:soapReadPdf, U:SOAP_ST };
+
+// ================================================================ 22 Nov 2026 (JK): factory-PO base box + client confirmation sheet
+// A. Dashboard › Orders in Production, first box: open SKU lines on POs raised to the factory (MFPL product lines with
+//    the PO confirmed and not yet fully dispatched through Last Mile Ops), and how many of them have a job card.
+//    Clicking it lists the ones without a job card.
+// B. PO Progress Tracker › SO › "Client sheet" (sales, admin): pick SKUs with details filled in (drafts too), tick the
+//    answered clarifications to show the client, then print a branded sheet (Print › Save as PDF) or download Excel.
+//    No prices, dates, PO numbers or internal names. Sales record "Client confirmed" per SKU (date + where the
+//    confirmation is; no file kept). If a client-facing field changes afterwards, the SKU shows what changed.
+
+// ---------------------------------------------------------------- A. dashboard box
+const xFacDispQty = (so, sku) => SLOT_BOOKINGS.filter(b => b.type === 'dispatch' && b.so === so && SB_DISP_ST.includes(b.status))
+  .reduce((a, b) => a + (b.items || []).filter(i => i.sku === sku).reduce((s, i) => s + (+i.qty || 0), 0), 0);
+const xFacOpen = () => ORDERS.filter(o => factoryLine(o) && xFacDispQty(o.so, o.sku) < (+o.qty || 0));
+const _rdN12 = renderDashboard;
+renderDashboard = function(){
+  let h = _rdN12.apply(this, arguments);
+  const at = '<div class="group-label">Orders in Production</div>'; const i = h.indexOf(at); if (i < 0) return h;
+  const g = h.indexOf('<div class="stat-grid">', i); if (g < 0) return h;
+  const open = xFacOpen(), withJc = open.filter(o => jobCardOf(o)).length, none = open.length - withJc, on = state.xFacDrill;
+  const tile = `<div class="card stat-tile clickable-tile${on ? ' accent' : ''}" data-xfac-tile="1" title="Click to list the SKUs without a job card"><div class="label">SKUs on factory POs</div><div class="value">${open.length}</div><div class="sub">${withJc} have a job card · ${none} don't yet</div></div>`;
+  h = h.slice(0, g + 23) + tile + h.slice(g + 23);
+  if (on){
+    const list = open.filter(o => !jobCardOf(o)).sort((a, b) => String(a.poRaisedDate || '').localeCompare(String(b.poRaisedDate || '')));
+    const panel = `<div class="card table-wrap" style="margin-top:10px;"><div style="padding:10px 14px;display:flex;justify-content:space-between;gap:8px;"><b>SKUs on factory POs without a job card (${list.length})</b><button class="btn-text" data-xfac-tile="1">Close</button></div>
+      <table class="grid-table"><thead><tr><th>PO</th><th>SO · customer</th><th>Article</th><th>Qty</th><th>PO raised</th><th>Committed</th></tr></thead><tbody>
+      ${list.map(o => `<tr class="clickable" data-xfac-open="${xe(o.id)}"><td class="mono">${xe(o.po)}</td><td>${xe(o.so)}<div class="cell-sub">${xe(o.customer || '')}</div></td><td>${xe(o.sku)}<div class="cell-sub">${xe(o.article || '')}</div></td><td>${o.qty}</td><td>${o.poRaisedDate ? fmtDate(o.poRaisedDate) : '—'}</td><td>${o.committedDeadline ? fmtCv(o.committedDeadline) : '—'}</td></tr>`).join('') || '<tr><td colspan="6" class="cell-sub">Every open SKU on a factory PO has a job card.</td></tr>'}</tbody></table>
+      <div class="cell-sub" style="padding:8px 14px;">Dispatched means dispatched through Last Mile Ops; a line dispatched only in the ERP still counts as open.</div></div>`;
+    const ge = (() => { let d = 0; const re = /<div\b|<\/div>/g; re.lastIndex = g; let m; while ((m = re.exec(h))){ d += m[0] === '</div>' ? -1 : 1; if (!d) return m.index + 6; } return -1; })();
+    if (ge > 0) h = h.slice(0, ge) + panel + h.slice(ge);
+  }
+  return h;
+};
+extraWiring.push(() => {
+  document.querySelectorAll('[data-xfac-tile]').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); state.xFacDrill = !state.xFacDrill; renderAll(); }));
+  document.querySelectorAll('[data-xfac-open]').forEach(r => r.addEventListener('click', () => { state.xFacDrill = false; state.module = 'confirmations'; state.openOrderId = r.dataset.xfacOpen; renderAll(); }));
+});
+
+// ---------------------------------------------------------------- B. client confirmation sheet
+const XCS_FIELDS = [['article', 'Article'], ['qty', 'Quantity'], ['fabric', 'Fabric / upholstery'], ['finish', 'Polish / finish'], ['cane', 'Cane weave'], ['stone', 'Stone'],
+  ['design', 'Design instructions'], ['siteReq', 'Site work'], ['siteMap', 'Site mapping'], ['notes', 'Notes']];
+function xcsSpec(o){
+  const d = ensureDetailShape(o), t = v => (v == null ? '' : String(v)).trim().replace(/^—$/, '');
+  const fab = d.fabrics.filter(f => f && f.type).map(f => fabricDisplayName(f) + (f.millName ? ` (${f.millName})` : '') + (f.placement && f.type !== 'na' ? ` — ${f.placement}` : '')).join('; ');
+  const fin = d.finishes.filter(f => f && f.type).map(f => finishDisplayName(f) + (f.appliedNotes ? ` — ${f.appliedNotes}` : '')).join('; ');
+  return { article:`${o.sku} · ${o.article || ''}`, qty:`${o.qty} ${o.uom || ''}`.trim(), fabric:fab, finish:fin, cane:t(window.__xCaneDisplay(d)), stone:t(window.__xStoneText(d)),
+    design:t(d.design), siteReq:t(d.siteReq), siteMap:t(d.siteMap), notes:t(d.notes) };
+}
+const xcsLines = so => (LINES_BY_SO[so] || []).filter(o => detailFilled(o)).slice().sort((a, b) => (a.soLineSno || 999) - (b.soLineSno || 999) || String(a.sku).localeCompare(String(b.sku)));
+const xcsCan = () => ['sales', 'admin'].includes(state.role) && canEditSection('confirmations', state.role);
+function xcsChanged(o){
+  const c = o.clientConf; if (!c || !c.spec) return [];
+  const now = xcsSpec(o); return XCS_FIELDS.filter(([k]) => String(now[k] || '') !== String(c.spec[k] || '')).map(([k, l]) => l);
+}
+const xcsPill = o => { if (!o.clientConf) return ''; const ch = xcsChanged(o);
+  return ch.length ? `<span class="pill warn" title="Changed since the client confirmed: ${xe(ch.join(', '))}">Changed since client confirmed</span>` : `<span class="pill ok" title="${xe(o.clientConf.ref)}">Client confirmed ${fmtDate(o.clientConf.date)}</span>`; };
+window.__xcs = { btn:so => { if (!xcsCan()) return ''; const L = xcsLines(so); if (!L.length) return '';
+  const conf = L.filter(o => o.clientConf && !xcsChanged(o).length).length, chg = L.filter(o => o.clientConf && xcsChanged(o).length).length;
+  return `<div style="margin-top:4px;"><button class="btn-text" data-xcs-so="${so}" title="Sheet for the client to confirm the details of each SKU">⤓ Client sheet (${L.length})</button>${conf ? ` <span class="cell-sub">${conf} confirmed</span>` : ''}${chg ? ` <span class="pill warn">${chg} changed since confirmed</span>` : ''}</div>`; } };
+
+function xcsModal(){
+  const M = state.xCs; if (!M) return '';
+  const L = xcsLines(M.so), h = DPI_BY_SO[M.so] || {};
+  return `<div class="modal-overlay" id="xCsOverlay"><div class="modal-card" style="max-width:860px;"><div class="modal-head"><div><h3>Client sheet — SO ${xe(M.so)}</h3><div class="modal-sub">${xe(h.customer || '')} · pick the SKUs, tick the clarifications the client should see, then print or download. No prices, dates, PO numbers or internal names go on it.</div></div><button class="modal-close" id="xCsClose" aria-label="Close">×</button></div>
+    <div class="modal-body">
+    ${L.map(o => { const cl = (o.clarifications || []).filter(c => c.status !== 'open' && c.response); const ch = xcsChanged(o);
+      return `<div style="border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+        <label style="display:flex;gap:8px;align-items:flex-start;"><input type="checkbox" data-xcs-pick="${xe(o.id)}" ${M.pick[o.id] ? 'checked' : ''}><span><b>${xe(o.sku)}</b> · ${xe(o.article || '')} · ${o.qty} ${xe(o.uom || '')} <span class="cell-sub">${o.lifecycle === 'draft' ? 'draft' : o.lifecycle === 'po_confirmed' ? 'PO raised' : o.lifecycle === 'submitted' ? 'sent for PO' : ''}</span> ${xcsPill(o)}</span></label>
+        ${o.clientConf ? `<div class="cell-sub" style="margin:4px 0 0 24px;">Confirmed ${fmtDate(o.clientConf.date)} — ${xe(o.clientConf.ref)} (recorded by ${xe(o.clientConf.by)})${ch.length ? `. <b>Changed since:</b> ${xe(ch.join(', '))}` : ''}</div>` : ''}
+        ${cl.length ? `<div style="margin:6px 0 0 24px;"><div class="cell-sub">Answered clarifications — tick to show the client:</div>${cl.map(c => `<label style="display:flex;gap:6px;margin-top:3px;"><input type="checkbox" data-xcs-cl="${xe(o.id)}|${xe(c.id)}" ${c.showClient ? 'checked' : ''}><span class="cell-sub">${xe(c.question)} → <b>${xe(c.response)}</b></span></label>`).join('')}</div>` : ''}</div>`; }).join('')}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;"><button class="btn btn-primary btn-sm" id="xCsPrint">Print / save as PDF</button><button class="btn btn-ghost btn-sm" id="xCsXlsx">Download Excel</button></div>
+    <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:10px;"><b>Record the client's confirmation</b> <span class="cell-sub">for the ticked SKUs. No file is kept — say where it is.</span>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;align-items:flex-end;"><div class="field" style="margin:0;"><label>Confirmed on</label><input type="date" id="xCsDate" value="${xe(M.date || todayStr())}"></div>
+        <div class="field" style="margin:0;flex:1;min-width:260px;"><label>Where is the confirmation?</label><input id="xCsRef" value="${xe(M.ref || '')}" placeholder="e.g. Signed sheet on WhatsApp from Mr Menon, 22 Nov"></div>
+        <button class="btn btn-ghost btn-sm" id="xCsConfirm">Mark client confirmed</button></div>
+      ${M.msg ? `<div class="${M.msg.ok ? 'cell-sub' : 'scan-error'}" style="margin-top:6px;">${xe(M.msg.text)}</div>` : ''}</div>
+    </div></div></div>`;
+}
+const _rueN12 = renderUserEditModal;
+renderUserEditModal = function(){ return _rueN12.apply(this, arguments) || xcsModal(); };
+
+function xcsRows(M){
+  return xcsLines(M.so).filter(o => M.pick[o.id]).map((o, i) => ({ o, n:i + 1, s:xcsSpec(o), cl:(o.clarifications || []).filter(c => c.status !== 'open' && c.response && c.showClient) }));
+}
+function xcsSheetHtml(M){
+  const h = DPI_BY_SO[M.so] || {}, rows = xcsRows(M), cell = v => xe(v || '—');
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#111;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #111;padding-bottom:6px;margin-bottom:8px;">
+      <div><div style="font-size:18px;font-weight:700;letter-spacing:.5px;">MAGARI</div><div>Order details for your confirmation</div></div>
+      <div style="text-align:right;"><div><b>SO</b> ${xe(M.so)}</div><div>${xe(h.customer || '')}</div>${h.city ? `<div>Site: ${xe(h.city)}</div>` : ''}<div>Prepared ${fmtDate(todayStr())}</div></div></div>
+    <div style="margin-bottom:8px;">Please check each item below — fabric, finish, stone, cane and the design and site details. If anything needs to change, tell your Magari contact before signing.</div>
+    ${rows.map(r => `<div style="border:1px solid #999;margin-bottom:8px;page-break-inside:avoid;">
+      <div style="background:#eee;padding:4px 6px;font-weight:700;">${r.n}. ${xe(r.s.article)} · Qty ${xe(r.s.qty)}</div>
+      <table style="width:100%;border-collapse:collapse;">${XCS_FIELDS.slice(2).map(([k, l]) => `<tr><td style="width:28%;padding:3px 6px;border-top:1px solid #ddd;color:#444;">${l}</td><td style="padding:3px 6px;border-top:1px solid #ddd;">${cell(r.s[k])}</td></tr>`).join('')}
+      ${r.cl.length ? `<tr><td style="padding:3px 6px;border-top:1px solid #ddd;color:#444;">Points clarified</td><td style="padding:3px 6px;border-top:1px solid #ddd;">${r.cl.map(c => `${xe(c.question)} — <b>${xe(c.response)}</b>`).join('<br>')}</td></tr>` : ''}</table></div>`).join('')}
+    <div style="margin-top:18px;display:flex;gap:30px;page-break-inside:avoid;"><div style="flex:1;border-top:1px solid #111;padding-top:4px;">Client name</div><div style="flex:1;border-top:1px solid #111;padding-top:4px;">Signature</div><div style="width:120px;border-top:1px solid #111;padding-top:4px;">Date</div></div>
+    <div style="margin-top:10px;color:#555;">I confirm the details above for SO ${xe(M.so)}. Prices, delivery and payment terms are as in the sales order.</div></div>`;
+}
+function xcsXlsx(M){
+  const rows = xcsRows(M), h = DPI_BY_SO[M.so] || {};
+  const aoa = [['Magari — order details for your confirmation'], ['SO', M.so], ['Customer', h.customer || ''], ['Site', h.city || ''], ['Prepared', todayStr()], [],
+    ['#', ...XCS_FIELDS.map(([, l]) => l), 'Points clarified', 'Client OK? (Yes / change)', 'Client comments']];
+  rows.forEach(r => aoa.push([r.n, ...XCS_FIELDS.map(([k]) => r.s[k] || ''), r.cl.map(c => `${c.question} — ${c.response}`).join('\n'), '', '']));
+  const ws = XLSX.utils.aoa_to_sheet(aoa); ws['!cols'] = [{ wch:4 }, { wch:30 }, { wch:10 }, { wch:40 }, { wch:30 }, { wch:14 }, { wch:18 }, { wch:36 }, { wch:24 }, { wch:24 }, { wch:24 }, { wch:36 }, { wch:18 }, { wch:30 }];
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'For confirmation');
+  XLSX.writeFile(wb, `SO-${M.so}-details-for-client.xlsx`);
+}
+extraWiring.push(() => {
+  document.querySelectorAll('[data-xcs-so]').forEach(b => b.addEventListener('click', ev => { ev.stopPropagation(); const so = b.dataset.xcsSo, pick = {};
+    xcsLines(so).forEach(o => { pick[o.id] = true; }); state.xCs = { so, pick, date:todayStr(), ref:'', msg:null }; renderAll(); }));
+  const M = state.xCs; if (!M || !document.getElementById('xCsOverlay')) return;
+  const close = () => { state.xCs = null; renderAll(); };
+  document.getElementById('xCsClose').addEventListener('click', close);
+  document.getElementById('xCsOverlay').addEventListener('click', e => { if (e.target.id === 'xCsOverlay') close(); });
+  document.querySelectorAll('[data-xcs-pick]').forEach(c => c.addEventListener('change', e => { M.pick[c.dataset.xcsPick] = e.target.checked; }));
+  document.querySelectorAll('[data-xcs-cl]').forEach(c => c.addEventListener('change', e => { const [oid, cid] = c.dataset.xcsCl.split('|'); const o = ORDERS.find(x => x.id === oid);
+    const cl = o && (o.clarifications || []).find(x => x.id === cid); if (cl){ cl.showClient = e.target.checked; cl.showClientBy = actingUserName(); cl.showClientAt = nowIso(); renderAll(); } }));
+  const none = () => { if (!Object.values(M.pick).some(Boolean)){ M.msg = { ok:false, text:'Tick at least one SKU.' }; renderAll(); return true; } return false; };
+  document.getElementById('xCsPrint').addEventListener('click', () => { if (none()) return; const html = xcsSheetHtml(M); state.xCs = null; renderAll(); printDocument(html, { top:true }); });
+  document.getElementById('xCsXlsx').addEventListener('click', () => { if (none()) return; try { xcsXlsx(M); M.msg = { ok:true, text:'Excel downloaded.' }; } catch(e){ M.msg = { ok:false, text:'Couldn’t make the Excel file: ' + e.message }; } renderAll(); });
+  document.getElementById('xCsDate').addEventListener('change', e => { M.date = e.target.value; });
+  document.getElementById('xCsRef').addEventListener('input', e => { M.ref = e.target.value; });
+  document.getElementById('xCsConfirm').addEventListener('click', () => {
+    if (none()) return; if (!M.date || M.date > todayStr()){ M.msg = { ok:false, text:'Pick the date the client confirmed (not in the future).' }; return renderAll(); }
+    if (String(M.ref || "").trim().split(/\s+/).filter(Boolean).length < 3){ M.msg = { ok:false, text:'Say where the confirmation is (at least 3 words).' }; return renderAll(); }
+    const picked = xcsLines(M.so).filter(o => M.pick[o.id]);
+    picked.forEach(o => { o.clientConf = { date:M.date, ref:M.ref.trim(), by:actingUserName(), at:nowIso(), spec:xcsSpec(o), clShown:(o.clarifications || []).filter(c => c.showClient).map(c => c.id) }; });
+    M.msg = { ok:true, text:`Recorded for ${picked.length} SKU(s).` }; renderAll(); });
+});
+
+// the PO request / SKU page shows the confirmation to everyone (supply and factory included)
+const _rodN12 = renderOrderDetail;
+renderOrderDetail = function(id){
+  const h = _rodN12.apply(this, arguments); const o = ORDERS.find(x => x.id === id); if (!o || !o.clientConf) return h;
+  const ch = xcsChanged(o), c = o.clientConf;
+  const box = `<div class="${ch.length ? 'part-po-note' : 'cell-sub'}" style="margin:0 0 10px;">${ch.length ? `<b>Changed since the client confirmed</b> on ${fmtDate(c.date)}: ${xe(ch.join(', '))}. Send the client sheet again.` : `<b>Client confirmed</b> on ${fmtDate(c.date)} — ${xe(c.ref)} (recorded by ${xe(c.by)}).`}</div>`;
+  const i = h.indexOf('<div class="form-body">'); return i < 0 ? h : h.slice(0, i) + '<div class="form-body" style="padding-bottom:0;">' + box + '</div>' + h.slice(i);
+};
+window.__xcsT = { lbs:() => LINES_BY_SO, ensureDetailShape, xcsSpec, xcsChanged, xcsLines, xFacOpen, xcsSheetHtml, xcsRows };
+// SO Approval Request has no edit-access row of its own: sales, accounts and approvers act in it, so don't tag it "View" for them
+canEditSection = (o => function(id, role){ if (id === 'soapproval') return ['sales', 'accounts', 'approver', 'admin'].includes(role); return o.apply(this, arguments); })(canEditSection);
 
 if (!routePublic() && state.currentUser) renderAll();
 })();
