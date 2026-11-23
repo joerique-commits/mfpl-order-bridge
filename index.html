@@ -17344,7 +17344,7 @@ XLIVE[SOAP_KEY] = () => { xLiveSplice(SOAP, SOAP_KEY); SOAP_LAST = JSON.stringif
 const RK_DIST = [{ id:'d20', label:'Up to 20 km', maxKm:20 }, { id:'d30', label:'21 km to 30 km', maxKm:30 }, { id:'dcity', label:'31 km to city limits', maxKm:45 }];
 const RK_PCS = [{ max:8, maxLenFt:10, label:'Up to 8 pcs' }, { max:15, label:'9–15 pcs' }, { max:30, label:'16–30 pcs' }];
 const soapDefaults = () => ({
-  bands:{ sales:null, approver:null },            // % — blank until admin sets them
+  bands:{ sales:null, approver:null, commApprover:null },   // % — blank until admin sets them (commission: SO approver up to this % of the base, above → COO / Director)
   advancePct:70, linkHours:48, roadFactor:1.3, requiredFrom:'',
   freightCodes:['SER-FREIGHT-CHRG'], freightWords:['freight', 'transport', 'handling charge', 'cartage', 'delivery charge'],
   pieceUoms:['PCS', 'NOS'], pieceExclude:['FP-', 'FL-', 'SS-', 'SER-'],
@@ -17434,6 +17434,14 @@ function soapEval(r){
   const aPct = basic ? +(paid / basic * 100).toFixed(1) : 0, short = Math.max(0, need - paid);
   out.advance = { paid, basic, need, pct:aPct, min:+S.advancePct, short, level:short > 1 ? 'coo' : null };
   if (short > 1) out.items.push({ key:'advance', level:'coo', label:`Advance ${aPct}% (minimum ${S.advancePct}%)`, measure:short });
+  // commission (23 Nov) — on the pre-GST value after discount, without the freight line(s); every commission needs approval
+  const cBase = Math.max(0, basic - fAmt), cLim = (S.bands || {}).commApprover, cUnset = cLim == null || cLim === '';
+  const cl = (r.comms || []).filter(c => c && +c.value > 0).map(c => { const amt = Math.round(c.mode === 'pct' ? cBase * +c.value / 100 : +c.value); return Object.assign({}, c, { amt, pct:cBase ? +(amt / cBase * 100).toFixed(2) : 0 }); });
+  const cAmt = cl.reduce((a, c) => a + c.amt, 0), cPct = cBase ? +(cAmt / cBase * 100).toFixed(2) : 0;
+  const listNoFr = d.lines.filter(l => !soapFreightLine(l, S)).reduce((a, l) => a + (+l.total || 0), 0);
+  const cLevel = !cl.length ? null : cUnset ? 'coo' : cPct <= +cLim ? 'approver' : 'coo';
+  out.commission = { base:cBase, lines:cl, amt:cAmt, pct:cPct, level:cLevel, unset:cUnset, lim:cLim, giveAmt:dAmt + cAmt, givePct:listNoFr ? +((dAmt + cAmt) / listNoFr * 100).toFixed(2) : 0, listNoFr };
+  if (cLevel) out.items.push({ key:'commission', level:cLevel, label:`Commission ${cPct}% (${fmtRupees(cAmt)})`, measure:cPct, sig:cl.map(c => c.archId).sort().join('|') });
   out.level = out.items.reduce((m, i) => LV[i.level] > (LV[m] || 0) ? i.level : m, null);
   return out;
 }
@@ -17443,9 +17451,10 @@ function soapSyncApprovals(r){
   const next = {};
   ev.items.forEach(it => {
     const o = keep[it.key];
-    if (o && o.status === 'approved' && it.measure <= (o.measure == null ? -1 : o.measure) + 0.01 && LV[it.level] <= LV[o.level]) next[it.key] = o;
-    else if (o && o.status === 'pending' && o.level === it.level && Math.abs((o.measure || 0) - it.measure) < 0.01) next[it.key] = o;
-    else next[it.key] = { key:it.key, level:it.level, measure:it.measure, label:it.label, status:'pending', reason:(r.reasons || {})[it.key] || '' };
+    const sameWho = (it.sig || '') === (o && o.sig || '');
+    if (o && o.status === 'approved' && sameWho && it.measure <= (o.measure == null ? -1 : o.measure) + 0.01 && LV[it.level] <= LV[o.level]) next[it.key] = o;
+    else if (o && o.status === 'pending' && sameWho && o.level === it.level && Math.abs((o.measure || 0) - it.measure) < 0.01) next[it.key] = o;
+    else next[it.key] = { key:it.key, level:it.level, measure:it.measure, sig:it.sig || '', label:it.label, status:'pending', reason:(r.reasons || {})[it.key] || '' };
     next[it.key].label = it.label; next[it.key].reason = (r.reasons || {})[it.key] || next[it.key].reason;
   });
   r.appr = next; r.level = ev.level;
@@ -17481,13 +17490,13 @@ const SOAP_ST = () => state.xSoap || (state.xSoap = { tab:'requests', filter:'me
 
 function renderSoApprovals(){
   const U = SOAP_ST(); if (!soapCanSee(state.role)) return '<div class="card" style="padding:16px;">You don’t have access to SO Approval Request.</div>';
-  const tabs = [['requests', 'Requests'], soapIsSales() ? ['new', 'New request'] : null, ['admin', 'accounts'].includes(state.role) ? ['erp', 'ERP SOs without a request'] : null, ['settings', 'Settings']].filter(Boolean);
+  const tabs = [['requests', 'Requests'], soapIsSales() ? ['new', 'New request'] : null, ['admin', 'accounts'].includes(state.role) ? ['erp', 'ERP SOs without a request'] : null, ['sales', 'accounts', 'admin'].includes(state.role) ? ['arch', 'Architects & designers'] : null, ['settings', 'Settings']].filter(Boolean);
   if (!tabs.some(t => t[0] === U.tab)) U.tab = 'requests';
   if (U.tab === 'settings' && state.role === 'admin' && !U.users && !U.usersLoading){ U.usersLoading = true; setTimeout(soapLoadUsers, 0); }
   const S = soapSet(), warn = (S.bands.sales == null || S.bands.sales === '' || S.bands.approver == null || S.bands.approver === '') ? `<div class="part-po-note" style="margin-bottom:10px;">Discount bands aren't set yet, so every discount goes to COO / Director. ${state.role === 'admin' ? 'Set them in Settings.' : 'Ask an admin to set them.'}</div>` : '';
   const nMe = SOAP.filter(soapNeedsMe).length;
   return `<div class="subtabs" style="margin-bottom:12px;">${tabs.map(([k, l]) => `<button data-soap-tab="${k}" aria-pressed="${U.tab === k}">${l}${k === 'requests' && nMe ? ` (${nMe})` : ''}</button>`).join('')}</div>${warn}`
-    + (U.tab === 'new' ? soapNewHtml() : U.tab === 'settings' ? soapSettingsHtml() : U.tab === 'erp' ? soapErpHtml() : U.open ? soapDetailHtml(SOAP.find(x => x.id === U.open)) : soapListHtml());
+    + (U.tab === 'new' ? soapNewHtml() : U.tab === 'arch' ? soapArchTabHtml() : U.tab === 'settings' ? soapSettingsHtml() : U.tab === 'erp' ? soapErpHtml() : U.open ? soapDetailHtml(SOAP.find(x => x.id === U.open)) : soapListHtml());
 }
 
 // ---- list
@@ -17551,7 +17560,7 @@ function soapNewHtml(){
       <div class="cell-sub">${p.lines.length} lines · list ${fmtRupees(p.totals.total)} · discount ${fmtRupees(p.totals.discount)} · <b>basic ${fmtRupees(p.totals.net)}</b> · GST ${fmtRupees(p.totals.gst)} · total ${fmtRupees(p.totals.grand)}</div>
       ${dup ? `<div class="part-po-note" style="margin-top:6px;">There is already a request for this SO (${xe(soapStatus(dup)[1])}). Open it and upload the revised PDF there instead.</div>` : ''}
       <details style="margin-top:6px;"><summary class="cell-sub">Lines</summary>${soapLinesHtml(p)}</details></div>
-    ${soapChecksHtml(r, ev, true)}
+    ${soapExtraHtml(r, true)}${soapChecksHtml(r, ev, true)}${soapCommHtml(r, ev, true)}
     <div class="card" style="padding:12px 14px;"><b>${ev.items.length ? `Goes to ${LV_NAME[ev.level]} for: ${ev.items.map(i => xe(i.label)).join(' · ')}` : 'No approvals needed — goes straight to accounts'}</b>
       ${U.msg ? `<div class="${U.msg.ok ? 'cell-sub' : 'scan-error'}" style="margin-top:6px;">${xe(U.msg.text)}</div>` : ''}
       <div style="margin-top:8px;"><button class="btn btn-primary" id="soapSubmit" ${dup ? 'disabled' : ''}>${r.reviseOf ? 'Save revision' : 'Send request'}</button> <button class="btn-text" id="soapDiscard">Discard</button></div></div>`;
@@ -17575,8 +17584,8 @@ function soapDetailHtml(r){
       ${mine && soapIsSales() && open && pend ? `<div style="margin-top:10px;">${link ? `<div class="cell-sub">Approval link (valid until ${fmtDT(link.expiresAt)}). The approver must be signed in to Order Bridge.</div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;"><input readonly value="${xe(soapLinkUrl(r))}" style="flex:1;min-width:260px;" id="soapLinkTxt"><button class="btn btn-ghost btn-sm" id="soapLinkCopy">Copy</button><a class="btn btn-ghost btn-sm" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(soapLinkMsg(r))}">WhatsApp</a></div>`
         : `<button class="btn btn-ghost btn-sm" id="soapLinkMake">Create approval link</button> <span class="cell-sub">to send on WhatsApp</span>`}</div>` : ''}</div>` : '';
-  const accBox = soapIsAcc() && r.status === 'submitted' ? (() => { const left = (r.payments || []).filter(p => !p.received).length, ready = !pend && !rej && !left;
-      return `<div class="card" style="padding:12px 14px;margin-bottom:10px;"><b>Accounts</b><div class="cell-sub">${pend ? 'Waiting for approvals — you can tick payments meanwhile.' : rej ? 'An approval was rejected — sales must revise.' : left ? `${left} payment(s) still to mark received.` : 'Everything is in. Confirm once the SO is approved in the ERP.'}</div>
+  const accBox = soapIsAcc() && r.status === 'submitted' ? (() => { const left = (r.payments || []).filter(p => !p.received).length, rv = r.revised ? soapRevOf(r.so) : null, revWait = r.revised === true && !soapRevOk(rv), ready = !pend && !rej && !left && !revWait;
+      return `<div class="card" style="padding:12px 14px;margin-bottom:10px;"><b>Accounts</b><div class="cell-sub">${revWait ? (rv ? `Waiting for the COO / Director to approve SO Revision ${xe(rv.id)}.` : 'This is a revised SO but no SO Revision request names it yet.') + ' ' : ''}${pend ? 'Waiting for approvals — you can tick payments meanwhile.' : rej ? 'An approval was rejected — sales must revise.' : left ? `${left} payment(s) still to mark received.` : 'Everything is in. Confirm once the SO is approved in the ERP.'}</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;"><input id="soapAccNote" placeholder="Note (needed to send back)" style="min-width:260px;"><button class="btn btn-primary btn-sm" id="soapConfirm" ${ready ? '' : 'disabled'}>Confirm SO approved</button><button class="btn-text" id="soapSendBack">Send back to sales</button></div></div>`; })() : '';
   return `<div style="margin-bottom:8px;"><button class="btn-text" data-soap-back>← All requests</button></div>
     <div class="card" style="padding:12px 14px;margin-bottom:10px;"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;"><b>SO ${xe(r.so)} · ${xe(r.pdf.customer)}</b>${sP(st[0], st[1])}</div>
@@ -17586,7 +17595,7 @@ function soapDetailHtml(r){
       ${r.status === 'sent_back' ? `<div class="part-po-note" style="margin-top:6px;">Sent back by ${xe(r.sentBack.by)}: “${xe(r.sentBack.note)}”</div>` : ''}
       ${mine && soapIsSales() && open ? `<div style="margin-top:8px;"><button class="btn btn-ghost btn-sm" data-soap-revise="${r.id}">Upload a revised PDF / change payments or reasons</button> <button class="btn-text" data-soap-withdraw="${r.id}">Withdraw</button></div>` : ''}
       <details style="margin-top:6px;"><summary class="cell-sub">Lines</summary>${soapLinesHtml(r.pdf)}</details></div>
-    ${approvals}${accBox}${soapChecksHtml(r, ev, false)}
+    ${approvals}${accBox}${soapExtraHtml(r, false)}${soapChecksHtml(r, ev, false)}${soapCommHtml(r, ev, false)}
     <details><summary class="cell-sub">History</summary>${(r.log || []).slice().reverse().map(l => `<div class="cell-sub">${fmtDT(l.at)} · ${xe(l.by)}: ${xe(l.text)}</div>`).join('')}</details>`;
 }
 const soapLinkUrl = r => location.href.split('#')[0] + '#so-approval/' + encodeURIComponent(r.id) + '/' + r.link.token;
@@ -17612,6 +17621,8 @@ function soapSettingsHtml(){
   return `${ed ? '' : '<div class="cell-sub" style="margin-bottom:8px;">Only admins can change these settings.</div>'}
   <div class="card" style="padding:12px 14px;margin-bottom:10px;"><b>Discount bands</b><div class="cell-sub">Discount on the discounted lines ÷ their list value.</div>
     <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;align-items:center;"><span>Sales may give up to ${inp('bands.sales', S.bands.sales, 70, 'number')} %</span><span>SO approver up to ${inp('bands.approver', S.bands.approver, 70, 'number')} %</span><span class="cell-sub">Above that: COO / Director</span></div></div>
+  <div class="card" style="padding:12px 14px;margin-bottom:10px;"><b>Commission</b><div class="cell-sub">Commission to architects, designers or middlemen ÷ the pre-GST value after discount, without freight. Every commission needs approval.</div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;align-items:center;"><span>SO approver up to ${inp('bands.commApprover', S.bands.commApprover, 70, 'number')} %</span><span class="cell-sub">Above that, or while blank: COO / Director</span></div></div>
   <div class="card" style="padding:12px 14px;margin-bottom:10px;"><b>Advance and requests</b>
     <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;align-items:center;"><span>Minimum advance ${inp('advancePct', S.advancePct, 70, 'number')} % of the basic value (freight included)</span><span>Approval link lasts ${inp('linkHours', S.linkHours, 60, 'number')} hours</span>
       <span>Requests required from ${inp('requiredFrom', S.requiredFrom, 150, 'date')}</span></div></div>
@@ -17668,7 +17679,7 @@ function soapRoute(){ const m = location.hash.match(/^#so-approval\/([^/]+)\/([a
   state.module = 'soapproval'; return true; }
 window.addEventListener('hashchange', () => { if (soapRoute() && state.currentUser) renderAll(); });
 soapRoute();
-const soapNew = (pdf, file) => ({ pdf, so:pdf.so, file, pin:pdf.pin || '', pinTyped:!pdf.pin, payments:[], reasons:{} });
+const soapNew = (pdf, file) => ({ pdf, so:pdf.so, file, pin:pdf.pin || '', pinTyped:!pdf.pin, payments:[], reasons:{}, comms:[], revised:null, custPo:'' });
 
 extraWiring.push(() => {
   if (state.module !== 'soapproval') return;
@@ -17699,22 +17710,27 @@ extraWiring.push(() => {
     const sub = q('#soapSubmit'); if (sub) sub.addEventListener('click', () => {
       const fail = t => { U.msg = { ok:false, text:t }; renderAll(); };
       if (!/^[1-9]\d{5}$/.test(D.pin || '')) return fail('Enter the 6-digit delivery PIN.');
+      if (D.revised !== true && D.revised !== false) return fail('Say whether this is a revised SO.');
+      if (D.revised){ const rv = soapRevOf(D.so); if (!rv) return fail(`Raise the SO Revision request first (old SO → ${D.so}), then send this.`); D.revId = rv.id; D.oldSo = rv.so; }
+      for (const c of (D.comms || [])){ if (!c.archId) return fail('Pick who each commission is paid to, or remove the empty row.'); if (!(+c.value > 0)) return fail('Enter the commission % or amount for each person.'); if (c.mode === 'pct' && +c.value > 30) return fail('A commission over 30% looks wrong — check it.'); }
+      if (new Set((D.comms || []).map(c => c.archId)).size !== (D.comms || []).length) return fail('The same person is listed twice.');
       const ev = soapEval(D);
       for (const it of ev.items) if (words((D.reasons || {})[it.key]) < 3) return fail(`Give a reason (at least 3 words) for: ${it.label}.`);
       if (D.reviseOf){
         const r = SOAP.find(x => x.id === D.reviseOf); if (!r) return fail('The request is gone.');
         const was = { basic:r.pdf.totals.net, disc:soapEval(r).discount.pct };
-        Object.assign(r, { pdf:D.pdf, file:D.file, pin:D.pin, pinTyped:D.pinTyped, payments:D.payments, reasons:D.reasons, rev:(r.rev || 0) + 1, updatedAt:nowIso() });
+        const wasC = soapEval(r).commission;
+        Object.assign(r, { pdf:D.pdf, file:D.file, pin:D.pin, pinTyped:D.pinTyped, payments:D.payments, reasons:D.reasons, comms:JSON.parse(JSON.stringify(D.comms || [])), revised:D.revised, revId:D.revId || '', oldSo:D.oldSo || '', oldComm:D.oldComm || null, custPo:D.custPo || '', rev:(r.rev || 0) + 1, updatedAt:nowIso() });
         if (r.status === 'sent_back') r.status = 'submitted';
         Object.values(r.appr || {}).forEach(a => { if (a.status === 'rejected') a.status = 'stale'; });
         const before = JSON.stringify(Object.values(r.appr || {}).map(a => [a.key, a.status]));
         soapSyncApprovals(r);
-        soapLog(r, `Revised (revision ${r.rev}): basic ${fmtRupees(was.basic)} → ${fmtRupees(r.pdf.totals.net)}, discount ${was.disc}% → ${soapEval(r).discount.pct}%` + (before !== JSON.stringify(Object.values(r.appr).map(a => [a.key, a.status])) ? '; approvals updated' : '; approvals still cover it'));
+        soapLog(r, `Revised (revision ${r.rev}): basic ${fmtRupees(was.basic)} → ${fmtRupees(r.pdf.totals.net)}, discount ${was.disc}% → ${soapEval(r).discount.pct}%` + (wasC.pct || soapEval(r).commission.pct ? `, commission ${wasC.pct}% → ${soapEval(r).commission.pct}%` : '') + (before !== JSON.stringify(Object.values(r.appr).map(a => [a.key, a.status])) ? '; approvals updated' : '; approvals still cover it'));
         if (r.link) r.link = null;
         U.draft = null; U.tab = 'requests'; U.open = r.id; U.msg = null; return renderAll();
       }
       if (SOAP.find(x => x.so === D.so && x.status !== 'withdrawn')) return fail('There is already a request for this SO.');
-      const r = Object.assign({ id:'SOA-' + Date.now().toString(36).toUpperCase(), status:'submitted', at:nowIso(), updatedAt:nowIso(), by:actingUserName(), byKey:userKey(), byRole:state.role, rev:0 }, { pdf:D.pdf, so:D.so, file:D.file, pin:D.pin, pinTyped:D.pinTyped, payments:D.payments || [], reasons:D.reasons || {} });
+      const r = Object.assign({ id:'SOA-' + Date.now().toString(36).toUpperCase(), status:'submitted', at:nowIso(), updatedAt:nowIso(), by:actingUserName(), byKey:userKey(), byRole:state.role, rev:0 }, { pdf:D.pdf, so:D.so, file:D.file, pin:D.pin, pinTyped:D.pinTyped, payments:D.payments || [], reasons:D.reasons || {}, comms:JSON.parse(JSON.stringify(D.comms || [])), revised:D.revised, revId:D.revId || '', oldSo:D.oldSo || '', oldComm:D.oldComm || null, custPo:D.custPo || '' });
       soapSyncApprovals(r); soapLog(r, r.level ? `Sent for approval (${LV_NAME[r.level]}): ${Object.values(r.appr).map(a => a.label).join('; ')}` : 'Sent to accounts — no approvals needed');
       SOAP.unshift(r); U.draft = null; U.tab = 'requests'; U.open = r.id; renderAll();
     });
@@ -17732,7 +17748,7 @@ extraWiring.push(() => {
     const cf = q('#soapConfirm'); if (cf) cf.addEventListener('click', () => { R.status = 'confirmed'; R.confirmed = { by:actingUserName(), at:nowIso(), note:(q('#soapAccNote').value || '').trim() }; R.updatedAt = nowIso(); soapLog(R, 'Accounts confirmed the SO' + (R.confirmed.note ? ` — “${R.confirmed.note}”` : '')); renderAll(); });
     const sb = q('#soapSendBack'); if (sb) sb.addEventListener('click', () => { const n = (q('#soapAccNote').value || '').trim(); if (words(n) < 2) return alertBox('#soapAccNote', 'Say what sales must fix');
       R.status = 'sent_back'; R.sentBack = { by:actingUserName(), at:nowIso(), note:n }; R.updatedAt = nowIso(); soapLog(R, `Sent back to sales — “${n}”`); renderAll(); });
-    qa('[data-soap-revise]').forEach(b => b.addEventListener('click', () => { U.draft = { reviseOf:R.id, so:R.so, pdf:R.pdf, file:R.file, pin:R.pin, pinTyped:R.pinTyped, payments:JSON.parse(JSON.stringify(R.payments || [])), reasons:Object.assign({}, R.reasons) }; U.tab = 'new'; U.msg = null; renderAll(); }));
+    qa('[data-soap-revise]').forEach(b => b.addEventListener('click', () => { U.draft = { reviseOf:R.id, so:R.so, pdf:R.pdf, file:R.file, pin:R.pin, pinTyped:R.pinTyped, payments:JSON.parse(JSON.stringify(R.payments || [])), reasons:Object.assign({}, R.reasons), comms:JSON.parse(JSON.stringify(R.comms || [])), revised:R.revised == null ? null : R.revised, revId:R.revId, oldSo:R.oldSo, oldComm:R.oldComm || null, custPo:R.custPo || '' }; U.tab = 'new'; U.msg = null; renderAll(); }));
     qa('[data-soap-withdraw]').forEach(b => b.addEventListener('click', () => { if (b.dataset.armed !== '1'){ b.dataset.armed = '1'; b.textContent = 'Click again to withdraw'; return; } R.status = 'withdrawn'; R.updatedAt = nowIso(); soapLog(R, 'Withdrawn'); renderAll(); }));
     const lm = q('#soapLinkMake'); if (lm) lm.addEventListener('click', () => { const t = Array.from(crypto.getRandomValues(new Uint8Array(12))).map(x => x.toString(16).padStart(2, '0')).join('');
       R.link = { token:t, at:nowIso(), by:actingUserName(), expiresAt:new Date(Date.now() + (+soapSet().linkHours || 48) * 3600e3).toISOString() }; soapLog(R, 'Approval link created'); renderAll(); });
@@ -17749,6 +17765,7 @@ extraWiring.push(() => {
     qa('[data-soap-set]').forEach(el => el.addEventListener('change', e => {
       const k = el.dataset.soapSet, v = e.target.value.trim(), n = v === '' ? null : +v; let what = '';
       if (k === 'bands.sales' || k === 'bands.approver'){ S.bands[k.split('.')[1]] = n; what = `${k === 'bands.sales' ? 'Sales' : 'Approver'} discount limit → ${v || 'blank'}%`; }
+      else if (k === 'bands.commApprover'){ S.bands.commApprover = n; what = `Approver commission limit → ${v || 'blank'}%`; }
       else if (['advancePct', 'linkHours', 'roadFactor'].includes(k)){ S[k] = n; what = `${k} → ${v}`; }
       else if (k === 'requiredFrom'){ S.requiredFrom = v; what = `Requests required from → ${v}`; }
       else if (['freightCodes', 'freightWords', 'pieceUoms', 'pieceExclude'].includes(k)){ S[k] = list(v); what = `${k} → ${v}`; }
@@ -17808,6 +17825,143 @@ inboxItems = (base => function(){ const out = base.apply(this, arguments);
     out.push({ kind:'action', id:'soap-site-' + b.id + '-' + fl.actual, area:'SO Approval Request', title:`Site for SO ${b.so} is ${fl.actual} — freight charged for ${fl.charged}`, detail:`Booking ${b.id} · ${fmtDate(b.date)} · ${fl.how}`, nav:{ module:'slots', set:() => { state.lastMileTab = 'dispatch'; } } }); });
   return out; })(inboxItems);
 window.__xsoap = { SOAP, soapSet, soapEval, soapFreightRate, soapBandFor, soapFillPins, soapSiteFlag, soapSyncApprovals, parse:soParseItems, readPdf:soapReadPdf, U:SOAP_ST };
+
+// ================================================================ 23 Nov 2026 (JK): commission, architects, revised SO, customer PO
+// Commission to an architect / designer / middleman: sales enter it per recipient as a % or an amount; it is worked out
+// on the pre-GST value after discount without the freight line(s), and every commission needs an SO approver (up to the
+// admin's limit) or the COO / Director. Recipients come from a saved list kept on the server (/api/architects) because it
+// holds bank account and PAN numbers: full numbers only for accounts, admin and whoever entered them; others see the last
+// 4. New or changed bank details are "Unverified" until accounts verify them (doesn't hold up the SO).
+// A revised SO is linked to its SO Revision request (found by the new SO number); the old SO's approved commission is
+// carried in for comparison, and accounts can't confirm until the COO / Director has approved the revision.
+const ARCH = { list:null, loading:false, err:'', edit:null, msg:null };
+const archLoad = (force) => { if (ARCH.loading || (ARCH.list && !force)) return; if (!window.__OB || !window.__OB.api){ ARCH.list = ARCH.list || []; ARCH.err = 'The saved list needs the online version.'; return; }
+  ARCH.loading = true; window.__OB.api('/api/architects', { cache:'no-store' }).then(r => { ARCH.list = (r && r.architects) || []; ARCH.err = ''; }, e => { ARCH.err = (e && e.message) || 'Couldn’t load the saved list.'; ARCH.list = ARCH.list || []; })
+    .then(() => { ARCH.loading = false; if (state.module === 'soapproval') renderAll(); }); };
+const archById = id => (ARCH.list || []).find(a => a.id === id) || null;
+const archKinds = { architect:'Architect', designer:'Designer', middleman:'Middleman / referrer', other:'Other' };
+const archVer = a => !a ? '' : a.verified ? sP('good', `Bank verified · ${xe(a.verified.by)}`) : sP('warn', 'Bank details unverified');
+const soapRevOf = so => (typeof SO_REVISION_REQUESTS === 'undefined' ? [] : SO_REVISION_REQUESTS).find(x => x.status !== 'rejected' && (x.newSos || []).some(n => n && n.so === so)) || null;
+const soapRevOk = rv => !!rv && !['draft', 'awaiting_approval', 'sent_back', 'rejected'].includes(rv.status);
+const soapOldComm = oldSo => { const o = SOAP.find(x => x.so === oldSo && x.status !== 'withdrawn'); if (!o) return null; const c = soapEval(o).commission; if (!c || !c.lines.length) return { so:oldSo, none:true };
+  return { so:oldSo, pct:c.pct, amt:c.amt, lines:c.lines.map(l => ({ archId:l.archId, name:l.name, amt:l.amt, pct:l.pct, mode:l.mode, value:l.value })) }; };
+
+function soapExtraHtml(r, editable){
+  // revised SO + customer PO
+  const rv = r.so ? soapRevOf(r.so) : null;
+  const revBox = r.revised === true ? (rv ? `<div class="cell-sub" style="margin-top:4px;">Linked to SO Revision <b>${xe(rv.id)}</b> (old SO ${xe(rv.so)}) — ${soapRevOk(rv) ? sP('good', 'Revision approved by COO / Director') : sP('warn', 'Revision not approved yet — accounts can’t confirm until it is')}</div>`
+      : `<div class="part-po-note" style="margin-top:6px;">No SO Revision request names SO ${xe(r.so)} as the new SO. Raise one first in SO Revision Request (old SO → this SO).${editable ? ' <button class="btn-text" id="soapGoRev">Open SO Revision Request</button>' : ''}</div>`) : '';
+  return `<div class="card" style="padding:12px 14px;margin-bottom:10px;"><b>Order details for accounts</b>
+    ${editable ? `<div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;align-items:flex-end;"><div class="field" style="margin:0;"><label>Is this a revised SO? <span class="req">*</span></label>
+        <div style="display:flex;gap:12px;"><label><input type="radio" name="soapRevised" value="no" ${r.revised === false ? 'checked' : ''}> No</label><label><input type="radio" name="soapRevised" value="yes" ${r.revised === true ? 'checked' : ''}> Yes</label></div></div>
+      <div class="field" style="margin:0;"><label>Customer's purchase order no. (if any)</label><input id="soapCustPo" value="${xe(r.custPo || '')}" style="width:220px;"></div></div>`
+    : `<div class="cell-sub">Revised SO: <b>${r.revised === true ? 'Yes' : r.revised === false ? 'No' : '—'}</b> · customer PO: <b>${xe(r.custPo || '—')}</b></div>`}
+    ${revBox}</div>`;
+}
+function soapCommHtml(r, ev, editable){
+  const C = ev.commission, S = soapSet(), a = (r.appr || {}).commission, old = r.oldComm;
+  const res = !C.level ? sP('neutral', 'No commission') : a && a.status === 'approved' ? sP('good', `Approved by ${xe(a.by)}`) : a && a.status === 'rejected' ? sP('critical', `Rejected by ${xe(a.by)}`) : sP(C.level === 'coo' ? 'critical' : 'warn', `Needs ${LV_NAME[C.level]}`);
+  const canFull = ['accounts', 'admin'].includes(state.role);
+  const rows = (editable ? (r.comms || []) : C.lines).map((c, i) => { const A = archById(c.archId), L = C.lines.find(x => x.archId === c.archId) || {};
+    return `<tr><td>${editable ? `<select data-soap-carch="${i}" style="max-width:240px;"><option value="">Choose…</option>${(ARCH.list || []).map(x => `<option value="${x.id}" ${x.id === c.archId ? 'selected' : ''}>${xe(x.name)}${x.firm ? ' · ' + xe(x.firm) : ''} (${xe(x.mobile)})</option>`).join('')}</select>` : `<b>${xe(c.name || (A || {}).name || '—')}</b>`}
+        <div class="cell-sub">${A ? `${xe(archKinds[A.kind] || '')} · ${xe(A.mobile)} · A/c ${xe(A.acct)} · IFSC ${xe(A.ifsc)} · PAN ${xe(A.pan)} ${archVer(A)}` : c.archId ? 'Details not loaded' : ''}</div></td>
+      <td>${editable ? `<select data-soap-cmode="${i}"><option value="pct" ${c.mode === 'pct' ? 'selected' : ''}>%</option><option value="amt" ${c.mode === 'amt' ? 'selected' : ''}>₹ amount</option></select> <input data-soap-cval="${i}" type="number" min="0" step="0.01" value="${xe(c.value == null ? '' : c.value)}" style="width:100px;">` : (c.mode === 'pct' ? `${c.value}%` : fmtRupees(c.value))}</td>
+      <td>${L.amt != null ? `${fmtRupees(L.amt)}<div class="cell-sub">${L.pct}%</div>` : '—'}</td>${editable ? `<td><button class="btn-text" data-soap-cdel="${i}">Remove</button></td>` : ''}</tr>`; }).join('');
+  return `<div class="card" style="padding:12px 14px;margin-bottom:10px;">
+    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;"><b>Commission ${C.lines.length ? `${C.pct}% · ${fmtRupees(C.amt)}` : '— none'}</b>${res}</div>
+    <div class="cell-sub">Worked out on ${fmtRupees(C.base)} — the pre-GST value after discount, without freight. Every commission needs approval: SO approver up to ${soapFmtPct(S.bands.commApprover)}, above that COO / Director.${C.unset ? ' The limit isn’t set, so it goes to COO / Director.' : ''}
+      ${C.lines.length ? ` Discount + commission = ${fmtRupees(C.giveAmt)}, <b>${C.givePct}%</b> of the list value without freight.` : ''}</div>
+    ${old ? `<div class="part-po-note" style="margin-top:6px;">Revised from SO ${xe(old.so)}: ${old.none ? 'no commission there' : `commission was ${old.pct}% · ${fmtRupees(old.amt)} (${old.lines.map(l => xe(l.name)).join(', ')})`} → now ${C.lines.length ? `${C.pct}% · ${fmtRupees(C.amt)}` : 'none'}.</div>` : ''}
+    ${(rows || editable) ? `<table class="grid-table" style="margin-top:6px;"><thead><tr><th>Paid to</th><th>Commission</th><th>Works out to</th>${editable ? '<th></th>' : ''}</tr></thead><tbody>${rows || `<tr><td colspan="${editable ? 4 : 3}" class="cell-sub">No commission on this SO.</td></tr>`}</tbody></table>` : ''}
+    ${editable ? `<div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap;"><button class="btn btn-ghost btn-sm" id="soapCommAdd">+ Add commission</button><button class="btn-text" id="soapArchNew">Save a new architect / designer…</button>${ARCH.loading ? '<span class="cell-sub">Loading the saved list…</span>' : ARCH.err ? `<span class="scan-error">${xe(ARCH.err)}</span>` : ''}</div>${ARCH.edit ? archFormHtml() : ''}` : ''}
+    ${C.level ? (editable ? `<div class="field" style="margin-top:6px;"><label>Reason for the commission <span class="req">*</span></label><input data-soap-reason="commission" value="${xe((r.reasons || {}).commission || '')}" placeholder="Who brought the client, and why this rate"></div>` : (r.reasons || {}).commission ? `<div class="cell-sub" style="margin-top:4px;">Sales: “${xe(r.reasons.commission)}”</div>` : '') : ''}
+    ${!editable && canFull && C.lines.some(l => { const A = archById(l.archId); return A && !A.verified; }) ? `<div class="cell-sub" style="margin-top:6px;">Verify unverified bank details in the <button class="btn-text" data-soap-tab="arch">Architects &amp; designers</button> tab before paying.</div>` : ''}</div>`;
+}
+function archFormHtml(){
+  const e = ARCH.edit, A = e.id ? archById(e.id) : null, v = k => xe(e[k] == null ? '' : e[k]);
+  const f = (k, l, extra) => `<div class="field" style="margin:0;"><label>${l}</label><input data-arch-f="${k}" value="${v(k)}" ${extra || ''}></div>`;
+  return `<div class="card" style="padding:12px 14px;margin-top:8px;border-color:var(--accent);"><b>${A ? `Edit ${xe(A.name)}` : 'New architect / designer'}</b>
+    <div class="cell-sub">Saved for everyone in sales to pick next time. Bank details and PAN are shown in full only to accounts, admin and whoever entered them. New or changed bank details stay “Unverified” until accounts check them.${A ? ' Leave the bank fields as they are to keep them; type over them to change.' : ''}</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px;margin-top:8px;">
+      ${f('name', 'Name <span class="req">*</span>')}<div class="field" style="margin:0;"><label>Type</label><select data-arch-f="kind">${Object.entries(archKinds).map(([k, l]) => `<option value="${k}" ${e.kind === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      ${f('firm', 'Firm (if any)')}${f('mobile', 'Mobile <span class="req">*</span>', 'maxlength="13" inputmode="tel"')}
+      ${f('acct', 'Bank account no. <span class="req">*</span>', 'autocomplete="off" inputmode="numeric"')}${f('acct2', 'Account no. again <span class="req">*</span>', 'autocomplete="off" inputmode="numeric"')}
+      ${f('ifsc', 'IFSC <span class="req">*</span>', 'maxlength="11" style="text-transform:uppercase;"')}${f('bankName', 'Bank name <span class="req">*</span>')}${f('branch', 'Branch <span class="req">*</span>')}
+      ${f('pan', 'PAN <span class="req">*</span>', 'maxlength="10" style="text-transform:uppercase;" autocomplete="off"')}${f('state', 'State (tax jurisdiction) <span class="req">*</span>')}${f('gstin', 'GSTIN (if registered)', 'maxlength="15" style="text-transform:uppercase;"')}</div>
+    <div class="field" style="margin-top:8px;"><label>Address <span class="req">*</span></label><input data-arch-f="address" value="${v('address')}"></div>
+    ${ARCH.msg ? `<div class="${ARCH.msg.ok ? 'cell-sub' : 'scan-error'}" style="margin-top:6px;">${xe(ARCH.msg.text)}</div>` : ''}
+    <div style="margin-top:8px;"><button class="btn btn-primary btn-sm" id="archSave" ${e.busy ? 'disabled' : ''}>${e.busy ? 'Saving…' : 'Save'}</button> <button class="btn-text" id="archCancel">Cancel</button></div></div>`;
+}
+function soapArchTabHtml(){
+  archLoad(); const acc = ['accounts', 'admin'].includes(state.role), ed = ['sales', 'accounts', 'admin'].includes(state.role), L = ARCH.list || [], q = (SOAP_ST().archQ || '').toLowerCase();
+  const used = id => SOAP.filter(r => r.status !== 'withdrawn' && (r.comms || []).some(c => c.archId === id));
+  const rows = L.filter(a => !q || [a.name, a.firm, a.mobile].join(' ').toLowerCase().includes(q)).sort((a, b) => (!!a.verified - !!b.verified) || a.name.localeCompare(b.name));
+  return `<div class="card" style="padding:12px 14px;margin-bottom:10px;"><b>Architects, designers and middlemen paid a commission</b>
+      <div class="cell-sub">Bank account and PAN: full for accounts, admin and whoever entered them; the last 4 for everyone else. ${acc ? 'Verify new or changed bank details before paying — someone other than the person who entered them must verify.' : ''}</div>
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;"><input id="archQ" placeholder="Find by name, firm or mobile" value="${xe(SOAP_ST().archQ || '')}" style="min-width:240px;">${ed ? '<button class="btn btn-ghost btn-sm" id="soapArchNew">+ New</button>' : ''}${ARCH.loading ? '<span class="cell-sub">Loading…</span>' : ''}${ARCH.err ? `<span class="scan-error">${xe(ARCH.err)}</span>` : ''}</div>
+      ${ARCH.edit ? archFormHtml() : ''}</div>
+    <div class="card table-wrap"><table class="grid-table"><thead><tr><th>Name</th><th>Mobile</th><th>Bank</th><th>PAN · state · GSTIN</th><th>Bank check</th><th>On SOs</th><th></th></tr></thead><tbody>
+    ${rows.map(a => { const u = used(a.id); return `<tr><td><b>${xe(a.name)}</b><div class="cell-sub">${xe(archKinds[a.kind] || '')}${a.firm ? ' · ' + xe(a.firm) : ''}</div></td><td>${xe(a.mobile)}</td>
+      <td class="mono">${xe(a.acct)}<div class="cell-sub">${xe(a.ifsc)} · ${xe(a.bankName)}, ${xe(a.branch)}</div><div class="cell-sub">entered by ${xe(a.bankBy || '—')} ${a.bankAt ? fmtDT(a.bankAt) : ''}</div></td>
+      <td class="mono">${xe(a.pan)}<div class="cell-sub">${xe(a.state)}${a.gstin ? ' · ' + xe(a.gstin) : ''}</div></td>
+      <td>${archVer(a)}${acc && !a.verified && a.full ? `<div><button class="btn-text" data-arch-verify="${a.id}" data-sig="${a.sig}">I checked these — verify</button></div>` : ''}</td>
+      <td>${u.length ? u.map(r => `<a href="#" data-soap-open="${r.id}">${xe(String(r.so).slice(-6))}</a>`).join(' ') : '<span class="cell-sub">—</span>'}</td>
+      <td>${ed ? `<button class="btn-text" data-arch-edit="${a.id}">Edit</button>` : ''}<details><summary class="cell-sub">History</summary>${(a.log || []).slice().reverse().map(l => `<div class="cell-sub">${fmtDT(l.at)} · ${xe(l.by)}: ${xe(l.text)}</div>`).join('')}</details></td></tr>`; }).join('')
+      || `<tr><td colspan="7" class="cell-sub">${ARCH.loading ? 'Loading…' : 'Nobody saved yet.'}</td></tr>`}</tbody></table></div>`;
+}
+const archBlank = () => ({ kind:'architect', name:'', firm:'', mobile:'', acct:'', acct2:'', ifsc:'', bankName:'', branch:'', pan:'', state:'', gstin:'', address:'' });
+
+extraWiring.push(() => {
+  if (state.module !== 'soapproval') return;
+  const U = SOAP_ST(), D = U.draft, q = s => document.querySelector(s), qa = s => document.querySelectorAll(s);
+  if ((D && D.pdf) || U.open) archLoad();
+  // the architect form (in the request form or the list tab)
+  const na = q('#soapArchNew'); if (na) na.addEventListener('click', () => { ARCH.edit = archBlank(); ARCH.msg = null; renderAll(); });
+  qa('[data-arch-edit]').forEach(b => b.addEventListener('click', () => { const A = archById(b.dataset.archEdit); if (!A) return; ARCH.edit = Object.assign(archBlank(), A, { acct2:A.acct }); ARCH.msg = null; renderAll(); }));
+  qa('[data-arch-f]').forEach(el => el.addEventListener('input', e => { if (ARCH.edit) ARCH.edit[el.dataset.archF] = e.target.value; }));
+  qa('[data-arch-f]').forEach(el => el.addEventListener('change', e => { if (ARCH.edit) ARCH.edit[el.dataset.archF] = e.target.value; }));
+  const ac = q('#archCancel'); if (ac) ac.addEventListener('click', () => { ARCH.edit = null; ARCH.msg = null; renderAll(); });
+  const as = q('#archSave'); if (as) as.addEventListener('click', async () => { const e = ARCH.edit; if (!e || e.busy) return;
+    const A = e.id ? archById(e.id) : null;
+    if (!A || e.acct !== A.acct || e.acct2 !== A.acct){ if (String(e.acct).replace(/\s/g, '') !== String(e.acct2).replace(/\s/g, '')){ ARCH.msg = { ok:false, text:'The two bank account numbers don’t match.' }; return renderAll(); } }
+    e.busy = true; ARCH.msg = null; renderAll();
+    try { const res = await window.__OB.api('/api/architects', { body:{ action:'save', arch:e } }); const x = res.architect; ARCH.list = (ARCH.list || []).filter(a => a.id !== x.id).concat([x]);
+      // a new one made from the request form goes straight onto the empty commission row (or a new row)
+      if (!e.id && U.draft && U.draft.pdf && U.tab === 'new'){ const C = U.draft.comms = U.draft.comms || []; const empty = C.find(c => !c.archId); if (empty){ empty.archId = x.id; empty.name = x.name; } else C.push({ archId:x.id, name:x.name, mode:'pct', value:'' }); }
+      ARCH.edit = null; ARCH.msg = { ok:true, text:`Saved ${x.name}.` };
+    } catch(err){ e.busy = false; ARCH.msg = { ok:false, text:(err && err.message) || 'Couldn’t save.' }; }
+    if (ARCH.edit) ARCH.edit.busy = false; renderAll(); });
+  qa('[data-arch-verify]').forEach(b => b.addEventListener('click', async () => { if (b.dataset.armed !== '1'){ b.dataset.armed = '1'; b.textContent = 'Click again — account, IFSC and PAN match the architect’s proof'; return; }
+    try { const res = await window.__OB.api('/api/architects', { body:{ action:'verify', id:b.dataset.archVerify, sig:b.dataset.sig } }); ARCH.list = ARCH.list.map(a => a.id === res.architect.id ? res.architect : a); ARCH.msg = null; }
+    catch(err){ ARCH.msg = { ok:false, text:(err && err.message) || 'Couldn’t verify.' }; archLoad(true); } renderAll(); }));
+  const aq = q('#archQ'); if (aq) aq.addEventListener('change', e => { U.archQ = e.target.value.trim(); renderAll(); });
+  // request form: revised SO, customer PO, commission rows
+  if (D && D.pdf){
+    qa('input[name="soapRevised"]').forEach(el => el.addEventListener('change', e => { D.revised = e.target.value === 'yes';
+      const rv = D.revised ? soapRevOf(D.so) : null; D.revId = rv ? rv.id : ''; D.oldSo = rv ? rv.so : '';
+      if (rv && !D.oldComm){ D.oldComm = soapOldComm(rv.so); if (D.oldComm && !D.oldComm.none && !(D.comms || []).length) D.comms = D.oldComm.lines.map(l => ({ archId:l.archId, name:l.name, mode:l.mode, value:l.value })); }
+      if (!D.revised){ D.oldComm = null; } renderAll(); }));
+    const cp = q('#soapCustPo'); if (cp) cp.addEventListener('input', e => { D.custPo = e.target.value.trim(); });
+    const gr = q('#soapGoRev'); if (gr) gr.addEventListener('click', () => goTo('sorevision'));
+    const add = q('#soapCommAdd'); if (add) add.addEventListener('click', () => { (D.comms = D.comms || []).push({ archId:'', name:'', mode:'pct', value:'' }); renderAll(); });
+    qa('[data-soap-carch]').forEach(el => el.addEventListener('change', e => { const c = D.comms[+el.dataset.soapCarch], A = archById(e.target.value); c.archId = e.target.value; c.name = A ? A.name : ''; renderAll(); }));
+    qa('[data-soap-cmode]').forEach(el => el.addEventListener('change', e => { D.comms[+el.dataset.soapCmode].mode = e.target.value; renderAll(); }));
+    qa('[data-soap-cval]').forEach(el => el.addEventListener('change', e => { D.comms[+el.dataset.soapCval].value = e.target.value === '' ? '' : +e.target.value; renderAll(); }));
+    qa('[data-soap-cdel]').forEach(b => b.addEventListener('click', () => { D.comms.splice(+b.dataset.soapCdel, 1); renderAll(); }));
+  }
+});
+extraWiring.push(() => { if (state.module !== 'soapproval') return;
+  document.querySelectorAll('a[data-soap-open]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); const U = SOAP_ST(); U.tab = 'requests'; U.open = a.dataset.soapOpen; renderAll(); })); });
+// SO Revision Request: commission on the revised SOs, read-only (it is entered and approved in SO Approval Request)
+{ const _rsr = renderSoRevision; renderSoRevision = function(){
+  const h = _rsr.apply(this, arguments), revs = (typeof SO_REVISION_REQUESTS === 'undefined' ? [] : SO_REVISION_REQUESTS).filter(x => x.status !== 'rejected');
+  const rows = []; revs.forEach(rv => (rv.newSos || []).forEach(n => { const r = n && SOAP.find(x => x.so === n.so && x.status !== 'withdrawn'); if (!r) return; const c = soapEval(r).commission, o = r.oldComm || soapOldComm(rv.so), a = (r.appr || {}).commission;
+    rows.push(`<tr><td class="mono">${xe(rv.id)}</td><td class="mono">${xe(rv.so)} → ${xe(n.so)}</td><td>${o && !o.none ? `${o.pct}% · ${fmtRupees(o.amt)}` : '—'}</td><td>${c.lines.length ? `${c.pct}% · ${fmtRupees(c.amt)}<div class="cell-sub">${c.lines.map(l => xe(l.name)).join(', ')}</div>` : '—'}</td>
+      <td>${!c.lines.length ? '' : a && a.status === 'approved' ? sP('good', `Approved by ${xe(a.by)}`) : a && a.status === 'rejected' ? sP('critical', 'Rejected') : sP('warn', 'Waiting')}</td><td>${sP(soapStatus(r)[0], soapStatus(r)[1])}</td></tr>`); }));
+  if (!rows.length) return h;
+  return h + `<div class="card table-wrap" style="margin-top:14px;"><div style="padding:10px 14px;"><b>Commission on revised SOs</b> <span class="cell-sub">read-only — entered and approved in SO Approval Request</span></div>
+    <table class="grid-table"><thead><tr><th>Revision</th><th>Old → new SO</th><th>Commission before</th><th>Commission now</th><th>Approval</th><th>SO approval request</th></tr></thead><tbody>${rows.join('')}</tbody></table></div>`; }; }
+window.__xsoap.arch = ARCH; window.__xsoap.archLoad = archLoad; window.__xsoap.soapRevOf = soapRevOf;
 
 // ================================================================ 22 Nov 2026 (JK): factory-PO base box + client confirmation sheet
 // A. Dashboard › Orders in Production, first box: open SKU lines on POs raised to the factory (MFPL product lines with
