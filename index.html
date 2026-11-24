@@ -771,7 +771,8 @@ var STORES = {
   ob_corrections:{ t:'list', n:8, dir:'desc' },
   ob_keep_sos:{ t:'value' },
   ob_so_requests:{ t:'list', n:8, dir:'desc' },
-  ob_so_settings:{ t:'value' }
+  ob_so_settings:{ t:'value' },
+  ob_size_log:{ t:'value' }
 };
 var USER_RE = /^ob_(profiles$|approver_me$|inbox_read_|inbox_seen_|mute_|unfollow_)/;   // kept per signed-in user
 function cfgFor(k){ if (Object.prototype.hasOwnProperty.call(STORES, k)) return STORES[k]; if (USER_RE.test(k) && /^[A-Za-z0-9_]+$/.test(k)) return { t:'user' }; return null; }
@@ -958,6 +959,14 @@ function flush(){
   })();
   return inflight;
 }
+// 24 Nov 2026 (Admin › Usage › Data size): how big the saved work is, per store and per saved piece.
+OB.storeSizes = function(){
+  var out = {};
+  Object.keys(snapB).forEach(function(key){ var m = /^b_(ob_[A-Za-z0-9_]+?)__/.exec(key); if (!m) return;
+    var n = JSON.stringify(snapB[key] || {}).length, o = out[m[1]] = out[m[1]] || { chars:0, pieces:0, recs:0, max:0, maxKey:'' };
+    o.chars += n; o.pieces++; o.recs += Object.keys((snapB[key] || {}).recs || {}).length; if (n > o.max){ o.max = n; o.maxKey = key; } });
+  return out;
+};
 OB.flush = function(){ if (timer){ clearTimeout(timer); timer = null; } return flush(); };
 
 
@@ -1375,6 +1384,7 @@ async function loadData(meta){
     return parts.join('');
   }
   var text = await all(true);
+  OB.dataChars = text.length;
   setMsg('Preparing…');
   try { return JSON.parse(text); } catch(e){ return JSON.parse(await all(false)); }
 }
@@ -1446,11 +1456,13 @@ async function start(user, pre){
   try {
     var m = await pre.meta;
     OB.dataMeta = (m && m.meta) || null;
-    if (OB.dataMeta) data = await loadData(OB.dataMeta);
+    var t0 = Date.now(); OB.loadMs = {};
+    if (OB.dataMeta){ data = await loadData(OB.dataMeta); OB.loadMs.data = Date.now() - t0; t0 = Date.now(); }
     else if (user.role === 'admin') data = emptyData();
     else return failScreen('No data has been uploaded yet. Ask an admin to upload the Order Bridge data file in Admin Uploads.');
     setMsg('Loading saved work…');
     snap = await pre.store;
+    OB.loadMs.store = OB.storeLoadMs || (Date.now() - t0);
     OB.users = user.role === 'admin' ? await Promise.race([api('/api/admin/users', { cache:'no-store' }).then(function(r){ return (r || {}).users || []; }, function(){ return []; }), new Promise(function(r){ setTimeout(function(){ r([]); }, 6000); })]) : [];
   } catch(e){
     if (e.status === 401){ clrTok(); return loginScreen('Your session has ended. Please sign in again.'); }
@@ -1468,7 +1480,7 @@ async function start(user, pre){
 }
 // meta and the saved store are fetched while the sign-in is still being checked
 function prefetch(){
-  var p = { meta: api('/api/data/meta', { cache:'no-store' }), store: loadStore() };
+  var p = { meta: api('/api/data/meta', { cache:'no-store' }), store: (function(ts){ return loadStore().then(function(r){ OB.storeLoadMs = Date.now() - ts; return r; }); })(Date.now()) };
   p.meta.catch(function(){}); p.store.catch(function(){});
   return p;
 }
@@ -18136,6 +18148,109 @@ renderOrderDetail = function(id){
 window.__xcsT = { lbs:() => LINES_BY_SO, ensureDetailShape, xcsSpec, xcsChanged, xcsLines, xFacOpen, xcsSheetHtml, xcsRows };
 // SO Approval Request has no edit-access row of its own: sales, accounts and approvers act in it, so don't tag it "View" for them
 canEditSection = (o => function(id, role){ if (id === 'soapproval') return ['sales', 'accounts', 'approver', 'admin'].includes(role); return o.apply(this, arguments); })(canEditSection);
+
+// ================================================================ 24 Nov 2026 (JK): Admin › Usage › Data size and limits
+// After the 16–23 Nov data loss (the shared data outgrew the browser's ~5 MB), admins see how close Order Bridge is to each
+// limit that could hurt it, how fast that is growing, and a warning on the Dashboard before it matters.
+//   1. Server storage — EdgeOne Pages KV: 1 GB per account (AUTH + APP_DATA + ERP_MIRROR together).
+//   2. Largest saved piece — one KV value may be at most 25 MB; the shared stores are split into pieces (buckets).
+//   3. Downloaded at sign-in — the ERP data file plus all saved work; past ~25 MB sign-in gets slow on phones.
+//   4. Browser storage — what Order Bridge still keeps in localStorage (~5 MB per site); since 24 Nov only small items.
+// A snapshot is saved once a day (ob_size_log) when an admin is signed in, for the growth trend.
+const SZ_MB = 1024 * 1024;
+const SZ_CHECKS = [
+  { k:'kv', label:'Server storage (all saved data)', limit:1024 * SZ_MB, warn:0.5, bad:0.8, note:'EdgeOne KV allows 1 GB per account. Estimate: saved work + the ERP data file (current and previous) + stored exports.' },
+  { k:'piece', label:'Largest single saved piece', limit:25 * SZ_MB, warn:0.4, bad:0.7, note:'One saved piece can be at most 25 MB. Saved work is split into pieces; if one keeps growing it will need splitting further.' },
+  { k:'page', label:'Downloaded at sign-in', limit:25 * SZ_MB, warn:0.5, bad:0.8, note:'ERP data file + all saved work, held in memory. Past about 25 MB, signing in gets slow on phones and older laptops.' },
+  { k:'browser', label:'Browser storage still used', limit:5 * SZ_MB, warn:0.4, bad:0.7, note:'Browsers allow about 5 MB per site. Since 24 Nov Order Bridge keeps only small items there (sign-in, usage figures).' }
+];
+const SZ_STORE_NAMES = { ob_order_ops:'Order line details', ob_activity:'Activity log', ob_job_cards:'Job cards', ob_act_parts:'Activity follows', ob_po_requests:'PO requests',
+  ob_fabric_entries:'Fabric entries', ob_fabric_challans:'Challans', ob_fabric_receipts:'Fabric receipts', ob_slot_bookings:'Slot bookings', ob_site_details:'Site details',
+  ob_so_revisions:'SO revisions', ob_so_requests:'SO approval requests', ob_so_settings:'SO approval settings', ob_stock_blocks:'Stock blocks', ob_wh_tags:'Warehouse tags',
+  ob_po_links:'PO links', ob_po_dl:'PO deadlines', ob_soline_res:'SO line notes', ob_dispatch_day:'Dispatch day', ob_corrections:'Corrections', ob_size_log:'Size log' };
+const SZ = { exp:null, expBusy:false, expErr:'', last:null };
+const szFmt = n => n >= 1024 * SZ_MB ? (n / 1024 / SZ_MB).toFixed(n % (1024 * SZ_MB) ? 1 : 0) + ' GB' : n >= SZ_MB ? (n / SZ_MB).toFixed(n >= 100 * SZ_MB ? 0 : 1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+const szLevel = (c, v) => v >= c.limit * c.bad ? 'bad' : v >= c.limit * c.warn ? 'warn' : 'ok';
+function szLoadExports(){
+  if (SZ.exp || SZ.expBusy || state.role !== 'admin' || !window.__OB || !window.__OB.api) return;
+  SZ.expBusy = true;
+  window.__OB.api('/api/exports', { cache:'no-store' }).then(r => { const sl = ((r || {}).meta || {}).slots || {};
+    SZ.exp = { bytes:Object.values(sl).reduce((a, x) => a + (+x.bytes || 0), 0), files:Object.keys(sl).length }; }, e => { SZ.expErr = e.message || 'Couldn’t read the stored exports'; SZ.exp = { bytes:0, files:0 }; })
+    .then(() => { SZ.expBusy = false; SZ.last = null; if (state.xAdminView === 'usage' || state.module === 'dashboard') renderAll(); });
+}
+function szMeasure(){
+  const OB = window.__OB || {}, st = OB.storeSizes ? OB.storeSizes() : {};
+  const storeChars = Object.values(st).reduce((a, o) => a + o.chars, 0);
+  const maxStore = Object.entries(st).reduce((m, [s, o]) => o.max > m.n ? { n:o.max, s } : m, { n:0, s:'' });
+  const dm = OB.dataMeta || {}, dataChars = OB.dataChars || dm.bytes || 0;
+  const dataStored = (dm.gz ? dataChars * 0.2 : dataChars) * 2;               // gzip keeps it to about a fifth; current + previous are kept
+  let br = 0; try { for (let i = 0; i < localStorage.length; i++){ const k = localStorage.key(i); br += k.length + (localStorage.getItem(k) || '').length; } } catch(e){}
+  const exp = SZ.exp ? SZ.exp.bytes : 0;
+  return { at:nowIso(), st, kv:storeChars + dataStored + exp, piece:maxStore.n, pieceStore:maxStore.s, page:storeChars + dataChars, browser:br,
+    parts:{ store:storeChars, data:dataStored, exp, dataRaw:dataChars }, loadMs:OB.loadMs || {}, expKnown:!!SZ.exp };
+}
+const szLog = () => { try { return JSON.parse(localStorage.getItem('ob_size_log') || 'null') || { days:{} }; } catch(e){ return { days:{} }; } };
+function szSnapshot(m){
+  if (state.role !== 'admin' || !m.expKnown) return;
+  const L = szLog(), d = todayStr(); if (L.days[d]) return;
+  L.days[d] = { kv:Math.round(m.kv), piece:m.piece, page:m.page, browser:m.browser, by:actingUserName(), stores:Object.fromEntries(Object.entries(m.st).map(([s, o]) => [s, o.chars])) };
+  const keep = Object.keys(L.days).sort().slice(-120); L.days = Object.fromEntries(keep.map(k => [k, L.days[k]]));
+  try { localStorage.setItem('ob_size_log', JSON.stringify(L)); } catch(e){}
+}
+// growth per day from the oldest snapshot 7–30 days back (or the oldest there is, if at least 3 days back)
+function szTrend(k, now){
+  const L = szLog(), days = Object.keys(L.days).sort(), today = todayStr(), back = d => Math.round((Date.parse(today) - Date.parse(d)) / 864e5);
+  const ref = days.filter(d => back(d) >= 3 && back(d) <= 30)[0]; if (!ref || L.days[ref][k] == null) return null;
+  return { perDay:(now - L.days[ref][k]) / back(ref), since:ref, days:back(ref) };
+}
+function szResult(){
+  if (SZ.last && Date.now() - SZ.lastAt < 60000) return SZ.last;
+  const m = szMeasure(); szSnapshot(m);
+  const rows = SZ_CHECKS.map(c => { const v = m[c.k], lv = szLevel(c, v), t = szTrend(c.k, v);
+    const toWarn = t && t.perDay > 0 && v < c.limit * c.warn ? (c.limit * c.warn - v) / t.perDay : null, toBad = t && t.perDay > 0 && v < c.limit * c.bad ? (c.limit * c.bad - v) / t.perDay : null;
+    return Object.assign({}, c, { v, lv, t, toWarn, toBad, soon: toBad != null && toBad < 30 }); });
+  SZ.last = { m, rows, worst: rows.some(r => r.lv === 'bad') ? 'bad' : rows.some(r => r.lv === 'warn' || r.soon) ? 'warn' : 'ok' }; SZ.lastAt = Date.now();
+  return SZ.last;
+}
+const szPill = lv => lv === 'bad' ? sP('critical', 'Act now') : lv === 'warn' ? sP('warn', 'Watch') : sP('good', 'OK');
+function szCard(){
+  szLoadExports(); const R = szResult(), m = R.m;
+  const days = n => n < 1 ? 'within a day' : n < 60 ? `in about ${Math.round(n)} days` : n < 730 ? `in about ${Math.round(n / 30)} months` : 'not within 2 years';
+  const rows = R.rows.map(r => { const pct = Math.min(100, r.v / r.limit * 100);
+    const trend = !r.t ? '<span class="cell-sub">Growth shows after 3 days of snapshots</span>' : r.t.perDay <= 0 ? `<span class="cell-sub">Not growing (since ${fmtDate(r.t.since)})</span>`
+      : `+${szFmt(r.t.perDay * 7)} a week${r.toBad != null ? ` · reaches “Act now” ${days(r.toBad)}` : ''}`;
+    return `<tr><td><b>${r.label}</b><div class="cell-sub">${r.note}</div></td><td style="white-space:nowrap;">${szFmt(r.v)} <span class="cell-sub">of ${szFmt(r.limit)}</span>
+      <div style="height:6px;border-radius:3px;background:var(--line);margin-top:4px;min-width:120px;"><div style="height:6px;border-radius:3px;width:${pct.toFixed(1)}%;background:${r.lv === 'bad' ? 'var(--critical, #c0392b)' : r.lv === 'warn' ? 'var(--warn, #d08a00)' : 'var(--ok, #2e7d32)'};"></div></div>
+      <div class="cell-sub">${pct < 1 ? '<1' : pct.toFixed(0)}% · watch at ${Math.round(r.warn * 100)}%, act at ${Math.round(r.bad * 100)}%</div></td><td>${szPill(r.lv)}${r.soon && r.lv !== 'bad' ? ' ' + sP('warn', 'Soon') : ''}</td><td>${trend}</td></tr>`; }).join('');
+  const st = Object.entries(m.st).sort((a, b) => b[1].chars - a[1].chars);
+  const L = szLog(), ref = Object.keys(L.days).sort().filter(d => (Date.parse(todayStr()) - Date.parse(d)) / 864e5 >= 6)[0];
+  const storeRows = st.map(([s, o]) => { const was = ref && L.days[ref].stores ? L.days[ref].stores[s] : null;
+    return `<tr><td>${xe(SZ_STORE_NAMES[s] || s.replace(/^ob_/, '').replace(/_/g, ' '))}</td><td>${o.recs.toLocaleString('en-IN')}</td><td>${szFmt(o.chars)}</td><td>${o.pieces} · largest ${szFmt(o.max)}</td><td>${was == null ? '<span class="cell-sub">—</span>' : (o.chars - was >= 0 ? '+' : '−') + szFmt(Math.abs(o.chars - was))}</td></tr>`; }).join('');
+  const lm = m.loadMs || {}, sec = ms => ms ? (ms / 1000).toFixed(1) + ' s' : '—';
+  return `<div class="card" style="padding:12px 14px;margin-bottom:14px;" id="xSzCard">
+    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;"><div><b>Data size and limits</b> ${szPill(R.worst)}</div>
+      <button class="btn btn-ghost btn-sm" id="xSzRefresh">Check again</button></div>
+    <div class="cell-sub" style="margin:2px 0 8px;">Order Bridge lost work between 16 and 23 Nov when the saved data outgrew a browser limit. These are the limits that could cause trouble now, how close each is, and how fast it’s growing. A snapshot is saved once a day while an admin is signed in. ${SZ.expErr ? `<span class="scan-error">${xe(SZ.expErr)}</span>` : !SZ.exp ? 'Reading the stored exports…' : ''}</div>
+    <div class="table-wrap"><table class="grid-table"><thead><tr><th>Limit</th><th>Now</th><th>Status</th><th>Growth</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="cell-sub" style="margin-top:8px;">On this device sign-in took ${sec(lm.data)} for the ERP data (${szFmt(m.parts.dataRaw)}) and ${sec(lm.store)} for saved work (${szFmt(m.parts.store)}). Server estimate: saved work ${szFmt(m.parts.store)} + ERP data file ${szFmt(m.parts.data)} + exports ${szFmt(m.parts.exp)}; sign-ins, usage figures and the removal log add a little more.</div>
+    <details style="margin-top:8px;"><summary class="cell-sub">Saved work by area${ref ? ` (change since ${fmtDate(ref)})` : ''}</summary>
+      <div class="table-wrap" style="margin-top:6px;"><table class="grid-table"><thead><tr><th>Area</th><th>Records</th><th>Size</th><th>Pieces</th><th>Change</th></tr></thead><tbody>${storeRows}</tbody></table></div></details>
+    ${R.worst !== 'ok' ? `<div class="part-po-note" style="margin-top:8px;">What to do: ${R.rows.filter(r => r.lv !== 'ok' || r.soon).map(r => r.k === 'kv' ? 'server storage — clear old exports and ask for old activity to be archived' : r.k === 'piece' ? `largest piece (${xe(SZ_STORE_NAMES[m.pieceStore] || m.pieceStore)}) — ask for it to be split into more pieces` : r.k === 'page' ? 'sign-in size — ask for older records (closed SOs, old activity) to load only when opened' : 'browser storage — clear Order Bridge’s site data in the browser and sign in again').join('; ')}.</div>` : ''}
+  </div>`;
+}
+{ const _ru = renderUsage; renderUsage = function(){ const h = _ru.apply(this, arguments); if (state.role !== 'admin') return h;
+    const i = h.indexOf('</div>'); return i < 0 ? szCard() + h : h.slice(0, i + 6) + szCard() + h.slice(i + 6); }; }
+// Dashboard: admins see a warning as soon as anything needs watching
+{ const _rd = renderDashboard; renderDashboard = function(){ const h = _rd.apply(this, arguments);
+    if (state.role !== 'admin' || !window.__OB || !window.__OB.storeSizes) return h;
+    szLoadExports(); const R = szResult(); if (R.worst === 'ok') return h;
+    const bad = R.rows.filter(r => r.lv !== 'ok' || r.soon);
+    return `<div class="card" style="padding:10px 14px;margin-bottom:12px;border-color:${R.worst === 'bad' ? 'var(--critical, #c0392b)' : 'var(--warn, #d08a00)'};">${szPill(R.worst)} <b>Data size:</b> ${bad.map(r => `${r.label.toLowerCase()} at ${Math.round(r.v / r.limit * 100)}% of its limit${r.soon && r.lv !== 'bad' ? ' and rising fast' : ''}`).join('; ')}. <button class="btn-text" data-xsz-open="1">See Admin › Usage</button></div>` + h; }; }
+extraWiring.push(() => {
+  const b = document.getElementById('xSzRefresh'); if (b) b.addEventListener('click', () => { SZ.last = null; SZ.exp = null; SZ.expErr = ''; renderAll(); });
+  document.querySelectorAll('[data-xsz-open]').forEach(x => x.addEventListener('click', () => goTo('usage')));
+});
+window.__xsz = { szMeasure, szResult, szLog, SZ };
 
 if (!routePublic() && state.currentUser) renderAll();
 })();
