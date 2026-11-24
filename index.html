@@ -775,10 +775,26 @@ var STORES = {
 };
 var USER_RE = /^ob_(profiles$|approver_me$|inbox_read_|inbox_seen_|mute_|unfollow_)/;   // kept per signed-in user
 function cfgFor(k){ if (Object.prototype.hasOwnProperty.call(STORES, k)) return STORES[k]; if (USER_RE.test(k) && /^[A-Za-z0-9_]+$/.test(k)) return { t:'user' }; return null; }
+// 24 Nov 2026: the shared stores live in memory, not in the browser's localStorage. Browsers allow ~5 MB per site and the
+// shared data outgrew it (mid-Nov): the fresh copy failed to cache, the app read the old copy from localStorage as if it
+// were current and saved it back, deleting or rolling back everyone's newer work. Every page load downloads the stores
+// anyway, so nothing is lost by not keeping them; localStorage now only holds the sign-in token and small per-device items.
+var MEM = {};
+function mget(k){ return Object.prototype.hasOwnProperty.call(MEM, k) ? MEM[k] : null; }
+function mset(k, v){ MEM[k] = String(v); }
+function mdel(k){ delete MEM[k]; }
+function purgeCached(){ try { for (var i = LS.length - 1; i >= 0; i--){ var key = LS.key(i); if (key && cfgFor(key)) rawRemove.call(LS, key); } } catch(e){} }
 function djb2(s){ var h = 5381; s = String(s); for (var i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h; }
 
 var base = {}, userBase = {}, pending = {}, pendingUser = {}, blocked = {}, sessionKeys = {}, mineAt = {};
-var timer = null, inflight = null, failCount = 0, conflictCount = 0;
+var timer = null, inflight = null, failCount = 0, conflictCount = 0, heldCount = 0, heldStores = {};
+// Safety stop (24 Nov 2026): one save may remove at most DEL_MAX records from a shared store. More than that is held back
+// (not sent), reported to the server's deletion log and shown in the bar — a page working from an outdated copy must never
+// be able to wipe other people's records again. Code that really removes many records at once calls OB.allowDeletes(store, n) first.
+var DEL_MAX = 3, delAllow = {};
+OB.allowDeletes = function(store, n){ delAllow[store] = (delAllow[store] || 0) + (+n || 0); };
+var STORE_NAMES = { ob_po_requests:'PO requests', ob_order_ops:'order line details', ob_job_cards:'job cards', ob_slot_bookings:'slot bookings', ob_so_requests:'SO approval requests',
+  ob_so_revisions:'SO revisions', ob_fabric_entries:'fabric entries', ob_fabric_challans:'challans', ob_fabric_receipts:'fabric receipts', ob_wh_tags:'tags', ob_site_details:'site details', ob_po_links:'PO links', ob_dispatch_day:'dispatch day', ob_stock_blocks:'stock blocks' };
 
 // snapB: every shared bucket as last known (page load, then own saves and buckets fetched by the live update).
 var snapB = {}, tomb = {}, RX_MS = 15000;
@@ -795,8 +811,9 @@ function seed(snap){
   snapB = snap.b || {};
   Object.keys(STORES).forEach(function(s){ rebuildStore(s, false); });
   var u = snap.u || {};
-  for (var i = LS.length - 1; i >= 0; i--){ var key = LS.key(i); if (key && USER_RE.test(key) && !Object.prototype.hasOwnProperty.call(u, key)) rawRemove.call(LS, key); }
-  Object.keys(u).forEach(function(k){ if (!cfgFor(k)) return; var j = JSON.stringify(u[k].v); userBase[k] = j; try { rawSet.call(LS, k, j); } catch(e){} });
+  Object.keys(MEM).forEach(function(key){ if (USER_RE.test(key) && !Object.prototype.hasOwnProperty.call(u, key)) mdel(key); });
+  Object.keys(u).forEach(function(k){ if (!cfgFor(k)) return; var j = JSON.stringify(u[k].v); userBase[k] = j; mset(k, j); });
+  purgeCached();   // free the space the old cached copies took
 }
 // Rebuild one store's localStorage value and save-base from snapB. live = records that came from someone else just now:
 // for RX_MS the app may still write its old copy (it hasn't redrawn yet) — that stale echo is ignored, not saved back.
@@ -816,7 +833,7 @@ function rebuildStore(s, live){
         else if (o.j !== b[k].j){ b[k].rx = until; b[k].prevJ = o.rx && o.rx > Date.now() ? o.prevJ : o.j; } });
       Object.keys(old).forEach(function(k){ if (!b[k] && old[k].j != null) tomb[s + '|' + k] = { j:old[k].j, until:until }; });
     }
-    try { if (val === undefined) rawRemove.call(LS, s); else rawSet.call(LS, s, JSON.stringify(val)); } catch(e){ console.warn('[Order Bridge] could not cache', s, e); }
+    if (val === undefined) mdel(s); else mset(s, JSON.stringify(val));
   }
 }
 
@@ -890,16 +907,28 @@ function flush(){
   if (!keys.length && !ukeys.length) return Promise.resolve();
   var snapP = pending, snapU = pendingUser; pending = {}; pendingUser = {};
   var changes = []; keys.forEach(function(s){ changes = changes.concat(diffStore(s, snapP[s])); });
+  var held = [], dc = {};
+  changes.forEach(function(ch){ if (ch.v === null) (dc[ch.s] = dc[ch.s] || []).push(ch); });
+  Object.keys(dc).forEach(function(st){ var n = dc[st].length;
+    if (n <= DEL_MAX) return;
+    if ((delAllow[st] || 0) >= n){ delAllow[st] -= n; return; }
+    held = held.concat(dc[st]); heldStores[st] = (heldStores[st] || 0) + n; });
+  if (held.length){
+    changes = changes.filter(function(ch){ return held.indexOf(ch) < 0; });
+    held.forEach(function(ch){ blocked[ch.s + '|' + ch.k] = 1; }); heldCount += held.length;
+    console.warn('[Order Bridge] held back removing', held.length, 'records', Object.keys(heldStores)); bar();
+  }
+  var heldRep = held.map(function(ch){ var b = (base[ch.s] || {})[ch.k]; return { s:ch.s, bk:ch.bk, k:ch.k, v: b && b.j ? safeParse(b.j) : null }; });
   var user = ukeys.filter(function(k){ return userBase[k] !== (snapU[k] === null ? undefined : snapU[k]); })
     .map(function(k){ return { s:k, v: snapU[k] === null ? null : safeParse(snapU[k]) }; });
-  if (!changes.length && !user.length) return Promise.resolve();
+  if (!changes.length && !user.length && !heldRep.length) return Promise.resolve();
   changes.sort(function(x, y){ return (x.s + '|' + x.bk) < (y.s + '|' + y.bk) ? -1 : (x.s + '|' + x.bk) > (y.s + '|' + y.bk) ? 1 : 0; });   // fewer buckets per request
   inflight = (async function(){
     try {
-      for (var i = 0; i < changes.length || (i === 0 && user.length); i += 150){
+      for (var i = 0; i < changes.length || (i === 0 && (user.length || heldRep.length)); i += 150){
         var part = changes.slice(i, i + 150), byKey = {};
         part.forEach(function(ch){ byKey[ch.s + '|' + ch.k] = ch; });
-        var res = await api('/api/store', { body:{ changes: part.map(function(ch){ return { s:ch.s, bk:ch.bk, k:ch.k, v:ch.v, ver:ch.ver, c:ch.c }; }), user: i === 0 ? user : [] } });
+        var res = await api('/api/store', { body:{ changes: part.map(function(ch){ return { s:ch.s, bk:ch.bk, k:ch.k, v:ch.v, ver:ch.ver, c:ch.c }; }), user: i === 0 ? user : [], held: i === 0 ? heldRep : [] } });
         (res.ok || []).forEach(function(o){ var ch = byKey[o.s + '|' + o.k]; if (!ch) return; var b = base[o.s] = base[o.s] || {};
           if (ch.v === null) delete b[o.k]; else b[o.k] = { ver:o.ver, bk:o.bk, j:ch._j };
           var bkey = 'b_' + o.s + '__' + o.bk, doc = snapB[bkey] = snapB[bkey] || { recs:{} }; doc.recs = doc.recs || {};
@@ -1000,6 +1029,7 @@ function bar(){
   var msg = '', btn = '';
   if (OB.mode === 'public'){ msg = OB.publicErr || ''; if (msg) btn = '<button class="btn btn-primary btn-sm" id="obSyncBtn">Try again</button>'; }
   else if (OB.signedOut){ msg = 'Your session has ended, so recent changes are not saved. Sign in again to keep working.'; btn = '<button class="btn btn-primary btn-sm" id="obSyncBtn">Sign in again</button>'; }
+  else if (heldCount){ msg = 'Order Bridge stopped ' + heldCount + ' record' + (heldCount === 1 ? '' : 's') + ' being removed (' + Object.keys(heldStores).map(function(s){ return STORE_NAMES[s] || s.replace(/^ob_/, '').replace(/_/g, ' '); }).join(', ') + ') in case it was a mistake. Nothing was lost. Reload the page; if this message keeps coming back, tell an admin.'; btn = '<button class="btn btn-primary btn-sm" id="obSyncBtn">Reload</button>'; }
   else if (conflictCount){ msg = conflictCount + ' change' + (conflictCount === 1 ? ' was' : 's were') + ' not saved because someone else changed the same record at the same time. Reload to see the latest version.'; btn = '<button class="btn btn-primary btn-sm" id="obSyncBtn">Reload</button>'; }
   else if (failCount){ msg = 'Changes are not saved yet (no connection to the server). Retrying…'; }
   else if (live.dataNew){ msg = 'New ERP data has been published. Refresh to load it.'; btn = '<button class="btn btn-primary btn-sm" id="obSyncBtn">Refresh</button>'; }
@@ -1017,22 +1047,25 @@ window.addEventListener('beforeunload', function(e){ if (OB.sync && OB.mode === 
 document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'hidden' && OB.sync && OB.mode === 'app') OB.flush(); });
 
 // localStorage hooks. Public mode keeps managed keys in memory only (a customer gets nothing else).
-var mem = {};
+// Shared stores (and the per-person values) are kept in memory in both modes (MEM above); everything else is real localStorage.
 SP.setItem = function(k, v){
   k = String(k);
-  if (this === LS && OB.mode === 'public' && cfgFor(k)){ mem[k] = String(v); if (k === 'ob_site_details') publicNote(String(v)); return; }
-  if (this === LS && OB.sync){ try { note(k, String(v)); } catch(e){ console.error('[Order Bridge] save', e); } }
+  if (this === LS && cfgFor(k)){
+    mset(k, v);
+    if (OB.mode === 'public'){ if (k === 'ob_site_details') publicNote(String(v)); return; }
+    if (OB.sync){ try { note(k, String(v)); } catch(e){ console.error('[Order Bridge] save', e); } }
+    return;
+  }
   return rawSet.call(this, k, v);
 };
 SP.removeItem = function(k){
   k = String(k);
-  if (this === LS && OB.mode === 'public' && cfgFor(k)){ delete mem[k]; return; }
-  if (this === LS && OB.sync){ try { note(k, null); } catch(e){} }
+  if (this === LS && cfgFor(k)){ mdel(k); if (OB.mode !== 'public' && OB.sync){ try { note(k, null); } catch(e){} } return; }
   return rawRemove.call(this, k);
 };
 SP.getItem = function(k){
   k = String(k);
-  if (this === LS && OB.mode === 'public' && cfgFor(k)) return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null;
+  if (this === LS && cfgFor(k)) return mget(k);
   return rawGet.call(this, k);
 };
 
@@ -1184,7 +1217,7 @@ OB.expPublish = async function(redraw, opt){
     var remap = [];
     try { var rv = base.ob_so_revisions || {}; Object.keys(rv).forEach(function(k){ var r = null; try { r = JSON.parse(rv[k].j); } catch(e){}
       (Array.isArray(r) ? r : [r]).forEach(function(x){ if (!x || x.status !== 'approved' || x.poCancellation === 'Yes' || !x.so) return; (x.newSos || []).forEach(function(n){ if (n && n.so && n.so !== x.so) remap.push([x.so, n.so]); }); }); }); } catch(e){}
-    var keepMap = safeParse(rawGet.call(LS, 'ob_keep_sos')) || {};
+    var keepMap = safeParse(mget('ob_keep_sos')) || {};
     var res = window.OBBuild.build(files, { keepText:savedText, remap:remap, keepSos:Object.keys(keepMap) }), d = res.data;
     // store the new exports first: the data file below is built from them
     var entries = [];
@@ -1204,7 +1237,7 @@ OB.expPublish = async function(redraw, opt){
     var kr = d.keepReport || [], cleared = [];
     ex.keepReport = kr;   // the Keep SOs table shows this until the page is reloaded with the new data
     if (kr.length){
-      var km = safeParse(rawGet.call(LS, 'ob_keep_sos')) || {};
+      var km = safeParse(mget('ob_keep_sos')) || {};
       kr.forEach(function(r){ if (r.listed && !r.stub && km[r.so]){ delete km[r.so]; cleared.push(r.so); } });   // a basic-row SO stays: without the keep entry it has no row at all
       if (cleared.length) LS.setItem('ob_keep_sos', JSON.stringify(km));
     }
@@ -1358,7 +1391,7 @@ function rmClassify(text){
 OB.rmClassify = rmClassify;
 var PLACEHOLDER_NAMES = ['Priya Menon', 'Arjun Vora', 'Suresh Iyer', 'Divya Nair', 'Meera Kapoor'], ADMIN_UNKNOWN = 'Admin (name not recorded)';
 function migrateOnce(){
-  var M = safeParse(rawGet.call(LS, 'ob_migrations')) || {}, changed = false, now = new Date().toISOString(), who = (OB.user && OB.user.name) || 'admin';
+  var M = safeParse(mget('ob_migrations')) || {}, changed = false, now = new Date().toISOString(), who = (OB.user && OB.user.name) || 'admin';
   if (!M.names1){
     var real = {}; (OB.users || []).forEach(function(u){ if (u && u.name) real[u.name] = 1; });
     var ph = {}; PLACEHOLDER_NAMES.forEach(function(n){ if (!real[n]) ph[n] = 1; });
@@ -1371,7 +1404,7 @@ function migrateOnce(){
     };
     Object.keys(STORES).forEach(function(s){
       var t = STORES[s].t; if (t !== 'value' && t !== 'map' && t !== 'list') return;
-      var raw = rawGet.call(LS, s); if (!raw) return;
+      var raw = mget(s); if (!raw) return;
       var before = count, val = safeParse(raw); if (val == null) return;
       val = walk(val, false);
       if (count > before) LS.setItem(s, JSON.stringify(val));
@@ -1379,7 +1412,7 @@ function migrateOnce(){
     M.names1 = { at:now, by:who, replaced:count }; changed = true;
   }
   if (!M.rm1){
-    var jcs = safeParse(rawGet.call(LS, 'ob_job_cards')), set = [], review = [], jcChanged = false;
+    var jcs = safeParse(mget('ob_job_cards')), set = [], review = [], jcChanged = false;
     (Array.isArray(jcs) ? jcs : []).forEach(function(jc){
       if (!jc || jc.rmBlocked) return;
       var reads = (jc.materials || []).map(function(m){ var line = [m.material, m.qty].filter(Boolean).join(' '); return { line:line, st:rmClassify(line) }; }).filter(function(x){ return x.st; });
@@ -1462,7 +1495,7 @@ async function publicMain(so, k){
   try { res = await api('/api/public/site?so=' + encodeURIComponent(so) + '&k=' + encodeURIComponent(k), { noAuth:true, cache:'no-store' }); }
   catch(e){ return card('<h2>Site details</h2><div class="login-error">' + esc(e.status === 403 ? 'This link is not valid. Please open the exact link Magari sent you.' : 'We couldn’t open the form. Please check your connection and try again.') + '</div>', true); }
   var site = {}; if (res.site) site[so] = res.site;
-  mem.ob_site_details = JSON.stringify(site);
+  mset("ob_site_details", JSON.stringify(site));
   OB.publicLast = (res.site && res.site.submittedAt) || '';
   var d = emptyData(), h = res.header || {};
   var row = { so:so, customer:h.customer || '', date:h.date || '', cancelled:false, ic:false };

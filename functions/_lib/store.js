@@ -134,7 +134,7 @@ export async function applyChanges(kv, changes, actor, who) {
     if (!byBucket.has(key)) byBucket.set(key, []);
     byBucket.get(key).push(ch);
   }
-  const ok = [], conflicts = [], dirtyKeys = [];
+  const ok = [], conflicts = [], dirtyKeys = [], deleted = [];
   const now = new Date().toISOString();
   for (const [key, list] of byBucket) {
     const doc = (await getJSON(kv, key)) || { recs: {} };
@@ -145,7 +145,7 @@ export async function applyChanges(kv, changes, actor, who) {
       const curVer = cur ? cur.ver : 0;
       if ((ch.ver || 0) !== curVer) { conflicts.push({ s: ch.s, bk: ch.bk, k: ch.k, cur: cur || null }); continue; }
       if (ch.v === null || ch.v === undefined) {
-        if (cur) { delete doc.recs[ch.k]; dirty = true; }
+        if (cur) { delete doc.recs[ch.k]; dirty = true; if (!ACT_RE.test(ch.s)) deleted.push({ s: ch.s, bk: ch.bk, k: ch.k, ver: cur.ver, c: cur.c, v: cur.v, lastBy: cur.by, lastAt: cur.at }); }
         ok.push({ s: ch.s, bk: ch.bk, k: ch.k, ver: 0 });
       } else {
         doc.recs[ch.k] = { v: ch.v, ver: curVer + 1, c: cur ? cur.c : (Number(ch.c) || Date.now()), by: actor, at: now };
@@ -159,6 +159,7 @@ export async function applyChanges(kv, changes, actor, who) {
       if (/^b_ob_activity__d/.test(key)) actWritten.push(key);
     }
   }
+  if (deleted.length) { try { await logDeleted(kv, { at: now, by: actor, uid: who, recs: deleted }); } catch (e) {} }
   if (actWritten.length) { try { await noteActKeys(kv, actWritten); } catch (e) {} }
   if (dirtyKeys.length) { try { await noteStamps(kv, dirtyKeys, who); } catch (e) {} }
   return { ok, conflicts };
@@ -264,4 +265,23 @@ export function maybeGzip(request, text, headers) {
     } catch (e) {}
   }
   return new Response(text, { status: 200, headers });
+}
+
+// ---- Deletion log (24 Nov 2026): every record removed from a shared store is copied to del_<YYYYMMDD>_<id>
+// (one key per save, never rewritten) with who removed it, so anything removed by mistake can be put back
+// (GET/POST /api/store/deleted, admin). The page also reports deletions it held back (see the loader) as held:true.
+// idx_del lists the keys (read-modify-write, best effort: the keys themselves are the record; listKeys('del_') finds
+// them if the index misses one). Kept DEL_KEEP_DAYS.
+const ACT_RE = /^ob_activity$/;
+export const DEL_IDX = 'idx_del', DEL_KEEP_DAYS = 120;
+export async function logDeleted(kv, entry) {
+  const day = entry.at.slice(0, 10).replace(/-/g, '');
+  const key = `del_${day}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+  await putJSON(kv, key, entry);
+  const idx = (await getJSON(kv, DEL_IDX)) || [];
+  const cut = new Date(Date.now() - DEL_KEEP_DAYS * 864e5).toISOString().slice(0, 10).replace(/-/g, '');
+  const keep = idx.filter(x => x && x.day >= cut), drop = idx.filter(x => x && x.day < cut);
+  keep.push({ key, day, at: entry.at, by: entry.by, n: entry.recs.length, held: !!entry.held, stores: [...new Set(entry.recs.map(r => r.s))] });
+  await putJSON(kv, DEL_IDX, keep);
+  for (const d of drop) { try { await kv.delete(d.key); } catch (e) {} }
 }

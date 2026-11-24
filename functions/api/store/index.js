@@ -3,7 +3,7 @@
 // See functions/_lib/store.js. Bare KV globals (APP_DATA), never env.APP_DATA.
 import { getSessionUser } from '../../_lib/session.js';
 import { json, errorJson, bearerToken, readJsonBody } from '../../_lib/http.js';
-import { loadAllRaw, applyChanges, userKey, getLinkKey, STORE_RE, maybeGzip } from '../../_lib/store.js';
+import { loadAllRaw, applyChanges, userKey, getLinkKey, STORE_RE, maybeGzip, logDeleted } from '../../_lib/store.js';
 import { putJSON } from '../../_lib/kv.js';
 
 export async function onRequestGet({ request }) {
@@ -21,7 +21,12 @@ export async function onRequestPost({ request }) {
   try { body = await readJsonBody(request); } catch (e) { return errorJson(e.message, 400); }
   const changes = Array.isArray(body && body.changes) ? body.changes : [];
   const user = Array.isArray(body && body.user) ? body.user : [];
+  const held = Array.isArray(body && body.held) ? body.held.slice(0, 2000) : [];
   try {
+    if (held.length) {   // removals the page refused to send (see the loader's safety stop): log them for the admin
+      try { await logDeleted(APP_DATA, { at: new Date().toISOString(), by: s.user.name || s.user.email, uid: String(s.user.uid), held: true,
+        recs: held.filter(h => h && STORE_RE.test(h.s || '')).map(h => ({ s: h.s, bk: String(h.bk || ''), k: String(h.k || ''), v: h.v === undefined ? null : h.v })) }); } catch (e) {}
+    }
     const res = await applyChanges(APP_DATA, changes, s.user.name || s.user.email, String(s.user.uid).replace(/[^A-Za-z0-9_]/g, '_'));
     for (const u of user) {
       if (!u || !STORE_RE.test(u.s || '')) continue;
