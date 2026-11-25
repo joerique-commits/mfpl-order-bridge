@@ -826,6 +826,14 @@ function rebuildStore(s, live){
     else if (cfg.t === 'map'){ if (items.length){ val = {}; items.forEach(function(it){ val[it.k] = it.r.v; b[it.k].j = JSON.stringify(it.r.v); }); } }
     else if (items.length){
       items.sort(function(x, y){ return cfg.dir === 'desc' ? (y.r.c - x.r.c) : (x.r.c - y.r.c); });
+      // 25 Nov 2026: two saved copies of one record (same id) made every open page log a "change" every few seconds
+      // (SLOT-53390, 11–25 Nov: ~20,000 junk activity entries). Keep the newest copy; the older one is left out of the
+      // page's data, so the next save removes it from the server.
+      if (cfg.t === 'list'){ var best = {};
+        items.forEach(function(it){ var id = it.r.v && typeof it.r.v === 'object' ? it.r.v.id : null; if (id == null) return;
+          var o = best[id]; if (!o || (it.r.ver || 0) > (o.r.ver || 0) || ((it.r.ver || 0) === (o.r.ver || 0) && String(it.r.at || '') > String(o.r.at || ''))) best[id] = it; });
+        var before = items.length; items = items.filter(function(it){ var id = it.r.v && typeof it.r.v === 'object' ? it.r.v.id : null; return id == null || best[id] === it; });
+        if (items.length < before) console.warn('[Order Bridge] ' + s + ': left out ' + (before - items.length) + ' older duplicate(s)'); }
       val = items.map(function(it){ var v = it.r.v; if (cfg.t === 'list' && v && typeof v === 'object' && !Array.isArray(v)) v._k = it.k; b[it.k].j = JSON.stringify(v); return v; });
     }
     if (live){
@@ -12488,7 +12496,7 @@ const fmtTime = iso => new Date(iso).toLocaleTimeString('en-IN', { hour:'2-digit
 // (one doc per change, tagged with roles[] and participants[] so each person needs two small queries).
 const ACT_KEY = 'ob_activity', ACT_PARTS_KEY = 'ob_act_parts', ACT_DAYS = 30, ACT_CAP = 3000;
 const ROLE_LABEL = r => r === 'customer' ? 'Customer' : r === 'system' ? 'Automatic' : (ROLES[r] ? ROLES[r].label : r);
-const ACT_IGNORE = /(At|By|ByRole|Phone|ISO|Raw|Source|Known)$|^(id|byKey|token|snapshot|byTitle|approvalHistory|at|poList|addedBy|seq|seqTotal|orderValue|dpiLinked|appNative|soDate|customerSource|orderValueSource|items|siteRef|rep|location)$/;
+const ACT_IGNORE = /(At|By|ByRole|Phone|ISO|Raw|Source|Known)$|^(id|byKey|token|snapshot|byTitle|approvalHistory|at|poList|addedBy|seq|seqTotal|orderValue|dpiLinked|appNative|soDate|customerSource|orderValueSource|items|siteRef|rep|location|_k|restored)$/;
 const ACT_COLLAPSE = { pod:['Proof of delivery recorded','action'], scan:['SO / PI copy scanned','edit'], liftOverride:['Lift-fit warning overridden','action'], customerDeliveryDetails:['Customer delivery details updated','edit'], fields:['Site form answers updated','edit'] };
 const ACT_LABELS = { lifecycle:'Status', status:'Status', committedDeadline:'Client date', productionDeadline:'Factory date', date:'PO outer-limit date', qty:'Qty', poQty:'PO qty', po:'PO number', poRaisedDate:'PO date',
   uom:'Unit', article:'Article', sku:'SKU', supplier:'Supplier', 'detail.fabricSku':'Fabric SKU', 'detail.fabricName':'Fabric', 'detail.placement':'Placement', 'detail.finish':'Finish', 'detail.stoneType':'Stone',
