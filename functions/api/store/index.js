@@ -3,7 +3,7 @@
 // See functions/_lib/store.js. Bare KV globals (APP_DATA), never env.APP_DATA.
 import { getSessionUser } from '../../_lib/session.js';
 import { json, errorJson, bearerToken, readJsonBody } from '../../_lib/http.js';
-import { loadAllRaw, applyChanges, userKey, getLinkKey, STORE_RE, maybeGzip, logDeleted } from '../../_lib/store.js';
+import { loadAllRaw, applyChanges, userKey, getLinkKey, STORE_RE, maybeGzip, logDeleted, logHistory, histLabel } from '../../_lib/store.js';
 import { putJSON } from '../../_lib/kv.js';
 
 export async function onRequestGet({ request }) {
@@ -25,7 +25,9 @@ export async function onRequestPost({ request }) {
   // 25 Nov 2026: pages opened before the 24 Nov fix still run the old loader, which can save an outdated copy over newer
   // work (it removed 40 PO requests on 24–25 Nov). Pages from 24 Nov on always send "held"; older ones are refused and
   // asked to reload. Nothing they hold is lost that the server doesn't already have.
-  if (!Array.isArray(body && body.held)) return json({ error: 'Order Bridge has been updated. Reload this page to keep working — this copy is out of date and can’t save.', outdated: true }, 409);
+  const refused = async why => { try { await logHistory(APP_DATA, { at: new Date().toISOString(), by: s.user.name || s.user.email, uid: String(s.user.uid),
+    recs: changes.filter(ch => ch && STORE_RE.test(ch.s || '') && ch.s !== 'ob_activity' && ch.s !== 'ob_act_parts').slice(0, 300).map(ch => Object.assign({ s: ch.s, bk: String(ch.bk || ''), k: String(ch.k || ''), op: 'refused', why, d: ch.v == null ? { _: ['(record)', '(removed)'] } : { _: [null, ch.v] } }, histLabel(ch.s, String(ch.k || ''), ch.v))) }); } catch (e) {} };
+  if (!Array.isArray(body && body.held)) { await refused('page out of date'); return json({ error: 'Order Bridge has been updated. Reload this page to keep working — this copy is out of date and can’t save.', outdated: true }, 409); }
   // Never more than 5 removals from one store in one save (the activity log excepted): a page working from an outdated
   // copy must not be able to wipe other people's records. The removals are logged for the admin and nothing is saved.
   const dels = {}; changes.forEach(ch => { if (ch && (ch.v === null || ch.v === undefined) && ch.s !== 'ob_activity') dels[ch.s] = (dels[ch.s] || 0) + 1; });
@@ -33,6 +35,7 @@ export async function onRequestPost({ request }) {
   if (tooMany.length) {
     try { await logDeleted(APP_DATA, { at: new Date().toISOString(), by: s.user.name || s.user.email, uid: String(s.user.uid), held: true, refused: true,
       recs: changes.filter(ch => ch && (ch.v === null || ch.v === undefined) && tooMany.some(([st]) => st === ch.s)).map(ch => ({ s: ch.s, bk: String(ch.bk || ''), k: String(ch.k || ''), v: null })) }); } catch (e) {}
+    await refused('too many removals in one save');
     return json({ error: 'This save would remove ' + tooMany.map(([st, n]) => n + ' records from ' + st.replace(/^ob_/, '').replace(/_/g, ' ')).join(', ') + '. Nothing was saved. Reload the page; if this keeps happening, tell an admin.', refusedRemovals: true }, 409);
   }
   try {

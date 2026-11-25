@@ -134,7 +134,7 @@ export async function applyChanges(kv, changes, actor, who) {
     if (!byBucket.has(key)) byBucket.set(key, []);
     byBucket.get(key).push(ch);
   }
-  const ok = [], conflicts = [], dirtyKeys = [], deleted = [];
+  const ok = [], conflicts = [], dirtyKeys = [], deleted = [], hist = [];
   const now = new Date().toISOString();
   for (const [key, list] of byBucket) {
     const doc = (await getJSON(kv, key)) || { recs: {} };
@@ -145,10 +145,12 @@ export async function applyChanges(kv, changes, actor, who) {
       const curVer = cur ? cur.ver : 0;
       if ((ch.ver || 0) !== curVer) { conflicts.push({ s: ch.s, bk: ch.bk, k: ch.k, cur: cur || null }); continue; }
       if (ch.v === null || ch.v === undefined) {
-        if (cur) { delete doc.recs[ch.k]; dirty = true; if (!ACT_RE.test(ch.s)) deleted.push({ s: ch.s, bk: ch.bk, k: ch.k, ver: cur.ver, c: cur.c, v: cur.v, lastBy: cur.by, lastAt: cur.at }); }
+        if (cur) { delete doc.recs[ch.k]; dirty = true; if (!ACT_RE.test(ch.s)) deleted.push({ s: ch.s, bk: ch.bk, k: ch.k, ver: cur.ver, c: cur.c, v: cur.v, lastBy: cur.by, lastAt: cur.at });
+          if (histWanted(ch.s)) hist.push(Object.assign({ s: ch.s, bk: ch.bk, k: ch.k, op: 'remove', ver: cur.ver, v: cur.v, c: cur.c }, histLabel(ch.s, ch.k, cur.v))); }
         ok.push({ s: ch.s, bk: ch.bk, k: ch.k, ver: 0 });
       } else {
         doc.recs[ch.k] = { v: ch.v, ver: curVer + 1, c: cur ? cur.c : (Number(ch.c) || Date.now()), by: actor, at: now };
+        if (histWanted(ch.s)) { const d = histDiff(cur ? cur.v : undefined, ch.v); if (!cur || Object.keys(d).length) hist.push(Object.assign({ s: ch.s, bk: ch.bk, k: ch.k, op: ch.op === 'restore' ? 'restore' : cur ? 'edit' : 'add', ver: curVer + 1, d }, histLabel(ch.s, ch.k, ch.v))); }
         dirty = true;
         ok.push({ s: ch.s, bk: ch.bk, k: ch.k, ver: curVer + 1 });
       }
@@ -160,6 +162,7 @@ export async function applyChanges(kv, changes, actor, who) {
     }
   }
   if (deleted.length) { try { await logDeleted(kv, { at: now, by: actor, uid: who, recs: deleted }); } catch (e) {} }
+  if (hist.length) { try { await logHistory(kv, { at: now, by: actor, uid: who, recs: hist }); } catch (e) {} }
   if (actWritten.length) { try { await noteActKeys(kv, actWritten); } catch (e) {} }
   if (dirtyKeys.length) { try { await noteStamps(kv, dirtyKeys, who); } catch (e) {} }
   return { ok, conflicts };
@@ -284,4 +287,53 @@ export async function logDeleted(kv, entry) {
   keep.push({ key, day, at: entry.at, by: entry.by, n: entry.recs.length, held: !!entry.held, stores: [...new Set(entry.recs.map(r => r.s))] });
   await putJSON(kv, DEL_IDX, keep);
   for (const d of drop) { try { await kv.delete(d.key); } catch (e) {} }
+}
+
+// ---- Change history (25 Nov 2026, Admin › History) -------------------------------------------------------------------
+// Every save to a shared store is recorded here, on the server, so no page can skip, fake or delete it:
+//   hist_<YYYYMMDD>_<id>   one per save: { at, by, uid, recs:[{ s, bk, k, op, ver, d|v }] }
+//                          op add|edit|restore: d = { field: [before, after] } for the top-level fields that changed
+//                          (an array that only grew is { field: { app:[added items], n:<length before> } });
+//                          op remove: v = the whole record as it was; op refused: what an old or runaway page tried.
+//   hidx_<YYYYMMDD>        the day's list, one short line per record changed: { e, t, by, s, k, id, so, op, f, lb }
+// Kept HIST_KEEP_DAYS; older days are deleted the first time history is written on a new day.
+export const HIST_KEEP_DAYS = 90;
+const HIST_SKIP = /^ob_(activity|act_parts|size_log|migrations|keep_sos)$/;
+export const histWanted = s => !HIST_SKIP.test(s);
+const jeq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+export function histDiff(a, b) {
+  const d = {}, A = a && typeof a === 'object' && !Array.isArray(a) ? a : {}, B = b && typeof b === 'object' && !Array.isArray(b) ? b : {};
+  if ((a !== undefined && typeof a !== 'object') || Array.isArray(a) || (typeof b !== 'object') || Array.isArray(b)) { if (!jeq(a, b)) d._ = [a === undefined ? null : a, b]; return d; }
+  new Set([...Object.keys(A), ...Object.keys(B)]).forEach(f => {
+    if (f === '_k') return;
+    const x = A[f], y = B[f]; if (jeq(x, y)) return;
+    if (Array.isArray(x) && Array.isArray(y) && y.length > x.length && jeq(x, y.slice(0, x.length))) d[f] = { app: y.slice(x.length), n: x.length };
+    else d[f] = [x === undefined ? null : x, y === undefined ? null : y];
+  });
+  return d;
+}
+const histDay = iso => iso.slice(0, 10).replace(/-/g, '');
+export const histLabel = (s, k, v) => {
+  v = v && typeof v === 'object' ? v : {};
+  const so = v.so || (/^\d{16}__/.test(k) ? k.slice(0, 16) : '');
+  const what = v.jobCardNumber ? `Job card ${v.jobCardNumber}${v.clientName ? ' — ' + v.clientName : ''}`
+    : v.sku || v.article ? [v.sku, v.article].filter(Boolean).join(' · ')
+    : v.date && v.window ? `${v.type || 'Booking'} ${v.date} ${v.window}`
+    : /__/.test(k) ? k.split('__').slice(1).join(' · ') : (v.id || v.title || v.name || k);
+  return { id: String(v.id || ''), so: String(so || ''), lb: String(what).slice(0, 90) };
+};
+export async function logHistory(kv, entry) {
+  const day = histDay(entry.at), key = `hist_${day}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+  await putJSON(kv, key, entry);
+  const lines = entry.recs.map(r => ({ e: key, t: entry.at.slice(11, 19), by: entry.by, s: r.s, k: r.k, id: r.id || '', so: r.so || '', op: r.op, f: r.d ? Object.keys(r.d).slice(0, 12) : [], lb: r.lb || r.k, why: r.why || undefined }));
+  const ik = 'hidx_' + day, idx = (await getJSON(kv, ik)) || [];
+  await putJSON(kv, ik, idx.concat(lines));
+  // once a day, drop days past the keep period
+  const gc = (await getJSON(kv, 'hist_gc')) || {};
+  if (gc.day !== day) {
+    await putJSON(kv, 'hist_gc', { day });
+    const cut = histDay(new Date(Date.now() - HIST_KEEP_DAYS * 864e5).toISOString());
+    for (const d of (gc.days || [])) if (d < cut) { const old = (await getJSON(kv, 'hidx_' + d)) || []; for (const e of [...new Set(old.map(x => x.e))]) { try { await kv.delete(e); } catch (er) {} } try { await kv.delete('hidx_' + d); } catch (er) {} }
+    await putJSON(kv, 'hist_gc', { day, days: [...new Set((gc.days || []).filter(d => d >= cut).concat([day]))] });
+  }
 }

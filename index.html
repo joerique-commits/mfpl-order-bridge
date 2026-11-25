@@ -1107,7 +1107,7 @@ function loginScreen(err, email){
   card('<h2>Sign in</h2><div class="field"><label>Email</label><input id="li_email" type="email" placeholder="name@magari.in" autocomplete="username" value="' + esc(email || '') + '"></div>' +
     '<div class="field"><label>Password</label><input id="li_password" type="password" placeholder="••••" autocomplete="current-password"></div>' +
     (err ? '<div class="login-error">' + esc(err) + '</div>' : '') + '<button class="btn btn-primary" id="loginSubmit" style="width:100%;">Sign in</button>'
-    + '<div class="cell-sub" style="margin-top:10px;text-align:center;">Order Bridge records which pages you use and for how long, to help improve it.</div>');
+    + '<div class="cell-sub" style="margin-top:10px;text-align:center;">Order Bridge records which pages you use and for how long, to help improve it, and keeps a record of every change with who made it.</div>');
   var em = document.getElementById('li_email'), pw = document.getElementById('li_password'), btn = document.getElementById('loginSubmit');
   var go = async function(){
     var e = (em.value || '').trim().toLowerCase(), p = pw.value || '';
@@ -18187,6 +18187,7 @@ function szLoadExports(){
   window.__OB.api('/api/exports', { cache:'no-store' }).then(r => { const sl = ((r || {}).meta || {}).slots || {};
     SZ.exp = { bytes:Object.values(sl).reduce((a, x) => a + (+x.bytes || 0), 0), files:Object.keys(sl).length }; }, e => { SZ.expErr = e.message || 'Couldn’t read the stored exports'; SZ.exp = { bytes:0, files:0 }; })
     .then(() => { SZ.expBusy = false; SZ.last = null; if (state.xAdminView === 'usage' || state.module === 'dashboard') renderAll(); });
+  window.__OB.api('/api/history?stats=1', { cache:'no-store' }).then(r => { SZ.hist = r; SZ.last = null; if (state.xAdminView === 'usage') renderAll(); }, () => {});
 }
 function szMeasure(){
   const OB = window.__OB || {}, st = OB.storeSizes ? OB.storeSizes() : {};
@@ -18196,8 +18197,9 @@ function szMeasure(){
   const dataStored = (dm.gz ? dataChars * 0.2 : dataChars) * 2;               // gzip keeps it to about a fifth; current + previous are kept
   let br = 0; try { for (let i = 0; i < localStorage.length; i++){ const k = localStorage.key(i); br += k.length + (localStorage.getItem(k) || '').length; } } catch(e){}
   const exp = SZ.exp ? SZ.exp.bytes : 0;
-  return { at:nowIso(), st, kv:storeChars + dataStored + exp, piece:maxStore.n, pieceStore:maxStore.s, page:storeChars + dataChars, browser:br,
-    parts:{ store:storeChars, data:dataStored, exp, dataRaw:dataChars }, loadMs:OB.loadMs || {}, expKnown:!!SZ.exp };
+  const hist = SZ.hist ? SZ.hist.bytes : 0;
+  return { at:nowIso(), st, kv:storeChars + dataStored + exp + hist, piece:maxStore.n, pieceStore:maxStore.s, page:storeChars + dataChars, browser:br,
+    parts:{ store:storeChars, data:dataStored, exp, hist, histLines:SZ.hist ? SZ.hist.lines : 0, dataRaw:dataChars }, loadMs:OB.loadMs || {}, expKnown:!!SZ.exp };
 }
 const szLog = () => { try { return JSON.parse(localStorage.getItem('ob_size_log') || 'null') || { days:{} }; } catch(e){ return { days:{} }; } };
 function szSnapshot(m){
@@ -18242,7 +18244,7 @@ function szCard(){
       <button class="btn btn-ghost btn-sm" id="xSzRefresh">Check again</button></div>
     <div class="cell-sub" style="margin:2px 0 8px;">Order Bridge lost work between 16 and 23 Nov when the saved data outgrew a browser limit. These are the limits that could cause trouble now, how close each is, and how fast it’s growing. A snapshot is saved once a day while an admin is signed in. ${SZ.expErr ? `<span class="scan-error">${xe(SZ.expErr)}</span>` : !SZ.exp ? 'Reading the stored exports…' : ''}</div>
     <div class="table-wrap"><table class="grid-table"><thead><tr><th>Limit</th><th>Now</th><th>Status</th><th>Growth</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <div class="cell-sub" style="margin-top:8px;">On this device sign-in took ${sec(lm.data)} for the ERP data (${szFmt(m.parts.dataRaw)}) and ${sec(lm.store)} for saved work (${szFmt(m.parts.store)}). Server estimate: saved work ${szFmt(m.parts.store)} + ERP data file ${szFmt(m.parts.data)} + exports ${szFmt(m.parts.exp)}; sign-ins, usage figures and the removal log add a little more.</div>
+    <div class="cell-sub" style="margin-top:8px;">On this device sign-in took ${sec(lm.data)} for the ERP data (${szFmt(m.parts.dataRaw)}) and ${sec(lm.store)} for saved work (${szFmt(m.parts.store)}). Server estimate: saved work ${szFmt(m.parts.store)} + ERP data file ${szFmt(m.parts.data)} + exports ${szFmt(m.parts.exp)} + change history ${szFmt(m.parts.hist)} (${(m.parts.histLines || 0).toLocaleString('en-IN')} changes, estimated); sign-ins, usage figures and the removal log add a little more.</div>
     <details style="margin-top:8px;"><summary class="cell-sub">Saved work by area${ref ? ` (change since ${fmtDate(ref)})` : ''}</summary>
       <div class="table-wrap" style="margin-top:6px;"><table class="grid-table"><thead><tr><th>Area</th><th>Records</th><th>Size</th><th>Pieces</th><th>Change</th></tr></thead><tbody>${storeRows}</tbody></table></div></details>
     ${R.worst !== 'ok' ? `<div class="part-po-note" style="margin-top:8px;">What to do: ${R.rows.filter(r => r.lv !== 'ok' || r.soon).map(r => r.k === 'kv' ? 'server storage — clear old exports and ask for old activity to be archived' : r.k === 'piece' ? `largest piece (${xe(SZ_STORE_NAMES[m.pieceStore] || m.pieceStore)}) — ask for it to be split into more pieces` : r.k === 'page' ? 'sign-in size — ask for older records (closed SOs, old activity) to load only when opened' : 'browser storage — clear Order Bridge’s site data in the browser and sign in again').join('; ')}.</div>` : ''}
@@ -18261,6 +18263,115 @@ extraWiring.push(() => {
   document.querySelectorAll('[data-xsz-open]').forEach(x => x.addEventListener('click', () => goTo('usage')));
 });
 window.__xsz = { szMeasure, szResult, szLog, SZ };
+
+// ================================================================ 25 Nov 2026 (JK): Admin › History
+// The server's own record of every change (see functions/_lib/store.js → logHistory). Admins search it by person, area,
+// SO / PO / job card / record and date, open any record's timeline, and put a record back to an earlier version.
+// Kept 90 days; never downloaded at sign-in (it's read from /api/history only when this page is open).
+ICONS.history = ICONS.history || '<path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4M12 7v5l3 2" stroke-linecap="round" stroke-linejoin="round"/>';
+(() => { const at = NAV.findIndex(n => n.id === 'usage'); NAV.splice(at < 0 ? NAV.length : at + 1, 0, { id:'history', label:'History', icon:'history' }); })();
+{ const _cv = canViewSection; canViewSection = function(id, role){ if (id === 'history') return role === 'admin'; return _cv.apply(this, arguments); }; }
+{ const _pm = permMatrixRows; permMatrixRows = function(){ return _pm.apply(this, arguments).filter(n => n.id !== 'history'); }; }
+{ const _go = goTo; goTo = function(id){
+    if (id === 'history'){ const r = _go.call(this, 'adminuploads'); state.xAdminView = 'history'; HI.data || hiLoad(); renderAll(); return r; }
+    return _go.apply(this, arguments); }; }
+const HI = { from:'', to:'', who:'', area:'', q:'', op:'', data:null, busy:false, err:'', open:null, tl:null, tlBusy:false, tlErr:'', msg:null };
+const HI_AREAS = Object.assign({}, typeof SZ_STORE_NAMES !== 'undefined' ? SZ_STORE_NAMES : {}, { ob_order_ops:'PO line details', ob_po_requests:'PO requests', ob_job_cards:'Job cards', ob_slot_bookings:'Slot bookings' });
+const HI_OP = { add:'Added', edit:'Changed', remove:'Removed', restore:'Put back', refused:'Refused' };
+const hiDay = d => d.toISOString().slice(0, 10);
+const hiYmd = s => String(s || '').replace(/-/g, '');
+const hiArea = s => HI_AREAS[s] || String(s).replace(/^ob_/, '').replace(/_/g, ' ');
+const hiField = f => f === '_' ? 'whole record' : (typeof actLabel === 'function' ? actLabel(f) : f);
+const hiVal = v => { if (v == null || v === '') return '—'; if (typeof v === 'object') { const s = JSON.stringify(v); return s.length > 80 ? s.slice(0, 77) + '…' : s; } const s = String(v); return s.length > 80 ? s.slice(0, 77) + '…' : s; };
+function hiLoad(){
+  if (!HI.to) HI.to = hiDay(new Date()); if (!HI.from) HI.from = hiDay(new Date(Date.now() - 6 * 864e5));
+  HI.busy = true; HI.err = ''; renderAll();
+  window.__OB.api(`/api/history?from=${hiYmd(HI.from)}&to=${hiYmd(HI.to)}`, { cache:'no-store' })
+    .then(r => { HI.data = r; }, e => { HI.err = e.message || 'Couldn’t load the history.'; })
+    .then(() => { HI.busy = false; if (state.xAdminView === 'history') renderAll(); });
+}
+function hiOpen(s, k){
+  HI.open = { s, k }; HI.tl = null; HI.tlErr = ''; HI.tlBusy = true; HI.msg = null; renderAll();
+  window.__OB.api(`/api/history?s=${encodeURIComponent(s)}&k=${encodeURIComponent(k)}`, { cache:'no-store' })
+    .then(r => { HI.tl = r; }, e => { HI.tlErr = e.message || 'Couldn’t load this record’s history.'; })
+    .then(() => { HI.tlBusy = false; renderAll(); });
+}
+function hiFiltered(){
+  const L = (HI.data && HI.data.lines) || [], q = HI.q.trim().toLowerCase();
+  return L.filter(l => (!HI.who || l.by === HI.who) && (!HI.area || l.s === HI.area) && (!HI.op || l.op === HI.op)
+    && (!q || [l.id, l.so, l.lb, l.k].join(' ').toLowerCase().includes(q)));
+}
+function hiChanges(d, op, v){
+  if (op === 'remove') return '<span class="cell-sub">whole record removed</span>';
+  if (!d) return '';
+  const isObj = o => o && typeof o === 'object' && !Array.isArray(o);
+  return Object.entries(d).slice(0, 12).map(([f, x]) => Array.isArray(x) && isObj(x[0]) && isObj(x[1]) && f !== '_'
+      ? Object.keys(Object.assign({}, x[0], x[1])).filter(g => JSON.stringify(x[0][g]) !== JSON.stringify(x[1][g])).slice(0, 8)
+          .map(g => `<div><b>${xe(hiField(f))} › ${xe(hiField(g))}</b>: <span class="cell-sub">${xe(hiVal(x[0][g]))}</span> → ${xe(hiVal(x[1][g]))}</div>`).join('')
+      : Array.isArray(x)
+      ? `<div><b>${xe(hiField(f))}</b>: <span class="cell-sub">${xe(hiVal(x[0]))}</span> → ${xe(hiVal(x[1]))}</div>`
+      : `<div><b>${xe(hiField(f))}</b>: +${(x.app || []).length} added</div>`).join('');
+}
+function renderHistory(){
+  if (!HI.data && !HI.busy) hiLoad();
+  const L = (HI.data && HI.data.lines) || [], rows = hiFiltered(), people = [...new Set(L.map(l => l.by))].sort(), areas = [...new Set(L.map(l => l.s))].sort();
+  const pill = op => op === 'remove' ? sP('critical', HI_OP[op]) : op === 'refused' ? sP('warn', HI_OP[op]) : op === 'restore' ? sP('good', HI_OP[op]) : sP('neutral', HI_OP[op] || op);
+  const tbl = rows.slice(0, 500).map(l => `<tr class="clickable" data-hi-open="${xe(l.s)}|${xe(l.k)}"><td style="white-space:nowrap;">${fmtDate(l.day.slice(0, 4) + '-' + l.day.slice(4, 6) + '-' + l.day.slice(6))} ${xe(l.t.slice(0, 5))}</td><td>${xe(l.by)}</td><td>${pill(l.op)}</td>
+      <td>${xe(hiArea(l.s))}</td><td><b>${xe(l.lb)}</b>${l.so ? `<div class="cell-sub">SO ${xe(l.so)}</div>` : ''}${l.why ? `<div class="cell-sub">${xe(l.why)}</div>` : ''}</td><td class="cell-sub">${xe((l.f || []).map(hiField).join(', '))}</td></tr>`).join('');
+  return `<div class="card" style="padding:12px 14px;margin-bottom:12px;">
+      <div class="cell-sub">Every change to Order Bridge, recorded by the server as it is saved — who, when, which record and what changed. Kept 90 days. Click a row for the record’s full timeline and to put back an earlier version.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px;">
+        <div class="field" style="margin:0;"><label>From</label><input type="date" id="hiFrom" value="${xe(HI.from)}"></div>
+        <div class="field" style="margin:0;"><label>To</label><input type="date" id="hiTo" value="${xe(HI.to)}"></div>
+        <button class="btn btn-ghost btn-sm" id="hiLoad">${HI.busy ? 'Loading…' : 'Load'}</button>
+        <div class="field" style="margin:0;"><label>Person</label><select id="hiWho"><option value="">Everyone</option>${people.map(p => `<option ${p === HI.who ? 'selected' : ''}>${xe(p)}</option>`).join('')}</select></div>
+        <div class="field" style="margin:0;"><label>Area</label><select id="hiArea"><option value="">All areas</option>${areas.map(a => `<option value="${xe(a)}" ${a === HI.area ? 'selected' : ''}>${xe(hiArea(a))}</option>`).join('')}</select></div>
+        <div class="field" style="margin:0;"><label>What</label><select id="hiOp"><option value="">All</option>${Object.entries(HI_OP).map(([k, l]) => `<option value="${k}" ${k === HI.op ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+        <div class="field" style="margin:0;flex:1;min-width:200px;"><label>SO, PO, job card or record</label><input id="hiQ" value="${xe(HI.q)}" placeholder="e.g. 3110020003000414, APP-534954, Job card 151"></div>
+      </div>
+      ${HI.err ? `<div class="scan-error" style="margin-top:6px;">${xe(HI.err)}</div>` : ''}
+      <div class="cell-sub" style="margin-top:6px;">${HI.data ? `${rows.length.toLocaleString('en-IN')} of ${L.length.toLocaleString('en-IN')} changes${rows.length > 500 ? ' — showing the newest 500; narrow the filters' : ''}` : ''}</div></div>
+    <div class="card table-wrap"><table class="grid-table"><thead><tr><th>When</th><th>Who</th><th>What</th><th>Area</th><th>Record</th><th>Fields</th></tr></thead><tbody>${tbl || `<tr><td colspan="6" class="cell-sub">${HI.busy ? 'Loading…' : 'Nothing recorded in these dates with these filters.'}</td></tr>`}</tbody></table></div>
+    ${HI.open ? hiTimelineModal() : ''}`;
+}
+function hiTimelineModal(){
+  const T = HI.tl, steps = (T && T.steps) || [], last = steps[steps.length - 1] || {};
+  const body = HI.tlBusy ? '<div class="cell-sub">Loading…</div>' : HI.tlErr ? `<div class="scan-error">${xe(HI.tlErr)}</div>`
+    : steps.slice().reverse().map((st, i) => { const latest = i === 0, canBack = !latest && st.op !== 'remove' && st.op !== 'refused';
+      return `<div style="border-left:3px solid var(--line);padding:4px 10px;margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;"><div><b>${xe(HI_OP[st.op] || st.op)}</b> by ${xe(st.by)} · ${fmtDT(st.at)}${st.why ? ` <span class="cell-sub">(${xe(st.why)})</span>` : ''}</div>
+        ${canBack ? `<button class="btn-text" data-hi-back="${xe(st.e)}">Put back this version</button>` : latest ? '<span class="cell-sub">latest</span>' : ''}</div>
+        <div style="margin-top:3px;font-size:13px;">${hiChanges(st.d, st.op, st.v)}</div></div>`; }).join('') || '<div class="cell-sub">No changes recorded for this record in the last 90 days.</div>';
+  return `<div class="modal-overlay" id="hiOverlay"><div class="modal-card" style="max-width:820px;"><div class="modal-head"><div><h3>${xe(last.lb || (HI.open && HI.open.k) || '')}</h3>
+      <div class="modal-sub">${xe(hiArea(HI.open.s))}${last.so ? ' · SO ' + xe(last.so) : ''}${T && T.cur ? ` · now version ${T.cur.ver}, last saved by ${xe(T.cur.by)} ${fmtDT(T.cur.at)}` : T && !HI.tlBusy ? ' · not in Order Bridge now (removed)' : ''}</div></div><button class="modal-close" id="hiClose" aria-label="Close">×</button></div>
+    <div class="modal-body">${HI.msg ? `<div class="${HI.msg.ok ? 'part-po-note' : 'scan-error'}" style="margin-bottom:8px;">${xe(HI.msg.text)}</div>` : ''}${body}</div></div></div>`;
+}
+{ const _rau = renderAdminUploads; renderAdminUploads = function(){ return state.xAdminView === 'history' && state.role === 'admin' ? renderHistory() : _rau.apply(this, arguments); }; }
+{ const _ra = renderAll; renderAll = function(){ const r = _ra.apply(this, arguments);
+    if (state.module === 'adminuploads' && state.xAdminView === 'history'){
+      document.querySelectorAll('[data-nav]').forEach(b => { if (b.dataset.nav === 'history') b.setAttribute('aria-current', 'true'); else if (b.dataset.nav === 'adminuploads' || b.dataset.nav === 'usage') b.setAttribute('aria-current', 'false'); });
+      const t = document.getElementById('moduleTitle'), s = document.getElementById('moduleSub'); if (t) t.textContent = 'History'; if (s) s.textContent = 'Admin only — every change, who made it, and earlier versions to put back'; }
+    return r; }; }
+extraWiring.push(() => {
+  if (state.xAdminView !== 'history') return;
+  const q = s => document.querySelector(s);
+  const on = (s, ev, fn) => { const el = q(s); if (el) el.addEventListener(ev, fn); };
+  on('#hiFrom', 'change', e => { HI.from = e.target.value; }); on('#hiTo', 'change', e => { HI.to = e.target.value; });
+  on('#hiLoad', 'click', () => { if (HI.from && HI.to && HI.from > HI.to){ HI.err = '“From” is after “To”.'; return renderAll(); } if (HI.from && HI.to && (Date.parse(HI.to) - Date.parse(HI.from)) / 864e5 > 30){ HI.err = 'Pick at most 31 days at a time.'; return renderAll(); } hiLoad(); });
+  on('#hiWho', 'change', e => { HI.who = e.target.value; renderAll(); }); on('#hiArea', 'change', e => { HI.area = e.target.value; renderAll(); }); on('#hiOp', 'change', e => { HI.op = e.target.value; renderAll(); });
+  on('#hiQ', 'change', e => { HI.q = e.target.value; renderAll(); });
+  document.querySelectorAll('[data-hi-open]').forEach(r => r.addEventListener('click', () => { const i = r.dataset.hiOpen.indexOf('|'); hiOpen(r.dataset.hiOpen.slice(0, i), r.dataset.hiOpen.slice(i + 1)); }));
+  const close = () => { HI.open = null; HI.tl = null; renderAll(); };
+  on('#hiClose', 'click', close); on('#hiOverlay', 'click', e => { if (e.target.id === 'hiOverlay') close(); });
+  document.querySelectorAll('[data-hi-back]').forEach(b => b.addEventListener('click', async () => {
+    if (b.dataset.armed !== '1'){ b.dataset.armed = '1'; b.textContent = 'Click again to put this version back'; return; }
+    b.disabled = true; b.textContent = 'Putting back…';
+    try { await window.__OB.api('/api/history', { body:{ s:HI.open.s, k:HI.open.k, e:b.dataset.hiBack, curVer:HI.tl && HI.tl.cur ? HI.tl.cur.ver : 0 } });
+      HI.msg = { ok:true, text:'Put back. Everyone sees it within two minutes (or on reload); the change is in the history as “Put back”.' }; const o = HI.open; hiOpen(o.s, o.k); HI.msg = { ok:true, text:'Put back. Everyone sees it within two minutes (or on reload); the change is in the history as “Put back”.' };
+    } catch(e){ HI.msg = { ok:false, text:(e && e.message) || 'Couldn’t put it back.' }; renderAll(); }
+  }));
+});
+window.__xhist = { HI, hiLoad, hiOpen };
 
 if (!routePublic() && state.currentUser) renderAll();
 })();

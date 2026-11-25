@@ -5,7 +5,7 @@
 import { requireRole } from '../../_lib/session.js';
 import { json, errorJson, bearerToken, readJsonBody } from '../../_lib/http.js';
 import { getJSON, putJSON } from '../../_lib/kv.js';
-import { DEL_IDX, bucketKey, noteStamps, STORE_RE, BUCKET_RE } from '../../_lib/store.js';
+import { DEL_IDX, bucketKey, noteStamps, STORE_RE, BUCKET_RE, logHistory, histLabel } from '../../_lib/store.js';
 
 export async function onRequestGet({ request }) {
   const auth = await requireRole(AUTH, bearerToken(request), ['admin']);
@@ -40,6 +40,7 @@ export async function onRequestPost({ request }) {
   doc.recs[k] = { v: rec.v, ver: (rec.ver || 0) + 1, c: rec.c || Date.now(), by: 'Restored by ' + who, at: now };
   await putJSON(APP_DATA, bkey, doc);
   try { await noteStamps(APP_DATA, [bkey], String(auth.user.uid)); } catch (err) {}
+  try { await logHistory(APP_DATA, { at: now, by: who, uid: String(auth.user.uid), recs: [Object.assign({ s, bk: rec.bk, k, op: 'restore', ver: doc.recs[k].ver, d: { _: [null, rec.v] }, why: 'put back from the removal log' }, histLabel(s, k, rec.v))] }); } catch (er) {}
   (e.restored = e.restored || []).push({ s, k, by: who, at: now });
   await putJSON(APP_DATA, key, e);
   return json({ ok: true });
