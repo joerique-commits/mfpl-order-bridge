@@ -827,11 +827,13 @@ function rebuildStore(s, live){
     else if (items.length){
       items.sort(function(x, y){ return cfg.dir === 'desc' ? (y.r.c - x.r.c) : (x.r.c - y.r.c); });
       // 25 Nov 2026: two saved copies of one record (same id) made every open page log a "change" every few seconds
-      // (SLOT-53390, 11–25 Nov: ~20,000 junk activity entries). Keep the newest copy; the older one is left out of the
+      // (SLOT-53390, 11–25 Nov: ~20,000 junk activity entries). Keep the copy written last (a re-keyed copy starts at a low
+      // version, so the version number can't decide); the older one is left out of the
       // page's data, so the next save removes it from the server.
       if (cfg.t === 'list'){ var best = {};
         items.forEach(function(it){ var id = it.r.v && typeof it.r.v === 'object' ? it.r.v.id : null; if (id == null) return;
-          var o = best[id]; if (!o || (it.r.ver || 0) > (o.r.ver || 0) || ((it.r.ver || 0) === (o.r.ver || 0) && String(it.r.at || '') > String(o.r.at || ''))) best[id] = it; });
+          var o = best[id], ta = String(it.r.at || ''), tb = o ? String(o.r.at || '') : '';
+          if (!o || ta > tb || (ta === tb && (it.r.ver || 0) > (o.r.ver || 0))) best[id] = it; });   // the copy written last wins
         var before = items.length; items = items.filter(function(it){ var id = it.r.v && typeof it.r.v === 'object' ? it.r.v.id : null; return id == null || best[id] === it; });
         if (items.length < before) console.warn('[Order Bridge] ' + s + ': left out ' + (before - items.length) + ' older duplicate(s)'); }
       val = items.map(function(it){ var v = it.r.v; if (cfg.t === 'list' && v && typeof v === 'object' && !Array.isArray(v)) v._k = it.k; b[it.k].j = JSON.stringify(v); return v; });
