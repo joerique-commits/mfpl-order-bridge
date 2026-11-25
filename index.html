@@ -772,7 +772,8 @@ var STORES = {
   ob_keep_sos:{ t:'value' },
   ob_so_requests:{ t:'list', n:8, dir:'desc' },
   ob_so_settings:{ t:'value' },
-  ob_size_log:{ t:'value' }
+  ob_size_log:{ t:'value' },
+  ob_approval_rules:{ t:'value' }
 };
 var USER_RE = /^ob_(profiles$|approver_me$|inbox_read_|inbox_seen_|mute_|unfollow_)/;   // kept per signed-in user
 function cfgFor(k){ if (Object.prototype.hasOwnProperty.call(STORES, k)) return STORES[k]; if (USER_RE.test(k) && /^[A-Za-z0-9_]+$/.test(k)) return { t:'user' }; return null; }
@@ -6881,6 +6882,7 @@ function renderJobCardDashboard(){
   else if (state.jobcardStageFilter) rows = rows.filter(jc => jobCardStatus(jc).currentStageKey === state.jobcardStageFilter);
   if (state.jobcardUnlinkedOnly) rows = rows.filter(jc => !jc.linkedPo);
   if (state.jobcardFlaggedOnly) rows = rows.filter(jc => jobCardStageFlags(jc).length);
+  if (state.jobcardRmOnly) rows = rows.filter(jc => xJcRm(jc).k !== 'yes');
   if (state.jobcardSearch.trim()){
     const q = state.jobcardSearch.toLowerCase();
     rows = rows.filter(jc => [jc.jobCardNumber,jc.clientName,jc.workOrderNumber,jc.linkedPo,jc.linkedArticleName].join(' ').toLowerCase().includes(q));
@@ -6914,6 +6916,7 @@ function renderJobCardDashboard(){
       <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;">
         <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;"><input type="checkbox" id="jcUnlinkedOnly" ${state.jobcardUnlinkedOnly?'checked':''}> Unlinked only</label>
         <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;"><input type="checkbox" id="jcFlaggedOnly" ${state.jobcardFlaggedOnly?'checked':''}> Flagged only</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;"><input type="checkbox" id="jcRmOnly" ${state.jobcardRmOnly?'checked':''}> RM not confirmed</label>
         ${state.jobcardStageFilter ? `<button class="filter-chip" aria-pressed="true" id="jcClearStage">Clear stage filter</button>` : ''}
         <button class="btn btn-ghost btn-sm" id="jcDownloadCsv">&#8681; CSV</button>
       </div>
@@ -6922,7 +6925,7 @@ function renderJobCardDashboard(){
 
     <div class="card table-wrap">
       <table class="grid-table">
-        <thead><tr><th>Job Card #</th><th>Client</th><th>Linked order</th><th>Article</th><th>Product code</th><th>Qty</th><th>Deadline</th><th>Progress</th><th>Current stage</th><th>Flags</th><th>Updated</th></tr></thead>
+        <thead><tr><th>Job Card #</th><th>Client</th><th>Linked order</th><th>Article</th><th>Product code</th><th>Qty</th><th>Deadline</th><th>Progress</th><th>Current stage</th><th>RM availability</th><th>Flags</th><th>Updated</th></tr></thead>
         <tbody>
           ${rows.map(jc => {
             const st = jobCardStatus(jc);
@@ -6937,10 +6940,11 @@ function renderJobCardDashboard(){
               <td>${jc.deadlineDate ? fmtDate(jc.deadlineDate) : '—'}</td>
               <td>${jobCardProgressDots(st)}</td>
               <td>${stagePill(st)}</td>
+              <td>${xJcRmCell(jc)}</td>
               <td>${flags.length ? `<span class="pill critical">${flags.length} flag${flags.length>1?'s':''}</span>` : `<span class="pill good">Clean</span>`}</td>
               <td class="cell-sub">${fmtDT(jc.updatedAt)}</td>
             </tr>`;
-          }).join('') || `<tr><td colspan="11"><div class="empty-note">No job cards match.</div></td></tr>`}
+          }).join('') || `<tr><td colspan="12"><div class="empty-note">No job cards match.</div></td></tr>`}
         </tbody>
       </table>
     </div>
@@ -7924,11 +7928,12 @@ function renderAdminUploads(){
 
 /* ============================= module: user permissions (admin only) ============================= */
 function renderUserPermissions(){
-  const tabs = [['users','Users & access'],['visibility','Menu visibility'],['editaccess','Edit access']];
+  const tabs = [['users','Users & access'],['visibility','Menu visibility'],['editaccess','Edit access'],['approvals','Approvals']];
   if (!state.permTab) state.permTab = 'users';
   let body = '';
   if (state.permTab === 'users') body = renderPermUsers();
   else if (state.permTab === 'visibility') body = renderPermMatrix('visibility');
+  else if (state.permTab === 'approvals') body = renderApprovalsTab();
   else body = renderPermMatrix('editaccess');
   return `
     <div class="preview-banner">${icon('users')} <div><strong>Admin only.</strong> Menu visibility and edit access below apply immediately, for everyone. "Users & access" lists the real sign-in accounts. Add a person with a temporary password (at least 8 characters) and share it with them; they can change it from their profile. Editing a user and resetting a password will be added after go-live.</div></div>
@@ -8558,11 +8563,13 @@ function wireContentEvents(){
   if (jcUnlinkedOnly) jcUnlinkedOnly.addEventListener('change', (e) => { state.jobcardUnlinkedOnly = e.target.checked; renderAll(); });
   const jcFlaggedOnly = document.getElementById('jcFlaggedOnly');
   if (jcFlaggedOnly) jcFlaggedOnly.addEventListener('change', (e) => { state.jobcardFlaggedOnly = e.target.checked; renderAll(); });
+  const jcRmOnly = document.getElementById('jcRmOnly');
+  if (jcRmOnly) jcRmOnly.addEventListener('change', (e) => { state.jobcardRmOnly = e.target.checked; renderAll(); });
   const jcDownloadCsv = document.getElementById('jcDownloadCsv');
   if (jcDownloadCsv) jcDownloadCsv.addEventListener('click', () => {
-    const headers = ['Job Card #','Client','Linked PO','Card PO','Work Order','Article','Qty','Current Stage','Flags','Updated'];
+    const headers = ['Job Card #','Client','Linked PO','Card PO','Work Order','Article','Qty','Current Stage','RM available & blocked','RM confirmed by','RM confirmed on','RM line on card','Flags','Updated'];
     const rows = JOB_CARDS.map(jc => { const st = jobCardStatus(jc); const flags = jobCardStageFlags(jc);
-      return [jc.jobCardNumber, jc.clientName, jc.linkedPo||'unlinked', (String(jc.workOrderNumber||'').replace(/\D/g,'') ? '242001000' + String(jc.workOrderNumber).replace(/\D/g,'') : ''), jc.workOrderNumber||'', jc.linkedArticleName||'', jc.qty, st.currentStageLabel, flags.length?flags.join(' | '):'Clean', fmtDT(jc.updatedAt)]; });
+      return [jc.jobCardNumber, jc.clientName, jc.linkedPo||'unlinked', (String(jc.workOrderNumber||'').replace(/\D/g,'') ? '242001000' + String(jc.workOrderNumber).replace(/\D/g,'') : ''), jc.workOrderNumber||'', jc.linkedArticleName||'', jc.qty, st.currentStageLabel, ...(rm => [rm.k === 'yes' ? 'Yes' : 'No', rm.k === 'yes' ? rm.by : '', rm.k === 'yes' && rm.at ? String(rm.at).slice(0, 10) : '', rm.line])(xJcRm(jc)), flags.length?flags.join(' | '):'Clean', fmtDT(jc.updatedAt)]; });
     downloadCsv('job-cards.csv', [headers, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n'));
   });
 
@@ -11607,7 +11614,7 @@ function renderLastMileCalendar(){
 }
 renderLastMileOps = function(){
   // slot settings: admin only; Dispatch Day between Calendar and Logbook (not for the factory); the COO / Director sees Dispatch Day only (9 Oct)
-  const tabs = state.role === 'approver' ? ['dispatchday'] : ['site','dispatch','installation','calendar'].concat(state.role === 'production' ? [] : ['dispatchday'], ['log'], state.role === 'admin' ? ['settings'] : []);
+  const tabs = state.role === 'approver' ? ['dispatchday'] : ['site','dispatch','installation','calendar'].concat(state.role === 'production' && !xAprNamed('dd') ? [] : ['dispatchday'], ['log'], state.role === 'admin' ? ['settings'] : []);
   if (!state.lastMileTab || !tabs.includes(state.lastMileTab)) state.lastMileTab = ['accounts','approver'].includes(state.role) ? 'dispatchday' : 'site';
   const labels = { site:'Site Details', dispatch:'Dispatch', installation:'Installation', calendar:'Calendar', dispatchday:'Dispatch Day', log:'Logbook', settings:'Slot settings' };
   const ddMine = tabs.includes('dispatchday') ? ddList().filter(ddNeedsMe).length : 0;
@@ -12472,7 +12479,7 @@ function inboxItems(){
     const N = { r1:() => ({ module:'jobcards' }), r4:() => ({ module:'fabric', set:() => { state.fabricTab = 'dispatch'; } }) };
     Object.values(grp).filter(g => RISK_RULES[g.r].owner.some(x => is(x))).forEach(g => add({ id:'risk-' + g.r + '-' + g.po, kind:'action', area:'Delay risk', title:T[g.r](g),
       detail:`${g.so} · ${g.customer} · ${g.lines.length} line(s) · ${g.text}`, when:null, nav: N[g.r] ? N[g.r]() : { module:'deadlines', set:() => { state.openOrderId = g.first.id; } } })); }
-  if (state.role === 'approver') SO_REVISION_REQUESTS.filter(r => r.status === 'awaiting_approval' && !approvalExpired(r)).forEach(r => add({ id:'sr-appr-' + r.id + '-' + r.approval.token, kind:'action', area:'SO revision', title:`Approve SO revision ${r.so} → ${srNewSosText(r) || '?'}`,
+  if (isApprover()) SO_REVISION_REQUESTS.filter(r => r.status === 'awaiting_approval' && !approvalExpired(r) && !xAprSelf('sorev', r)).forEach(r => add({ id:'sr-appr-' + r.id + '-' + r.approval.token, kind:'action', area:'SO revision', title:`Approve SO revision ${r.so} → ${srNewSosText(r) || '?'}`,
     detail:`${r.customer} · ${fmtRupees(r.currentOrderValue)} → ${fmtRupees(r.revisedOrderValue)} · from ${r.requestedBy} · expires in ${hoursLeft(r)} h`, when:r.approval.createdAt, nav:{ module:'sorevision', set:() => { state.xApprovalOpen = { id:r.id, token:r.approval.token }; } } }));
   if (is('sales')) SO_REVISION_REQUESTS.filter(r => xIsMe(r.requestedBy) && (r.status === 'sent_back' || (r.status === 'awaiting_approval' && approvalExpired(r)))).forEach(r => add({ id:'sr-back-' + r.id + '-' + (r.sentBack ? r.sentBack.at : r.approval.expiresAt), kind:'action', area:'SO revision',
     title: r.status === 'sent_back' ? `SO revision for ${r.so} was sent back` : `Approval link expired for SO revision ${r.so}`, detail: r.status === 'sent_back' ? `${r.sentBack.by} (${ROLE_LABEL(r.sentBack.byRole)}): ${r.sentBack.comments}` : 'Create a new link or withdraw and edit',
@@ -13000,7 +13007,7 @@ const APPROVERS_KEY = 'ob_approvers';
 const approvers = () => (state.xApprovers = state.xApprovers || ls.get(APPROVERS_KEY, [
   { id:'coo', name:'COO', title:'COO', email:'' }, { id:'dir1', name:'Director 1', title:'Director', email:'' }, { id:'dir2', name:'Director 2', title:'Director', email:'' }]));
 const saveApprovers = () => ls.set(APPROVERS_KEY, approvers());
-const currentApprover = () => (state.currentUser && state.currentUser.role === 'approver') ? { id:state.currentUser.id, name:state.currentUser.name, title:state.currentUser.title || 'Approver', email:state.currentUser.email }
+const currentApprover = () => (state.currentUser && state.currentUser.role !== 'admin') ? { id:state.currentUser.id, name:state.currentUser.name, title:state.currentUser.title || (state.currentUser.role === 'approver' ? 'Approver' : (ROLES[state.currentUser.role] || {}).label || 'Approver'), email:state.currentUser.email }
   : (approvers().find(a => a.id === (state.xApproverId || ls.get('ob_approver_me', ''))) || approvers()[0]);
 const _cvsAppr = canViewSection; canViewSection = (navId, role) => role === 'approver' ? ['sorevision','slots','soapproval'].includes(navId) : _cvsAppr(navId, role);   // slots: Dispatch Day approvals only
 const _cesAppr = canEditSection; canEditSection = (navId, role) => role === 'approver' ? false : _cesAppr(navId, role);
@@ -13025,7 +13032,7 @@ function startApproval(r){
 const approvalLink = r => location.href.split('#')[0] + '#so-approval/' + encodeURIComponent(r.id) + '/' + r.approval.token;
 const approvalExpired = r => !!(r.approval && !r.approval.decision && new Date(r.approval.expiresAt) < new Date());
 const hoursLeft = r => Math.max(0, Math.round((new Date(r.approval.expiresAt) - new Date()) / 3600e3));
-const isApprover = () => state.role === 'approver';
+const isApprover = () => state.role === 'approver' || xAprNamed('sorev');
 const srSalesCan = r => ['sales','admin'].includes(state.role) && (state.role === 'admin' || xIsMe(r.requestedBy) || r.requestedByRole === 'sales');
 // new reason (before "Other"); "Other" no longer has its own text box — the mandatory background details explain every reason
 if (!REASON_TYPES.some(t => t.id === 'split_part_po')) REASON_TYPES.splice(REASON_TYPES.findIndex(t => t.id === 'other'), 0, { id:'split_part_po', label:'Split into multiple SOs for raising Part POs' });
@@ -13057,7 +13064,7 @@ function srActionsCell(r, canValidate, canDecide){
     if (r.status === 'awaiting_approval' && approvalExpired(r)) out.push(`<button class="btn-text" data-xsr-renew="${r.id}">Create a new link</button>`, `<button class="btn-text" data-xsr-withdraw="${r.id}">Withdraw &amp; edit</button>`);
     if (r.status === 'sent_back' || r.status === 'draft') out.push(`<button class="btn-text" data-xsr-withdraw="${r.id}">Edit &amp; request approval again</button>`);
   }
-  if (isApprover() && r.status === 'awaiting_approval' && !approvalExpired(r)) out.push(`<button class="btn btn-primary btn-sm" data-xsr-review="${r.id}">Review &amp; decide</button>`);
+  if (isApprover() && !xAprSelf('sorev', r) && r.status === 'awaiting_approval' && !approvalExpired(r)) out.push(`<button class="btn btn-primary btn-sm" data-xsr-review="${r.id}">Review &amp; decide</button>`);
   if (r.status === 'pending' && (canDecide || canValidate)){
     if (canDecide){ const allDone = r.supplyValidation.done && r.valueCheck.done && r.advanceCheck.done;
       out.push(`<input id="sr_decisionNote_${r.id}" placeholder="Decision note" style="width:100%;margin-bottom:4px;">
@@ -13106,7 +13113,8 @@ function renderApprovalCard(){
       ${bgText(Object.assign({}, r, a.snapshot)) ? `<div class="field" style="margin-bottom:12px;"><label>Background details for the revision</label><div style="white-space:pre-wrap;font-size:13.5px;">${xe(bgText(Object.assign({}, r, a.snapshot)))}</div></div>` : ''}`;
   if (a.decision) return box(`Request ${r.id} — already ${a.decision === 'sent_back' ? 'sent back' : a.decision}`, `<div class="ac-sub">${xe(a.by)} (${xe(a.byTitle)}) · ${fmtDT(a.at)}${a.comments ? ' — “' + xe(a.comments) + '”' : ''}</div>${facts}`);
   if (approvalExpired(r)) return box('This approval link has expired', `<div class="ac-sub">Links are valid for ${APPROVAL_HOURS} hours. Ask ${xe(r.requestedBy)} to create a new one.</div>${facts}`, 'warn');
-  if (!isApprover()) return box(`Approval needed — SO revision ${r.id}`, `<div class="ac-sub">Only the COO or a Director can approve this. Sign in with your approver login to decide.${__LOCAL_FILE_DATA_BUILD ? ' <b>Local build:</b> sign-in is simulated.' : ''}</div>${facts}
+  if (isApprover() && xAprSelf('sorev', r)) return box(`You raised SO revision ${r.id}`, `<div class="ac-sub">Nobody can approve a request they raised. Another approver or the COO / Director needs to decide.</div>${facts}`, 'warn');
+  if (!isApprover()) return box(`Approval needed — SO revision ${r.id}`, `<div class="ac-sub">Only the COO, a Director or an approver named by admin can approve this. Sign in with your approver login to decide.${__LOCAL_FILE_DATA_BUILD ? ' <b>Local build:</b> sign-in is simulated.' : ''}</div>${facts}
       ${(__LOCAL_FILE_DATA_BUILD || (state.currentUser && state.currentUser.role === 'admin')) ? '<button class="btn btn-primary btn-sm" data-xsr-asapprover="1">Switch to COO / Director (admin test)</button>' : ''}`);
   const me = currentApprover(); const msg = state.xApprMsg || '';
   return box(`Approve SO revision ${r.id}?`, `<div class="ac-sub">Signed in as <b>${xe(me.name)}</b> (${xe(me.title)}). Link expires in ${hoursLeft(r)} h. Approving sends it to accounts; supply confirms the PO cancellation after accounts approves.</div>${facts}
@@ -13321,7 +13329,7 @@ extraWiring.push(() => {
   by('[data-xappr]').forEach(b => b.addEventListener('click', () => {
     const [decision, id] = b.dataset.xappr.split(':'); const r = SO_REVISION_REQUESTS.find(x => x.id === id);
     const o = state.xApprovalOpen;
-    if (!r || !isApprover() || !o || r.approval.token !== o.token || r.approval.decision || approvalExpired(r)) return;
+    if (!r || !isApprover() || xAprSelf('sorev', r) || !o || r.approval.token !== o.token || r.approval.decision || approvalExpired(r)) return;
     const comments = String(state.xApprComments || '').trim();
     if (decision !== 'approved' && !comments) { state.xApprMsg = 'Add a comment so sales knows why.'; return renderAll(); }
     const me = currentApprover();
@@ -13646,7 +13654,7 @@ function ddNeedsMe(r){
   const acc = (!ddNoPay(r) && p.status === 'submitted') || (ddHasShort(r) && ddApprOk(r) && !r.approval.validatedAt) || (ddPayCleared(r) && ddSupplyDone(r) && !ddAccDone(r));
   const sup = !ddSupplyDone(r) || ddComplete(r);
   const appr = !!(r.approval && !r.approval.decision && !ddApprExpired(r));
-  if (role === 'sales') return !r.override && sales; if (role === 'accounts') return !r.override && acc; if (role === 'supply') return sup; if (role === 'approver') return appr;
+  if (appr && role === state.role && role !== 'approver' && xAprNamed('dd') && !xAprSelf('dd', r)) return true; if (role === 'sales') return !r.override && sales; if (role === 'accounts') return !r.override && acc; if (role === 'supply') return sup; if (role === 'approver') return appr;
   return any && (sales || acc || sup || appr);
 }
 function ddEligible(){
@@ -13684,7 +13692,8 @@ function ddApprovalCard(){
   if (a.decision) return box(`Dispatch without full payment — ${a.decision}`, `<div class="ac-sub">${xe(a.by)} (${xe(a.byTitle)}) · ${fmtDT(a.at)}${a.comments ? ' — “' + xe(a.comments) + '”' : ''}</div>
     <div class="x-sr-msg ${a.decision === 'approved' ? '' : 'warn'}" style="margin-top:8px;">${a.decision === 'approved' ? (a.validatedAt ? `Validated by accounts (${xe(a.validatedBy)}). ` : 'Next: accounts validate this approval in Dispatch Day (it is in their notifications). ') + 'Supply\'s ERP numbers and accounts\' invoice + e-way bill follow.' : 'Sales can give a new reason and send a fresh link, or collect the balance.'}</div>${facts}`);
   if (ddApprExpired(r)) return box('This approval link has expired', `<div class="ac-sub">Links are valid for 48 hours. Ask ${xe(a.createdBy)} to create a new one.</div>${facts}`, 'warn');
-  if (state.role !== 'approver') return box(`Approval needed — dispatch of SO ${r.so} without full payment`, `<div class="ac-sub">Only the COO or a Director can approve this. Sign in with your approver login to decide.${__LOCAL_FILE_DATA_BUILD ? ' <b>Local build:</b> sign-in is simulated.' : ''}</div>${facts}
+  if ((state.role === 'approver' || xAprNamed('dd')) && xAprSelf('dd', r)) return box(`You raised this request for SO ${r.so}`, `<div class="ac-sub">Nobody can approve a request they raised. Another approver or the COO / Director needs to decide.</div>${facts}`, 'warn');
+  if (state.role !== 'approver' && !xAprNamed('dd')) return box(`Approval needed — dispatch of SO ${r.so} without full payment`, `<div class="ac-sub">Only the COO, a Director or an approver named by admin can approve this. Sign in with your approver login to decide.${__LOCAL_FILE_DATA_BUILD ? ' <b>Local build:</b> sign-in is simulated.' : ''}</div>${facts}
     ${(__LOCAL_FILE_DATA_BUILD || (state.currentUser && state.currentUser.role === 'admin')) ? '<button class="btn btn-primary btn-sm" data-xdd-asappr="1">Switch to COO / Director (admin test)</button>' : ''}`);
   const me = currentApprover(); const left = Math.max(0, Math.round((new Date(a.expiresAt) - new Date()) / 3600e3));
   return box(`Approve dispatch of SO ${r.so} with ${fmtRupees(a.amount)} unpaid?`, `<div class="ac-sub">Signed in as <b>${xe(me.name)}</b> (${xe(me.title)}). Link expires in ${left} h. Approving sends it to accounts to validate.</div>${facts}
@@ -13734,7 +13743,7 @@ function ddApprSection(r, ro){
   const needNew = !a || a.decision === 'rejected' || ddApprExpired(r) || (a.decision === 'approved' && !ddApprOk(r));
   let body = '';
   if (a && !a.decision && !ddApprExpired(r)) body = `<span class="pill warn"><span class="dot"></span>Waiting for the COO / Director</span> <span class="cell-sub">${fmtRupees(a.amount)} unpaid · link by ${xe(a.createdBy)} · expires ${fmtDT(a.expiresAt)}</span>
-    ${state.role === 'approver' ? `<div style="margin-top:6px;"><button class="btn btn-primary btn-sm" data-xdd-review="${r.id}">Review and decide</button></div>` : ''}
+    ${(state.role === 'approver' || xAprNamed('dd')) && !xAprSelf('dd', r) ? `<div style="margin-top:6px;"><button class="btn btn-primary btn-sm" data-xdd-review="${r.id}">Review and decide</button></div>` : ''}
     ${canS ? `<div style="margin-top:6px;"><button class="btn-text" data-xdd-copylink="${r.id}">Copy approval link</button> · <button class="btn-text" data-xdd-copymsg="${r.id}">Copy WhatsApp message</button> · <button class="btn-text" data-xdd-withdraw="${r.id}">Withdraw</button></div>` : ''}`;
   else if (a && a.decision === 'approved') body = `<span class="pill good"><span class="dot"></span>Approved by ${xe(a.by)}</span> <span class="cell-sub">${xe(a.byTitle)} · ${fmtDT(a.at)}${a.comments ? ' — “' + xe(a.comments) + '”' : ''} · ${fmtRupees(a.amount)}</span>
     ${!ddApprOk(r) ? `<div class="x-sr-msg warn">The unpaid amount is now ${fmtRupees(ddShort(r))}, more than was approved — a new approval is needed.</div>` : a.validatedAt ? `<div style="margin-top:4px;"><span class="pill good"><span class="dot"></span>Validated by accounts</span> <span class="cell-sub">${xe(a.validatedBy)} · ${fmtDT(a.validatedAt)}${a.validationNote ? ' — ' + xe(a.validationNote) : ''}</span></div>`
@@ -13861,7 +13870,7 @@ inboxItems = (o => function(){
     }
     if (is('supply') && !ddSupplyDone(r)) add({ id:'dd-sup-' + r.id, title:`Enter the ERP dispatch sheet and PO numbers for ${r.so}`, detail:`${nm} · dispatch ${fmtDate(r.snap.date)}`, when:r.createdAt, nav:go(r) });
     if (is('supply') && ddComplete(r) && ddBooking(r) && ddBooking(r).status === 'confirmed') add({ id:'dd-go-' + r.id + '-' + ((r.acc || {}).at || (r.override || {}).at || ''), title:`Ready to dispatch ${r.so} — invoice ${(r.acc || {}).invoiceNo || '(override)'}`, detail:`${nm} · ${(r.acc || {}).ewayNo ? 'e-way ' + r.acc.ewayNo : (r.acc || {}).ewayNA ? 'no e-way bill needed' : 'admin override'} · slot ${fmtDate(r.snap.date)}`, when:(r.acc || {}).at || (r.override || {}).at, nav:go(r) });
-    if (role === 'approver' && r.approval && !r.approval.decision && !ddApprExpired(r)) add({ id:'dd-appr-' + r.id + '-' + r.approval.token, title:`Approve dispatch of ${r.so} with ${fmtRupees(r.approval.amount)} unpaid`, detail:`${nm} · from ${r.approval.createdBy} · ${r.shortReason || ''}`, when:r.approval.createdAt, nav:{ module:'slots', set:() => { state.lastMileTab = 'dispatchday'; state.xDdAppr = { id:r.id, token:r.approval.token }; } } });
+    if ((role === 'approver' || xAprNamed('dd')) && !xAprSelf('dd', r) && r.approval && !r.approval.decision && !ddApprExpired(r)) add({ id:'dd-appr-' + r.id + '-' + r.approval.token, title:`Approve dispatch of ${r.so} with ${fmtRupees(r.approval.amount)} unpaid`, detail:`${nm} · from ${r.approval.createdBy} · ${r.shortReason || ''}`, when:r.approval.createdAt, nav:{ module:'slots', set:() => { state.lastMileTab = 'dispatchday'; state.xDdAppr = { id:r.id, token:r.approval.token }; } } });
   });
   return out.sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')));
 })(inboxItems);
@@ -13916,7 +13925,7 @@ extraWiring.push(() => {
   by('[data-xdd-validate]').forEach(btn => btn.addEventListener('click', () => { const id = btn.dataset.xddValidate, r = R(id); if (!r || !ddCan('accounts') || !ddApprOk(r)) return;
     Object.assign(r.approval, { validatedBy:actingUserName(), validatedAt:nowIso(), validationNote:(ddForm(id).valNote || '').trim() }); ddLog(r, 'Accounts validated the approval'); ddCommit(); }));
   const ac = $('x_dda_comments'); if (ac) ac.addEventListener('input', e => { state.xDdaComments = e.target.value; });
-  by('[data-xdda]').forEach(btn => btn.addEventListener('click', () => { const [dec, id] = btn.dataset.xdda.split(':'); const r = R(id); if (!r || !r.approval || r.approval.decision || state.role !== 'approver' || ddApprExpired(r)) return;
+  by('[data-xdda]').forEach(btn => btn.addEventListener('click', () => { const [dec, id] = btn.dataset.xdda.split(':'); const r = R(id); if (!r || !r.approval || r.approval.decision || (state.role !== 'approver' && !xAprNamed('dd')) || xAprSelf('dd', r) || ddApprExpired(r)) return;
     const c = (state.xDdaComments || '').trim(); if (dec === 'rejected' && words(c) < 2){ state.xDdaMsg = 'Add a comment to reject.'; return renderAll(); }
     const me = currentApprover(); Object.assign(r.approval, { decision:dec, by:me.name, byTitle:me.title, byKey:userKey(), at:nowIso(), comments:c }); state.xDdaMsg = ''; state.xDdaComments = '';
     ddLog(r, `${me.name} (${me.title}) ${dec} dispatch without full payment${c ? ': ' + c : ''}`); ddCommit(); }));
@@ -16002,7 +16011,7 @@ srActionsCell = function(r, canValidate, canDecide){
     if (r.status === 'awaiting_approval' && approvalExpired(r)) out.push(`<button class="btn-text" data-xsr-renew="${r.id}">Create a new link</button>`, `<button class="btn-text" data-xsr-withdraw="${r.id}">Withdraw &amp; edit</button>`);
     if (r.status === 'sent_back' || r.status === 'draft') out.push(`<button class="btn-text" data-xsr-withdraw="${r.id}">Edit &amp; request approval again</button>`);
   }
-  if (isApprover() && r.status === 'awaiting_approval' && !approvalExpired(r)) out.push(`<button class="btn btn-primary btn-sm" data-xsr-review="${r.id}">Review &amp; decide</button>`);
+  if (isApprover() && !xAprSelf('sorev', r) && r.status === 'awaiting_approval' && !approvalExpired(r)) out.push(`<button class="btn btn-primary btn-sm" data-xsr-review="${r.id}">Review &amp; decide</button>`);
   if (r.status === 'pending' && canDecide){
     out.push(`<input id="sr_decisionNote_${r.id}" placeholder="Decision note" style="width:100%;margin-bottom:4px;">
       <button class="btn-text" data-sr-approve="${r.id}" ${srAccountsDone(r) ? '' : 'disabled'} title="${srAccountsDone(r) ? 'Approve: supply then confirms the PO cancellation' : 'Do the value and advance checks first'}">Approve</button> · <button class="btn-text" data-sr-reject="${r.id}">Reject</button>`);
@@ -17415,9 +17424,9 @@ const soapSaveSet = (what) => { const s = soapSet(); s.changedAt = nowIso(); s.c
 window.addEventListener('storage', e => { if (e.key === SOAP_SET){ state.xSoapSet = null; if (state.currentUser && state.module === 'soapproval') renderAll(); } });
 
 // ---------------------------------------------------------------- who
-const soapIsCoo = () => state.role === 'approver';
-const soapIsApprover = () => { const e = ((state.currentUser || {}).email || '').toLowerCase(); return !!e && soapSet().approvers.map(x => String(x).toLowerCase()).includes(e); };
-const soapCanSee = role => ['sales', 'accounts', 'approver', 'admin'].includes(role) || soapIsApprover();
+const soapIsCoo = () => state.role === 'approver' || xAprNamed('soap2');   // + people named in Admin › Users & permissions › Approvals (25 Nov)
+const soapIsApprover = () => xAprNamed('soap1');   // SO approvers now live in Admin › Users & permissions › Approvals (moved from Settings 25 Nov)
+const soapCanSee = role => ['sales', 'accounts', 'approver', 'admin'].includes(role) || soapIsApprover() || xAprNamed('soap2');
 const soapIsSales = () => ['sales', 'admin'].includes(state.role);
 const soapIsAcc = () => ['accounts', 'admin'].includes(state.role);
 const LV = { approver:1, coo:2 }, LV_NAME = { approver:'SO approver', coo:'COO / Director' };
@@ -17528,14 +17537,14 @@ function soapStatus(r){
 const soapNeedsMe = r => {
   if (['withdrawn', 'confirmed'].includes(r.status)) return false;
   const A = Object.values(r.appr || {}), pend = A.some(a => a.status === 'pending'), rej = A.some(a => a.status === 'rejected');
-  if (soapIsCoo() && pend) return true;
-  if (soapIsApprover() && r.level === 'approver' && pend) return true;
+  if (soapIsCoo() && pend && !xAprSelf('soap', r)) return true;
+  if (soapIsApprover() && r.level === 'approver' && pend && !xAprSelf('soap', r)) return true;
   if (state.role === 'accounts' && r.status === 'submitted' && !pend && !rej) return true;
   if (state.role === 'accounts' && r.status === 'submitted' && (r.payments || []).some(p => !p.received)) return true;
   if (state.role === 'sales' && (r.status === 'sent_back' || rej) && (r.byKey === userKey() || xIsMe(r.by))) return true;
   return false;
 };
-const soapCanDecide = (r, a) => a.status === 'pending' && !['withdrawn', 'confirmed'].includes(r.status) && (soapIsCoo() || (soapIsApprover() && r.level === 'approver' && a.level === 'approver'));
+const soapCanDecide = (r, a) => a.status === 'pending' && !['withdrawn', 'confirmed'].includes(r.status) && !xAprSelf('soap', r) && (soapIsCoo() || (soapIsApprover() && r.level === 'approver' && a.level === 'approver'));
 
 // ---------------------------------------------------------------- UI helpers
 const sP = (c, t) => `<span class="pill ${c}"><span class="dot"></span>${t}</span>`;
@@ -17635,7 +17644,7 @@ function soapDetailHtml(r){
       ${A.map(a => `<div style="border-top:1px solid var(--line);margin-top:8px;padding-top:8px;"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;"><span>${xe(a.label)} · needs ${LV_NAME[a.level]}</span>
           ${sP(a.status === 'approved' ? 'good' : a.status === 'rejected' ? 'critical' : 'warn', a.status === 'pending' ? 'Waiting' : `${a.status === 'approved' ? 'Approved' : 'Rejected'} by ${xe(a.by)}`)}</div>
         ${a.reason ? `<div class="cell-sub">Sales: “${xe(a.reason)}”</div>` : ''}${a.note ? `<div class="cell-sub">${xe(a.by)}: “${xe(a.note)}”${a.viaLink ? ' (via the link)' : ''} · ${fmtDT(a.at)}</div>` : ''}
-        ${soapCanDecide(r, a) ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;"><input data-soap-note="${a.key}" placeholder="Note (needed to reject)" style="min-width:240px;"><button class="btn btn-primary btn-sm" data-soap-ok="${a.key}">Approve</button><button class="btn-text" data-soap-no="${a.key}">Reject</button></div>` : ''}</div>`).join('')}
+        ${soapCanDecide(r, a) ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;"><input data-soap-note="${a.key}" placeholder="Note (needed to reject)" style="min-width:240px;"><button class="btn btn-primary btn-sm" data-soap-ok="${a.key}">Approve</button><button class="btn-text" data-soap-no="${a.key}">Reject</button></div>` : a.status === 'pending' && (soapIsCoo() || soapIsApprover()) && xAprSelf('soap', r) ? '<div class="cell-sub" style="margin-top:4px;">You raised this request, so another approver or the COO / Director decides.</div>' : ''}</div>`).join('')}
       ${mine && soapIsSales() && open && pend ? `<div style="margin-top:10px;">${link ? `<div class="cell-sub">Approval link (valid until ${fmtDT(link.expiresAt)}). The approver must be signed in to Order Bridge.</div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;"><input readonly value="${xe(soapLinkUrl(r))}" style="flex:1;min-width:260px;" id="soapLinkTxt"><button class="btn btn-ghost btn-sm" id="soapLinkCopy">Copy</button><a class="btn btn-ghost btn-sm" target="_blank" rel="noopener" href="https://wa.me/?text=${encodeURIComponent(soapLinkMsg(r))}">WhatsApp</a></div>`
         : `<button class="btn btn-ghost btn-sm" id="soapLinkMake">Create approval link</button> <span class="cell-sub">to send on WhatsApp</span>`}</div>` : ''}</div>` : '';
@@ -17686,9 +17695,9 @@ function soapSettingsHtml(){
     <div class="field"><label>Words in a line's name that also mark it as freight</label>${inp('freightWords', S.freightWords.join(', '), 420)}</div>
     <div class="field"><label>Units counted as furniture pieces</label>${inp('pieceUoms', S.pieceUoms.join(', '), 200)}</div>
     <div class="field"><label>Article code prefixes NOT counted as pieces (fabric, stone, services)</label>${inp('pieceExclude', S.pieceExclude.join(', '), 300)}</div></div>
-  <div class="card" style="padding:12px 14px;margin-bottom:10px;"><b>SO approvers</b><div class="cell-sub">People who can approve discounts in the approver band. COO / Director can always approve instead.</div>
-    <div style="margin-top:6px;">${S.approvers.map(e => `<span class="pill neutral" style="margin:2px;">${xe(e)}${ed ? ` <button class="btn-text" data-soap-apprdel="${xe(e)}">×</button>` : ''}</span>`).join('') || '<span class="cell-sub">None yet.</span>'}</div>
-    ${ed ? `<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;"><select id="soapApprPick"><option value="">${U.users ? 'Choose a user…' : 'Loading users…'}</option>${(U.users || []).filter(u => u.active !== false && !S.approvers.includes(u.email)).map(u => `<option value="${xe(u.email)}">${xe(u.name)} · ${xe(u.email)} (${xe((ROLES[u.role] || {}).label || u.role)})</option>`).join('')}</select><button class="btn btn-ghost btn-sm" id="soapApprAdd">Add</button></div>` : ''}</div>
+  <div class="card" style="padding:12px 14px;margin-bottom:10px;"><b>SO approvers</b><div class="cell-sub">Who approves is now set in Admin › Users &amp; permissions › Approvals, with SO Revision and Dispatch Day. COO / Director can always approve instead; nobody approves a request they raised.</div>
+    <div style="margin-top:6px;">${xAprPeopleHtml('soap1') || '<span class="cell-sub">None yet — these go to the COO / Director.</span>'}</div>
+    ${ed ? '<button class="btn btn-ghost btn-sm" style="margin-top:6px;" data-xapr-goto="1">Change in Approvals</button>' : ''}</div>
   <div class="card" style="padding:12px 14px;margin-bottom:10px;"><div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;"><b>Ready reckoner — local freight and handling</b>
       <span>${Object.keys(S.cities).map(k => `<button class="btn btn-sm ${k === city ? 'btn-primary' : 'btn-ghost'}" data-soap-city="${k}">${xe(S.cities[k].name)} (${k})</button>`).join(' ')}</span></div>
     <div class="cell-sub" style="margin-top:4px;">Store code as printed on the SO (“Account Name … (${city})”). Above the largest piece band, extra trucks are added (e.g. 35 pcs = 30 + 5). A piece longer than a band's length limit moves to the next band.</div>
@@ -17728,7 +17737,7 @@ ICONS.soap = ICONS.soap || '<path d="M7 3h7l5 5v13H7z" stroke-linejoin="round"/>
 canViewSection = (o => function(id, role){ if (id === 'soapproval') return soapCanSee(role); return o.apply(this, arguments); })(canViewSection);
 permMatrixRows = (o => function(){ return o.apply(this, arguments).filter(n => n.id !== 'soapproval'); })(permMatrixRows);
 window.__soap = { render:renderSoApprovals };
-function soapRoute(){ const m = location.hash.match(/^#so-approval\/([^/]+)\/([a-z0-9]+)/i); if (!m) return false;
+function soapRoute(){ const m = location.hash.match(/^#so-approval\/(SOA-[^/]+)\/([a-z0-9]+)/i); if (!m) return false;   // SOA- only: SO Revision links share the #so-approval/ prefix (fixed 25 Nov)
   const U = SOAP_ST(), id = decodeURIComponent(m[1]), r = SOAP.find(x => x.id === id);
   U.tab = 'requests'; U.open = id; U.link = { id, expired:!(r && r.link && r.link.token === m[2] && new Date(r.link.expiresAt) > new Date()) };
   state.module = 'soapproval'; return true; }
@@ -17842,8 +17851,6 @@ extraWiring.push(() => {
     qa('[data-soap-pindel]').forEach(b => b.addEventListener('click', () => { const p = b.dataset.soapPindel; delete C.pins[p]; soapSaveSet(`${C.name}: PIN ${p} removed (now outside city limits)`); renderAll(); }));
     const pn = q('#soapPinAdd'); if (pn) pn.addEventListener('click', () => { const p = q('#soapPinNew').value.trim(); if (!/^[1-9]\d{5}$/.test(p)) return alertBox('#soapPinNew', '6 digits');
       C.pins[p] = { band:q('#soapPinNewBand').value, manual:true, check:'' }; soapSaveSet(`${C.name}: PIN ${p} added`); renderAll(); });
-    const aa = q('#soapApprAdd'); if (aa) aa.addEventListener('click', () => { const e = q('#soapApprPick').value; if (!e) return; S.approvers.push(e); soapSaveSet(`SO approver added: ${e}`); renderAll(); });
-    qa('[data-soap-apprdel]').forEach(b => b.addEventListener('click', () => { S.approvers = S.approvers.filter(x => x !== b.dataset.soapApprdel); soapSaveSet(`SO approver removed: ${b.dataset.soapApprdel}`); renderAll(); }));
   }
 });
 // payments on the request page (accounts) are wired above; the draft form handles the sales side
@@ -18176,7 +18183,7 @@ const SZ_CHECKS = [
 ];
 const SZ_STORE_NAMES = { ob_order_ops:'Order line details', ob_activity:'Activity log', ob_job_cards:'Job cards', ob_act_parts:'Activity follows', ob_po_requests:'PO requests',
   ob_fabric_entries:'Fabric entries', ob_fabric_challans:'Challans', ob_fabric_receipts:'Fabric receipts', ob_slot_bookings:'Slot bookings', ob_site_details:'Site details',
-  ob_so_revisions:'SO revisions', ob_so_requests:'SO approval requests', ob_so_settings:'SO approval settings', ob_stock_blocks:'Stock blocks', ob_wh_tags:'Warehouse tags',
+  ob_so_revisions:'SO revisions', ob_so_requests:'SO approval requests', ob_so_settings:'SO approval settings', ob_approval_rules:'Approval rules', ob_stock_blocks:'Stock blocks', ob_wh_tags:'Warehouse tags',
   ob_po_links:'PO links', ob_po_dl:'PO deadlines', ob_soline_res:'SO line notes', ob_dispatch_day:'Dispatch day', ob_corrections:'Corrections', ob_size_log:'Size log' };
 const SZ = { exp:null, expBusy:false, expErr:'', last:null };
 const szFmt = n => n >= 1024 * SZ_MB ? (n / 1024 / SZ_MB).toFixed(n % (1024 * SZ_MB) ? 1 : 0) + ' GB' : n >= SZ_MB ? (n / SZ_MB).toFixed(n >= 100 * SZ_MB ? 0 : 1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
@@ -18372,6 +18379,161 @@ extraWiring.push(() => {
   }));
 });
 window.__xhist = { HI, hiLoad, hiOpen };
+
+// ================================================================ 25 Nov 2026 (JK): Admin › Users & permissions › Approvals
+// One place for who approves what. Each approval keeps its role default (COO / Director); admin can name extra people
+// (any role). Nobody approves a request they raised. SO approvers (the first SO Approval Request level) moved here from
+// SO Approval Request › Settings; the discount and commission limits (%) stay there.
+// Stored in the shared value store ob_approval_rules: { people:{ soap1:[{email,name,role}], soap2, sorev, dd }, grants:{ email:[navId] }, log, migrated }.
+var XAPR_KEY = 'ob_approval_rules';
+var XAPR_KINDS = [
+  { id:'soap1', area:'SO Approval Request', level:'SO approver', nav:'soapproval',
+    what:'Discounts within the SO approver band and commissions up to the SO approver limit.', def:'Nobody by default — until someone is named here these go to the COO / Director.' },
+  { id:'soap2', area:'SO Approval Request', level:'COO / Director level', nav:'soapproval',
+    what:'Discounts and commissions above the SO approver limits (or while the limits are blank).', def:'Everyone with a COO / Director login.' },
+  { id:'sorev', area:'SO Revision', level:'Approval before supply and accounts', nav:'sorevision',
+    what:'Every SO revision request, before supply and accounts check it.', def:'Everyone with a COO / Director login.' },
+  { id:'dd', area:'Dispatch Day', level:'Dispatch without full payment', nav:'slots',
+    what:'A dispatch going out with part of the payment unpaid, before accounts validate it.', def:'Everyone with a COO / Director login.' },
+];
+var XAPR_CACHE = null;
+var XAPR_UI = { users:null, loading:false, msg:'' };
+function xAprMyEmail(){ return String((state.currentUser || {}).email || '').toLowerCase(); }
+function xAprRules(){
+  if (XAPR_CACHE) return XAPR_CACHE;
+  var v = null; try { v = ls.get(XAPR_KEY, null); } catch(e){}
+  v = (v && typeof v === 'object') ? JSON.parse(JSON.stringify(v)) : {};
+  v.people = v.people || {};
+  XAPR_KINDS.forEach(function(k){ if (!Array.isArray(v.people[k.id])) v.people[k.id] = []; });
+  if (!v.migrated && !v.people.soap1.length){   // not saved here yet: the SO approvers from SO Approval settings still count
+    try { v.people.soap1 = (soapSet().approvers || []).map(function(e){ return { email:String(e).toLowerCase(), name:'', role:'' }; }); } catch(e){}
+  }
+  v.grants = v.grants || {}; v.log = v.log || [];
+  return XAPR_CACHE = v;
+}
+function xAprSave(what){
+  var v = xAprRules(); v.migrated = true; v.changedAt = nowIso(); v.changedBy = actingUserName();
+  if (what) v.log = v.log.concat(what.map(function(w){ return { at:v.changedAt, by:v.changedBy, what:w }; })).slice(-80);
+  ls.set(XAPR_KEY, v); XAPR_CACHE = null;
+}
+XLIVE[XAPR_KEY] = function(){ XAPR_CACHE = null; };
+window.addEventListener('storage', function(e){ if (e.key === XAPR_KEY){ XAPR_CACHE = null; if (state.currentUser) renderAll(); } });
+// is the signed-in person named for this approval?
+function xAprNamed(kind){ var e = xAprMyEmail(); return !!e && (xAprRules().people[kind] || []).some(function(p){ return p.email === e; }); }
+// did the signed-in person raise this request? (then they can't approve it)
+function xAprSelf(kind, r){
+  if (!r) return false;
+  var key = userKey();
+  if (kind === 'soap' || kind === 'soap1' || kind === 'soap2') return r.byKey === key || xIsMe(r.by);
+  if (kind === 'sorev') return xIsMe(r.requestedBy) || !!(r.approval && xIsMe(r.approval.createdBy)) || (!!r.requestedByKey && r.requestedByKey === key);
+  if (kind === 'dd') return xIsMe(r.createdBy) || (!!r.byKey && r.byKey === key) || !!(r.approval && xIsMe(r.approval.createdBy));
+  return false;
+}
+function xAprPeopleHtml(kind){
+  return (xAprRules().people[kind] || []).map(function(p){ return '<span class="pill neutral" style="margin:2px;">' + xe(p.name || p.email) + (p.name ? ' <span class="cell-sub">' + xe(p.email) + '</span>' : '') + '</span>'; }).join('');
+}
+// can a person with this role (and email) open the screen the approval is on?
+function xAprCanSee(nav, role, email){
+  if (role === 'admin') return true;
+  if (role === 'approver' && ['sorevision', 'slots', 'soapproval'].indexOf(nav) >= 0) return true;
+  if (nav === 'soapproval') return true;   // named approvers always see SO Approval Request
+  if (((state.permissions.visibility || {})[nav] || {})[role]) return true;
+  return ((xAprRules().grants[email] || []).indexOf(nav) >= 0);
+}
+// view access given from the Approvals tab (one screen, for one person)
+canViewSection = (function(o){ return function(id, role){
+  if (o.apply(this, arguments)) return true;
+  var u = state.currentUser; if (!u || u.role === 'admin' || role !== u.role) return false;
+  return (xAprRules().grants[xAprMyEmail()] || []).indexOf(id) >= 0;
+}; })(canViewSection);
+function xAprNavLabel(nav){ var n = NAV.find(function(x){ return x.id === nav; }); return n ? n.label : nav; }
+function xAprLoadUsers(){
+  XAPR_UI.loading = true;
+  window.__OB.api('/api/admin/users', { cache:'no-store' }).then(function(r){ XAPR_UI.users = (r && r.users) || []; }, function(){ XAPR_UI.users = []; })
+    .then(function(){ XAPR_UI.loading = false; if (state.module === 'userpermissions') renderAll(); });
+}
+function xAprUser(email){ return (XAPR_UI.users || []).find(function(u){ return String(u.email || '').toLowerCase() === email; }); }
+function xAprRoleLabel(r){ return r ? ((ROLES[r] || {}).label || r) : ''; }
+function renderApprovalsTab(){
+  if (state.role !== 'admin') return '<div class="card" style="padding:16px;">Admin only.</div>';
+  if (!XAPR_UI.users && !XAPR_UI.loading && window.__OB && window.__OB.api) setTimeout(xAprLoadUsers, 0);
+  var v = xAprRules();
+  var rows = XAPR_KINDS.map(function(k){
+    var ppl = v.people[k.id];
+    var chips = ppl.map(function(p){ var u = xAprUser(p.email), nm = (u && u.name) || p.name || p.email, role = (u && u.role) || p.role;
+      var gone = XAPR_UI.users && !u ? ' <span class="pill critical">no login</span>' : u && u.active === false ? ' <span class="pill warn">inactive</span>' : '';
+      return '<span class="pill neutral" style="margin:2px;">' + xe(nm) + (role ? ' · ' + xe(xAprRoleLabel(role)) : '') + gone + ' <button class="btn-text" data-xapr-del="' + k.id + '|' + xe(p.email) + '" title="Remove">×</button></span>'; }).join('');
+    var warn = ppl.map(function(p){ var u = xAprUser(p.email); var role = (u && u.role) || p.role; if (!role || xAprCanSee(k.nav, role, p.email)) return '';
+      return '<div class="x-warn" style="margin-top:6px;">' + xe((u && u.name) || p.name || p.email) + ' (' + xe(xAprRoleLabel(role)) + ') can\'t open ' + xe(xAprNavLabel(k.nav)) + ', so they can\'t see these requests. <button class="btn btn-ghost btn-sm" data-xapr-grant="' + xe(k.nav) + '|' + xe(p.email) + '">Give view access to ' + xe(xAprNavLabel(k.nav)) + ' only</button></div>'; }).join('');
+    var opts = (XAPR_UI.users || []).filter(function(u){ var e = String(u.email || '').toLowerCase(); return u.active !== false && e && !ppl.some(function(p){ return p.email === e; }) && !(k.id !== 'soap1' && u.role === 'approver'); })
+      .map(function(u){ return '<option value="' + xe(String(u.email).toLowerCase()) + '">' + xe(u.name) + ' · ' + xe(xAprRoleLabel(u.role)) + '</option>'; }).join('');
+    return '<tr><td><div class="cell-primary">' + xe(k.area) + '</div><div class="cell-sub">' + xe(k.level) + '</div></td>'
+      + '<td><div>' + xe(k.what) + '</div><div class="cell-sub" style="margin-top:4px;">' + xe(k.def) + '</div></td>'
+      + '<td>' + (chips || '<span class="cell-sub">' + (k.id === 'soap1' ? 'Nobody named' : 'Nobody extra') + '</span>') + warn
+      + '<div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;"><select data-xapr-pick="' + k.id + '"><option value="">' + (XAPR_UI.users ? 'Add a person…' : 'Loading users…') + '</option>' + opts + '</select><button class="btn btn-ghost btn-sm" data-xapr-add="' + k.id + '">Add</button></div></td></tr>';
+  }).join('');
+  var grants = Object.keys(v.grants).filter(function(e){ return (v.grants[e] || []).length; }).map(function(e){ var u = xAprUser(e);
+    return '<div style="margin-top:4px;">' + xe((u && u.name) || e) + ' (' + xe(xAprRoleLabel(u && u.role)) + '): ' + v.grants[e].map(function(n){ return xe(xAprNavLabel(n)) + ' <button class="btn-text" data-xapr-ungrant="' + xe(n) + '|' + xe(e) + '">remove</button>'; }).join(' · ') + '</div>'; }).join('');
+  var log = v.log.slice().reverse().slice(0, 15).map(function(l){ return '<div class="cell-sub">' + fmtDT(l.at) + ' · ' + xe(l.by) + ' — ' + xe(l.what) + '</div>'; }).join('');
+  return '<div class="card" style="padding:12px 14px;margin-bottom:12px;"><b>Who approves what</b>'
+    + '<div class="cell-sub" style="margin-top:4px;">Each approval keeps its default (the COO / Director logins), and the people you name here can approve it too — from any team. The COO / Director can always step in. <b>Nobody can approve a request they raised</b>; it waits for another approver or the COO / Director. Changes apply straight away and are recorded below and in Admin › History.</div>'
+    + '<div class="cell-sub" style="margin-top:4px;">Discount and commission limits (%) stay in SO Approval Request › Settings. <button class="btn-text" data-xapr-limits="1">Open the limits</button> · Bookings and stock blocks stay with supply.</div></div>'
+    + (XAPR_UI.msg ? '<div class="x-sr-msg" style="margin-bottom:10px;">' + xe(XAPR_UI.msg) + '</div>' : '')
+    + (!v.migrated && v.people.soap1.length ? '<div class="cell-sub" style="margin-bottom:8px;">The SO approvers below were carried over from SO Approval Request › Settings.</div>' : '')
+    + '<div class="card table-wrap"><table class="grid-table"><thead><tr><th style="width:190px;">Approval</th><th>What it covers · default</th><th style="width:42%;">Named people</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+    + (grants ? '<div class="card" style="padding:12px 14px;margin-top:12px;"><b>View access given for approvals</b><div class="cell-sub">One screen each, on top of what their team can see in Menu visibility.</div>' + grants + '</div>' : '')
+    + '<div class="card" style="padding:12px 14px;margin-top:12px;"><b>Changes</b>' + (log || '<div class="cell-sub">None yet.</div>') + '</div>';
+}
+function xAprWho(email){ var u = xAprUser(email); return (u && u.name) || email; }
+extraWiring.push(function(){
+  var qa = function(s){ return Array.prototype.slice.call(document.querySelectorAll(s)); };
+  qa('[data-xapr-goto],[data-xapr-limits]').forEach(function(b){ b.addEventListener('click', function(){
+    if (b.dataset.xaprGoto){ state.permTab = 'approvals'; goTo('userpermissions'); }
+    else { SOAP_ST().tab = 'settings'; goTo('soapproval'); }
+    renderAll(); window.scrollTo(0, 0); }); });
+  if (state.module !== 'userpermissions' || state.permTab !== 'approvals' || state.role !== 'admin') return;
+  qa('[data-xapr-add]').forEach(function(b){ b.addEventListener('click', function(){
+    var kind = b.dataset.xaprAdd, sel = document.querySelector('[data-xapr-pick="' + kind + '"]'), e = sel && sel.value; if (!e) return;
+    var v = xAprRules(), u = xAprUser(e), k = XAPR_KINDS.find(function(x){ return x.id === kind; });
+    if (v.people[kind].some(function(p){ return p.email === e; })) return;
+    v.people[kind].push({ email:e, name:(u && u.name) || '', role:(u && u.role) || '' });
+    v.people.soap1.forEach(function(p){ var x = xAprUser(p.email); if (x){ p.name = x.name || p.name; p.role = x.role || p.role; } });
+    XAPR_UI.msg = '';
+    xAprSave([(u && u.name || e) + ' added as approver for ' + k.area + ' — ' + k.level]); renderAll(); }); });
+  qa('[data-xapr-del]').forEach(function(b){ b.addEventListener('click', function(){
+    if (b.dataset.armed !== '1'){ b.dataset.armed = '1'; b.textContent = 'remove?'; return; }
+    var parts = b.dataset.xaprDel.split('|'), kind = parts[0], e = parts[1], v = xAprRules(), k = XAPR_KINDS.find(function(x){ return x.id === kind; });
+    v.people[kind] = v.people[kind].filter(function(p){ return p.email !== e; });
+    xAprSave([xAprWho(e) + ' removed as approver for ' + k.area + ' — ' + k.level]); renderAll(); }); });
+  qa('[data-xapr-grant]').forEach(function(b){ b.addEventListener('click', function(){
+    var parts = b.dataset.xaprGrant.split('|'), nav = parts[0], e = parts[1], v = xAprRules();
+    v.grants[e] = (v.grants[e] || []).filter(function(n){ return n !== nav; }).concat([nav]);
+    XAPR_UI.msg = xAprWho(e) + ' can now open ' + xAprNavLabel(nav) + ' (view).';
+    xAprSave(['View access to ' + xAprNavLabel(nav) + ' given to ' + xAprWho(e) + ' (for approvals)']); renderAll(); }); });
+  qa('[data-xapr-ungrant]').forEach(function(b){ b.addEventListener('click', function(){
+    var parts = b.dataset.xaprUngrant.split('|'), nav = parts[0], e = parts[1], v = xAprRules();
+    v.grants[e] = (v.grants[e] || []).filter(function(n){ return n !== nav; }); if (!v.grants[e].length) delete v.grants[e];
+    XAPR_UI.msg = '';
+    xAprSave(['View access to ' + xAprNavLabel(nav) + ' removed from ' + xAprWho(e)]); renderAll(); }); });
+});
+
+// ================================================================ 25 Nov 2026 (JK): Job Card Station — raw material column, filter, CSV
+// Same tick as the material-readiness view (jc.rmBlocked) plus what the card itself says (jc.rmRead).
+function xJcRm(jc){
+  var b = jc && jc.rmBlocked, rd = jc && jc.rmRead;
+  if (b && b.on) return { k:'yes', label:'Available & blocked', by:b.by || '', at:b.at || '', line:(rd && rd.line) || '' };
+  if (rd && rd.status === 'not_available') return { k:'no', label:'Card says not available', by:'', at:rd.at || '', line:rd.line || '' };
+  return { k:'none', label:'Not confirmed', by:'', at:'', line:(rd && rd.line) || '' };
+}
+function xJcRmCell(jc){
+  var r = xJcRm(jc);
+  if (r.k === 'yes') return '<span class="pill good"><span class="dot"></span>Available &amp; blocked</span><div class="cell-sub">' + xe(r.by) + (r.at ? ' · ' + fmtDate(String(r.at).slice(0, 10)) : '') + '</div>';
+  if (r.k === 'no') return '<span class="pill critical"><span class="dot"></span>Card says not available</span>' + (r.line ? '<div class="cell-sub">“' + xe(r.line) + '”</div>' : '');
+  return '<span class="pill warn"><span class="dot"></span>Not confirmed</span>';
+}
+window.__xapr = { rules:xAprRules, named:xAprNamed, self:xAprSelf, canSee:xAprCanSee, rm:xJcRm, ui:XAPR_UI };
+// the base page (a separate script) calls these
+Object.assign(window, { renderApprovalsTab:renderApprovalsTab, xAprNamed:xAprNamed, xAprSelf:xAprSelf, xJcRm:xJcRm, xJcRmCell:xJcRmCell });
 
 if (!routePublic() && state.currentUser) renderAll();
 })();
