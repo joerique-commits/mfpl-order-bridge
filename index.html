@@ -6933,7 +6933,7 @@ function renderJobCardDashboard(){
             return `<tr class="clickable" data-jc-open="${jc.id}">
               <td class="cell-primary mono">${jc.jobCardNumber}</td>
               <td>${jc.clientName||'—'}</td>
-              <td>${jc.linkedPo ? `<span class="mono">${jc.linkedPo}</span>` : `<span class="pill warn">unlinked</span>`}</td>
+              <td>${jc.linkedPo ? `<span class="mono">${jc.linkedPo}</span>` : (window.xJcLinkCell ? window.xJcLinkCell(jc) : `<span class="pill warn">unlinked</span>`)}</td>
               <td>${jc.linkedArticleName || '—'}</td>
               <td class="mono">${jc.productCode || '—'}</td>
               <td class="num">${jc.qty}</td>
@@ -10784,7 +10784,7 @@ renderWarehouseIntake = function(){
         ${seq && !seq.next ? `<div class="cell-sub" style="color:var(--critical);margin-top:8px;">Every piece of this article on this PO already has a tag (${seq.total} of ${seq.total}). A sequence can't be used twice.</div>` : ''}
         ${seq && seq.used.size && seq.next ? `<div class="cell-sub" style="margin-top:8px;">Already tagged: ${[...seq.used].sort((a,b)=>a-b).join(', ')} of ${seq.total}.</div>` : ''}
         ${seq && seq.fractional ? `<div class="cell-sub" style="color:var(--warn);margin-top:4px;">PO qty is ${seq.a.qty} ${xe(seq.a.uom)} — not a whole number of pieces; the sequence uses ${seq.total}.</div>` : ''}
-        ${qcB ? '<div class="cell-sub" style="color:var(--critical);margin-top:8px;">QC report not confirmed yet — supply ticks “QC report generated” for this SKU in Order Deadlines (after packing) before its warehouse tags can be made.</div>' : ''}
+        ${qcB ? '<div class="cell-sub" style="color:var(--critical);margin-top:8px;">Warehouse tags can be made once the QC report is ticked (Order Deadlines) and the job card shows packing done. Now: ' + xe(xQcWhy(qcB)) + '.</div>' : ''}
         <button class="btn btn-primary" id="x_wh_submit" style="margin-top:14px;" ${canSubmit?'':'disabled'}>Generate tag &amp; log intake</button>
       </div>
       <div class="wts-preview"><div class="card" style="padding:20px 22px;">
@@ -10905,8 +10905,8 @@ function lmReady(so, a, date, need){
   let qcMiss = false;   // JK 2 Nov: a furniture factory SKU is ready only once supply ticks "QC report generated"
   lmLinesOf(so, a).filter(factoryLine).forEach(o => {
     const jc = jobCardOf(o); const pk = jc && (jc.stages || []).find(s => s.key === 'packing');
-    if (xQcNeed(o)){ if (xQcOk(o)){ good.push(`QC report generated ${fmtDate(String(o.qcReport.at || '').slice(0, 10))}`); return; }
-      qcMiss = true; bad.unshift(pk && pk.endDateISO ? `packed ${fmtDate(pk.endDateISO)} — QC report not yet ticked by supply` : jc ? `factory stage: ${stageNow(jc)} — QC report pending` : 'no job card — QC report not yet ticked by supply'); return; }
+    if (xQcNeed(o)){ if (xQcReady(o)){ good.push(`QC report generated ${fmtDate(String(o.qcReport.at || '').slice(0, 10))}${jc ? ', packed' : ''}`); return; }
+      qcMiss = true; bad.unshift(xQcWhy(o)); return; }
     if (pk && pk.endDateISO) { (good.length ? good : bad).push(`packed at the factory ${fmtDate(pk.endDateISO)}${good.length ? '' : ', not yet at the warehouse'}`); return; }
     bad.push(jc ? `factory stage: ${stageNow(jc)}` : 'no job card yet');
     const f = effF(o); const ready = f ? addD(f, DL_BUF) : null;
@@ -15766,21 +15766,39 @@ function xJcShort(o){ const f = xJcInfo(o); return f ? `Job card ${xe(f.card)}: 
 window.__xJcLine = o => factoryLine(o) ? `<div class="cell-sub" style="margin-top:3px;">${xJcShort(o)}</div>` : '';   // used by the PO tracker's line table (main script)
 function xCardPo(jc){ const w = String(jc.workOrderNumber || '').replace(/\D/g, ''); return w ? '242001000' + w : ''; }
 
-// ---- 5 · "QC report generated" — supply's tick on each furniture factory SKU (Order Deadlines), once packing is closed.
-// Only this tick makes the SKU ready for a dispatch / installation slot and lets its warehouse tags be made.
-// A furniture SKU with no job card can be ticked too (it stays not ready until it is).
+// ---- 5 · "QC report generated" — supply's tick on each furniture factory SKU (Order Deadlines).
+// 27 Nov (JK): the tick opens once the linked job card's Factory-QC stage has a start date (was: once packing closed).
+// The SKU is ready for a dispatch / installation slot and its warehouse tags only when it is ticked AND packing has an end date.
+// No job card linked: supply can't tick; admin can, with a reason (recorded on the tick).
 function xQcNeed(o){ return factoryLine(o) && isFurn(o); }
 function xQcOk(o){ return !!(o && o.qcReport && o.qcReport.on); }
-function xQcPacked(o){ const jc = jobCardOf(o); const pk = jc && (jc.stages || []).find(s => s.key === 'packing'); return !!(pk && (pk.endDateISO || pk.endDateRaw)); }
-const xQcCanTick = o => xQcNeed(o) && (!jobCardOf(o) || xQcPacked(o));
-function xQcBlocks(po, sku){ const o = ORDERS.find(x => x.po === po && x.sku === sku && x.lifecycle === 'po_confirmed'); return o && xQcNeed(o) && !xQcOk(o) ? o : null; }
+function xQcStage(o, k){ const jc = jobCardOf(o); return jc && (jc.stages || []).find(s => s.key === k); }
+function xQcPacked(o){ const pk = xQcStage(o, 'packing'); return !!(pk && (pk.endDateISO || pk.endDateRaw)); }
+function xQcStarted(o){ const q = xQcStage(o, 'factoryQc'); return !!(q && (q.startDateISO || q.startDateRaw)) || xQcPacked(o); }
+const xQcCanTick = o => xQcNeed(o) && !!jobCardOf(o) && xQcStarted(o);
+function xQcReady(o){ return xQcOk(o) && (!jobCardOf(o) || xQcPacked(o)); }
+function xQcWhy(o){   // why this SKU isn't ready yet (slot check, warehouse tags)
+  const jc = jobCardOf(o), ok = xQcOk(o);
+  if (ok) return jc && !xQcPacked(o) ? 'QC report ticked — not packed yet (factory stage: ' + stageNow(jc) + ')' : '';
+  if (!jc) return 'no job card linked — QC report can be ticked once one is linked and in Factory-QC';
+  const pk = xQcStage(o, 'packing');
+  if (pk && pk.endDateISO) return 'packed ' + fmtDate(pk.endDateISO) + ' — QC report not yet ticked by supply';
+  return xQcStarted(o) ? 'in Factory-QC — QC report not yet ticked by supply' : 'factory stage: ' + stageNow(jc) + ' — QC report after Factory-QC starts';
+}
+function xQcBlocks(po, sku){ const o = ORDERS.find(x => x.po === po && x.sku === sku && x.lifecycle === 'po_confirmed'); return o && xQcNeed(o) && !xQcReady(o) ? o : null; }
+var XQC_NOJC = {};   // admin: reason box open for these SKU ids
 function xQcCell(o){
   if (!xQcNeed(o)) return '';
-  const q = o.qcReport, ok = xQcOk(o), can = ['supply', 'admin'].includes(state.role);
-  const who = ok ? `<div class="cell-sub">${xe(q.setBy || '')}${q.at ? ', ' + fmtDate(String(q.at).slice(0, 10)) : ''}</div>` : '';
-  if (can && (ok || xQcCanTick(o))) return `<label class="x-qc" style="display:flex;gap:6px;align-items:center;margin-top:6px;font-size:12.5px;"><input type="checkbox" data-xqc="${xe(o.id)}" ${ok ? 'checked' : ''} style="width:auto;margin:0;"> QC report generated</label>${who}${!ok && !jobCardOf(o) ? '<div class="cell-sub">No job card linked</div>' : ''}`;
+  const q = o.qcReport, ok = xQcOk(o), can = ['supply', 'admin'].includes(state.role), jc = jobCardOf(o);
+  const who = ok ? `<div class="cell-sub">${xe(q.setBy || '')}${q.at ? ', ' + fmtDate(String(q.at).slice(0, 10)) : ''}</div>${q.noJcReason ? `<div class="cell-sub">No job card — ${xe(q.noJcReason)}</div>` : ''}${jc && !xQcPacked(o) ? '<div class="cell-sub">Ready once packed</div>' : ''}` : '';
+  if (can && (ok || xQcCanTick(o))) return `<label class="x-qc" style="display:flex;gap:6px;align-items:center;margin-top:6px;font-size:12.5px;"><input type="checkbox" data-xqc="${xe(o.id)}" ${ok ? 'checked' : ''} style="width:auto;margin:0;"> QC report generated</label>${who}`;
   if (ok) return `<div class="cell-sub" style="margin-top:6px;">✓ QC report generated</div>${who}`;
-  return `<div class="cell-sub" style="margin-top:6px;">QC report: ${jobCardOf(o) && !xQcPacked(o) ? 'after packing' : 'pending with supply'}</div>`;
+  if (!jc){
+    if (state.role !== 'admin') return '<div class="cell-sub" style="margin-top:6px;">QC report: link a job card first</div>';
+    if (!XQC_NOJC[o.id]) return `<div class="cell-sub" style="margin-top:6px;">QC report: link a job card first</div><button class="btn-text" data-xqc-nojc="${xe(o.id)}" style="font-size:12px;">Tick without a job card (admin)…</button>`;
+    return `<div style="margin-top:6px;display:flex;flex-direction:column;gap:4px;max-width:220px;"><input type="text" data-xqc-why="${xe(o.id)}" placeholder="Why there is no job card" style="font-size:12px;"><div style="display:flex;gap:6px;"><button class="btn btn-primary btn-sm" data-xqc-nojc-ok="${xe(o.id)}">Tick QC report</button><button class="btn-text" data-xqc-nojc-x="${xe(o.id)}">Cancel</button></div></div>`;
+  }
+  return `<div class="cell-sub" style="margin-top:6px;">QC report: after Factory-QC starts</div>`;
 }
 ACT_LABELS.qcReport = 'QC report generated'; ACT_LABELS['qcReport.on'] = 'QC report generated';
 const _actDiffFb = actDiff; actDiff = function(){ return _actDiffFb.apply(this, arguments).filter(c => c.k !== 'qcTicksBy'); };   // the tick itself is already reported
@@ -15791,6 +15809,18 @@ extraWiring.push(() => {
       const ev = { on:c.checked, setBy:actingUserName(), at:nowIso() };
       o.qcReport = ev; o.qcTicksBy = (o.qcTicksBy || []).concat([ev]); renderAll(); });   // qcTicksBy: every tick / untick (name keeps it out of the activity diff)
   });
+  // admin: tick a SKU that has no job card, with a reason
+  const find = id => ORDER_BY_ID[id] || ORDERS.find(x => x.id === id);
+  document.querySelectorAll('[data-xqc-nojc]').forEach(b => b.addEventListener('click', ev => { ev.stopPropagation(); XQC_NOJC[b.dataset.xqcNojc] = true; renderAll(); const i = document.querySelector('[data-xqc-why="' + b.dataset.xqcNojc + '"]'); if (i) i.focus(); }));
+  document.querySelectorAll('[data-xqc-nojc-x]').forEach(b => b.addEventListener('click', ev => { ev.stopPropagation(); delete XQC_NOJC[b.dataset.xqcNojcX]; renderAll(); }));
+  document.querySelectorAll('[data-xqc-why]').forEach(i => i.addEventListener('click', ev => ev.stopPropagation()));
+  document.querySelectorAll('[data-xqc-nojc-ok]').forEach(b => b.addEventListener('click', ev => {
+    ev.stopPropagation(); const id = b.dataset.xqcNojcOk, o = find(id), inp = document.querySelector('[data-xqc-why="' + id + '"]');
+    const why = String(inp && inp.value || '').trim();
+    if (!o || state.role !== 'admin' || jobCardOf(o)) return;
+    if (why.length < 5){ if (inp){ inp.style.borderColor = 'var(--critical)'; inp.placeholder = 'Say why there is no job card'; inp.focus(); } return; }
+    const e = { on:true, setBy:actingUserName(), at:nowIso(), noJcReason:why };
+    o.qcReport = e; o.qcTicksBy = (o.qcTicksBy || []).concat([e]); delete XQC_NOJC[id]; renderAll(); }));
 });
 
 // ---- 3 · stock block issued to the factory: a PO line on the same SO for the blocked code + "FIN" (AARA → AARAFIN)
@@ -15924,6 +15954,7 @@ renderOrderDetail = function(orderId){
   if (r !== 'sales') h = h.replace(/(<div class="f-k">)Committed deadline(<\/div><div class="f-v">)[^<]*(<\/div>)/, (m, a, b, c) => `${a}${r === 'production' ? 'Committed date' : 'Committed date to client'}${b}${o.committedDeadline ? fmtCv(o.committedDeadline) : '—'}${c}`);
   return h;
 };
+window.__xqc = { why:xQcWhy, ready:xQcReady, canTick:xQcCanTick };
 
 // ---------------------------------------------------------------- Live updates (3 Nov 2026)
 // The loader checks for other people's changes every 2 minutes (and when a hidden tab comes back), rewrites the
@@ -18534,6 +18565,95 @@ function xJcRmCell(jc){
 window.__xapr = { rules:xAprRules, named:xAprNamed, self:xAprSelf, canSee:xAprCanSee, rm:xJcRm, ui:XAPR_UI };
 // the base page (a separate script) calls these
 Object.assign(window, { renderApprovalsTab:renderApprovalsTab, xAprNamed:xAprNamed, xAprSelf:xAprSelf, xJcRm:xJcRm, xJcRmCell:xJcRmCell });
+
+// ================================================================ 27 Nov 2026 (JK): Job Card Station dashboard — link an unlinked job card to a PO line
+// Factory (production) and admin only; unlinked cards only (changing a link stays in Capture & review).
+// Suggests the PO from the card's work order (xCardPo) and the SKU line by product code; one confirm per card.
+// A PO line that already has a card: warn, allow (quantities split across cards).
+var XJL = { id:null, q:'', pick:null };
+function xJlCan(){ return ['production', 'admin'].includes(state.role); }
+var xJlN = function(v){ return String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); };
+function xJcLinkCell(jc){
+  if (!xJlCan()) return '<span class="pill warn">unlinked</span>';
+  return '<span class="pill warn">unlinked</span> <button class="btn btn-ghost btn-sm" style="margin-top:4px;" data-xjl-open="' + xe(jc.id) + '">Link</button>';
+}
+function xJlKey(r){ return r.po + '|' + r.articleCode; }
+function xJlRows(jc, q){
+  var cardPo = xCardPo(jc), sug = cardPo ? JOBCARD_ORDERS.filter(function(r){ return r.po === cardPo; }) : [];
+  var found = q && q.trim() ? jobcardOrderMatches(q).filter(function(r){ return !sug.some(function(s){ return xJlKey(s) === xJlKey(r); }); }) : [];
+  return { cardPo:cardPo, sug:sug, found:found };
+}
+function xJlOthers(r, jc){ return JOB_CARDS.filter(function(j){ return j !== jc && j.linkedPo === r.po && (!j.linkedArticleCode || j.linkedArticleCode === r.articleCode); }); }
+function xJlRowHtml(r, jc){
+  var on = XJL.pick === xJlKey(r), code = xJlN(r.articleCode) && xJlN(r.articleCode) === xJlN(jc.productCode);
+  var oth = xJlOthers(r, jc);
+  return '<label style="display:flex;gap:8px;align-items:flex-start;padding:8px;border:1px solid ' + (on ? 'var(--accent)' : 'var(--line)') + ';border-radius:8px;margin-bottom:6px;cursor:pointer;">'
+    + '<input type="radio" name="xjlPick" data-xjl-pick="' + xe(xJlKey(r)) + '" ' + (on ? 'checked' : '') + ' style="width:auto;margin-top:3px;">'
+    + '<div><div><b>' + xe(r.articleName || r.articleCode) + '</b> <span class="mono">' + xe(r.articleCode || '') + '</span>' + (code ? ' <span class="pill good">matches product code</span>' : '') + '</div>'
+    + '<div class="cell-sub"><span class="mono">' + xe(r.po) + '</span> · ' + xe(r.customer || '') + ((r.poQty || r.qty) ? ' · PO qty ' + xe(r.poQty || r.qty) : '') + '</div>'
+    + (oth.length ? '<div class="cell-sub" style="color:var(--warn,#b7791f);">Already linked: ' + oth.map(function(j){ return 'job card ' + xe(j.jobCardNumber) + ' (' + xe(j.qty) + ')'; }).join(', ') + ' — fine if the quantity is split across cards.</div>' : '')
+    + '</div></label>';
+}
+function xJlResults(jc){
+  var R = xJlRows(jc, XJL.q), h = '';
+  if (R.sug.length) h += '<div class="cell-sub" style="margin:4px 0 6px;">From the card’s work order — PO <span class="mono">' + xe(R.cardPo) + '</span>:</div>' + R.sug.map(function(r){ return xJlRowHtml(r, jc); }).join('');
+  else h += '<div class="cell-sub" style="margin:4px 0 8px;">' + (R.cardPo ? 'The card’s PO <span class="mono">' + xe(R.cardPo) + '</span> isn’t in the PO list (number misread, or not in the ERP upload yet). Search below.' : 'No work order / PO on the card. Search below.') + '</div>';
+  if (R.found.length) h += '<div class="cell-sub" style="margin:8px 0 6px;">Search results:</div>' + R.found.map(function(r){ return xJlRowHtml(r, jc); }).join('');
+  else if (XJL.q.trim()) h += '<div class="cell-sub">Nothing found for “' + xe(XJL.q) + '”.</div>';
+  return h;
+}
+function xJlModal(jc){
+  return '<div class="modal-overlay" id="xjlOverlay"><div class="modal-card" style="max-width:640px;"><div class="modal-head"><div><h3>Link job card ' + xe(jc.jobCardNumber) + '</h3>'
+    + '<div class="modal-sub">' + xe(jc.clientName || '—') + ' · product code <span class="mono">' + xe(jc.productCode || '—') + '</span> · qty ' + xe(jc.qty || '—') + (jc.workOrderNumber ? ' · work order ' + xe(jc.workOrderNumber) : '') + '</div></div>'
+    + '<button class="btn-text" id="xjlClose">×</button></div>'
+    + '<div class="modal-body"><div id="xjlRes">' + xJlResults(jc) + '</div>'
+    + '<input type="text" id="xjlQ" placeholder="Search a PO, client or article" value="' + xe(XJL.q) + '" style="width:100%;margin-top:6px;">'
+    + '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px;"><button class="btn btn-ghost" id="xjlCancel">Cancel</button><button class="btn btn-primary" id="xjlOk" ' + (XJL.pick ? '' : 'disabled') + '>Confirm link</button></div>'
+    + '<div class="cell-sub" style="margin-top:8px;">To change a link later, open the card in Capture &amp; review.</div></div></div></div>';
+}
+function xJlOpen(id){
+  var jc = JOB_CARDS.find(function(j){ return j.id === id; }); if (!jc || jc.linkedPo || !xJlCan()) return;
+  XJL.id = id; XJL.q = ''; XJL.pick = null;
+  var R = xJlRows(jc, ''), byCode = R.sug.filter(function(r){ return xJlN(r.articleCode) && xJlN(r.articleCode) === xJlN(jc.productCode); });
+  if (byCode.length === 1) XJL.pick = xJlKey(byCode[0]); else if (R.sug.length === 1) XJL.pick = xJlKey(R.sug[0]);
+  renderAll();
+}
+function xJlClose(){ XJL.id = null; XJL.q = ''; XJL.pick = null; renderAll(); }
+function xJlConfirm(){
+  var jc = JOB_CARDS.find(function(j){ return j.id === XJL.id; }); if (!jc || jc.linkedPo || !xJlCan() || !XJL.pick) return;
+  var R = xJlRows(jc, XJL.q), r = R.sug.concat(R.found).find(function(x){ return xJlKey(x) === XJL.pick; }); if (!r) return;
+  Object.assign(jc, { linkedOrderId:r.po, linkedPo:r.po, linkedCustomerName:r.customer || '', linkedArticleCode:r.articleCode || '', linkedArticleName:r.articleName || '',
+    linkedBy:actingUserName(), linkedAt:nowIso(), linkedHow:'dashboard' });
+  var n = jc.jobCardNumber; XJL.id = null; XJL.q = ''; XJL.pick = null;
+  state.xJlMsg = 'Job card ' + n + ' linked to ' + r.po + ' · ' + (r.articleName || r.articleCode);
+  renderAll();
+}
+function xJlWire(){
+  var jc = JOB_CARDS.find(function(j){ return j.id === XJL.id; });
+  var on = function(sel, ev, fn){ var el = document.querySelector(sel); if (el) el.addEventListener(ev, fn); };
+  var wirePicks = function(){ document.querySelectorAll('[data-xjl-pick]').forEach(function(i){ i.addEventListener('change', function(){ XJL.pick = i.dataset.xjlPick; var res = document.getElementById('xjlRes'); if (res) res.innerHTML = xJlResults(jc); var ok = document.getElementById('xjlOk'); if (ok) ok.disabled = false; wirePicks(); }); }); };
+  wirePicks();
+  on('#xjlQ', 'input', function(e){ XJL.q = e.target.value; var res = document.getElementById('xjlRes'); if (res) res.innerHTML = xJlResults(jc); wirePicks(); });
+  on('#xjlClose', 'click', xJlClose); on('#xjlCancel', 'click', xJlClose); on('#xjlOk', 'click', xJlConfirm);
+  on('#xjlOverlay', 'click', function(e){ if (e.target.id === 'xjlOverlay') xJlClose(); });
+}
+extraWiring.push(function(){
+  document.querySelectorAll('[data-xjl-open]').forEach(function(b){ b.addEventListener('click', function(ev){ ev.stopPropagation(); xJlOpen(b.dataset.xjlOpen); }); });
+  var c = document.querySelector('#content');
+  if (state.module === 'jobcards' && state.xJlMsg && c && !document.getElementById('xjlMsg')){
+    var tbl = c.querySelector('table.grid-table') || c.querySelector('table');
+    var m = '<div id="xjlMsg" class="part-po-note" style="margin-bottom:8px;">' + xe(state.xJlMsg) + '</div>';
+    if (tbl && tbl.closest('.card')) tbl.closest('.card').insertAdjacentHTML('beforebegin', m);
+  }
+  if (state.module !== 'jobcards'){ state.xJlMsg = ''; }
+  if (!XJL.id || state.module !== 'jobcards' || !c) return;
+  var jc = JOB_CARDS.find(function(j){ return j.id === XJL.id; }); if (!jc || jc.linkedPo){ XJL.id = null; return; }
+  c.insertAdjacentHTML('beforeend', xJlModal(jc)); xJlWire();
+  var q = document.getElementById('xjlQ'); if (q && !XJL.pick) q.focus();
+});
+ACT_LABELS.linkedHow = 'Linked from'; ACT_LABELS.linkedBy = 'Linked by';
+window.xJcLinkCell = xJcLinkCell;
+window.__xjl = { open:xJlOpen, confirm:xJlConfirm, st:XJL, rows:xJlRows };
 
 if (!routePublic() && state.currentUser) renderAll();
 })();
