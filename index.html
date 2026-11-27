@@ -15245,7 +15245,7 @@ renderJobCardCapture = function(){
   const d = state.jobcardDraft; if (!d || !xCatOn()) return h;
   const amber = (d.rmFromScan || d.rmUnsure) && !d.rmTouched;
   const read = d.rmRead && d.rmRead.status ? `Card says: <b>“${xe(d.rmRead.line || (d.rmRead.status === 'available' ? 'RM available' : 'RM not available'))}”</b> (last raw-material line that isn't crossed out)` : '';
-  const help = amber ? (d.rmUnsure ? 'The reader isn\'t sure about this line (crossed out, or a "not" / "un") — check the photo; saving confirms it.' : 'Changed by the card\'s latest raw-material line — check the photo; saving confirms it.')
+  const help = d.rmKept && !d.rmTouched ? 'RM kept as set by hand' + (d.rmKeptBy ? ' (' + xe(d.rmKeptBy) + ')' : '') + ' — the card\'s raw-material line hasn\'t changed since the last scan. You can still change it here.' : amber ? (d.rmUnsure ? 'The reader isn\'t sure about this line (crossed out, or a "not" / "un") — check the photo; saving confirms it.' : 'Changed by the card\'s latest raw-material line — check the photo; saving confirms it.')
     : xRmCanEdit() ? 'Follows the latest raw-material line in the card\'s Material Used table (e.g. "RM Available" / "RM Not Available"). You can change it. Fabric is tracked separately by its tags.'
     : 'Only the factory or an admin can change this.';
   const sec = `<div class="form-section"><div class="fs-head"><h3>Raw material</h3></div>
@@ -15256,6 +15256,22 @@ renderJobCardCapture = function(){
       </label></div>`;
   return h.replace(/<div class="form-section">\s*<div class="fs-head"><h3>Production stages<\/h3>/, m => sec + m);
 };
+// 27 Nov (JK): tick / untick RM straight from the Job Card Station dashboard (factory + admin); untick asks twice
+function xRmDashBtn(jc){
+  if (!xRmCanEdit() || !jc) return '';
+  const on = !!(jc.rmBlocked && jc.rmBlocked.on);
+  return `<div style="margin-top:4px;"><button class="btn btn-ghost btn-sm" data-xrm-dash="${xe(jc.id)}" data-on="${on ? 1 : 0}">${on ? 'Untick' : 'Tick'}</button></div>`;
+}
+window.xRmDashBtn = xRmDashBtn;
+extraWiring.push(() => {
+  document.querySelectorAll('[data-xrm-dash]').forEach(b => b.addEventListener('click', ev => {
+    ev.stopPropagation();
+    const jc = JOB_CARDS.find(x => x.id === b.dataset.xrmDash); if (!jc || !xRmCanEdit()) return;
+    const on = !!(jc.rmBlocked && jc.rmBlocked.on);
+    if (on && b.dataset.armed !== '1'){ b.dataset.armed = '1'; b.textContent = 'Untick?'; b.style.color = 'var(--critical)'; return; }
+    xSetRm(jc, !on, 'manual, from dashboard'); renderAll();
+  }));
+});
 const _rjcdCat = renderJobCardDetail;
 renderJobCardDetail = function(id){
   const h = _rjcdCat.apply(this, arguments);
@@ -15279,7 +15295,12 @@ xJcApply = function(R){
   const st = R && (R.rmStatus || (R.rmBlocked ? 'available' : '')) || '';
   d.rmPrev = saved; d.rmTouched = !!cur.rmTouched;
   d.rmRead = st ? { status:st, line:(R.rmLine || ''), sure:R.rmSure !== false } : null;
-  const fromCard = st ? st === 'available' : saved;
+  // 27 Nov (JK): only a NEW or different RM line on the card changes the tick; the same line as last scan leaves a hand-set tick (dashboard / card page) alone
+  const nl = v => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const prev = ex && ex.rmRead, same = !!(st && prev && prev.status === st && nl(prev.line) === nl(R.rmLine));
+  d.rmKept = same && (st === 'available') !== saved && !cur.rmTouched;
+  d.rmKeptBy = d.rmKept ? (((ex.rmBlocked || {}).by || '') + ((ex.rmBlocked || {}).at ? ', ' + fmtDate(String(ex.rmBlocked.at).slice(0, 10)) : '')) : '';
+  const fromCard = st && !same ? st === 'available' : saved;
   d.rmBlocked = cur.rmTouched ? !!cur.rmBlocked : fromCard;
   d.rmFromScan = !!st && fromCard !== saved && !cur.rmTouched;
   d.rmUnsure = !!st && R.rmSure === false && !cur.rmTouched;
@@ -15302,7 +15323,7 @@ saveJobcardDraft = function(){
   if (state.role === 'supply') d.rmTouched = false;
   if (d.rmRead) jc.rmRead = { status:d.rmRead.status, line:d.rmRead.line, at:nowIso(), by:actingUserName(), sure:d.rmRead.sure };
   if (d.rmTouched) xSetRm(jc, !!d.rmBlocked, 'manual, while saving a scan');
-  else if (d.rmRead) xSetRm(jc, d.rmRead.status === 'available', 'from the card: “' + (d.rmRead.line || d.rmRead.status) + '”, confirmed on save');
+  else if (d.rmRead && !d.rmKept) xSetRm(jc, d.rmRead.status === 'available', 'from the card: “' + (d.rmRead.line || d.rmRead.status) + '”, confirmed on save');
 };
 // the linked-order chip shows the PO line picked
 const _rjccfCat = renderJobCardCaptureForm;
@@ -18556,7 +18577,8 @@ function xJcRm(jc){
   if (rd && rd.status === 'not_available') return { k:'no', label:'Card says not available', by:'', at:rd.at || '', line:rd.line || '' };
   return { k:'none', label:'Not confirmed', by:'', at:'', line:(rd && rd.line) || '' };
 }
-function xJcRmCell(jc){
+function xJcRmCell(jc){ return xJcRmCell0(jc) + (window.xRmDashBtn ? window.xRmDashBtn(jc) : ''); }
+function xJcRmCell0(jc){
   var r = xJcRm(jc);
   if (r.k === 'yes') return '<span class="pill good"><span class="dot"></span>Available &amp; blocked</span><div class="cell-sub">' + xe(r.by) + (r.at ? ' · ' + fmtDate(String(r.at).slice(0, 10)) : '') + '</div>';
   if (r.k === 'no') return '<span class="pill critical"><span class="dot"></span>Card says not available</span>' + (r.line ? '<div class="cell-sub">“' + xe(r.line) + '”</div>' : '');
